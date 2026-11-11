@@ -273,11 +273,11 @@ class WebSocketSource:
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: B902 - connection errors: log, wait, retry
-                if attempt <= 1 or attempt % 30 == 0:
+                if (attempt <= 1 or attempt % 30 == 0) and self.node.context.ok():
                     log.warning(f'relay {self.url} unavailable ({type(exc).__name__}: {exc}); '
                                 f'retrying every {self.reconnect_interval:.1f} s')
             finally:
-                if self.node.connected:
+                if self.node.connected and not self._stop.is_set() and self.node.context.ok():
                     log.warning('relay connection closed')
                 self.node.connected = False
             if self._stop.is_set():

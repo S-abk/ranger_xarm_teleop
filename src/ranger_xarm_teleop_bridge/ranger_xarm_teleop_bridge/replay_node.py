@@ -69,15 +69,19 @@ class ReplaySource:
 
     def _play_once(self) -> int:
         count = 0
-        previous = None
+        start = time.monotonic()
+        first = None
         for record in iter_records(self.path):
             if self._stop.is_set():
                 break
-            if previous is not None and self.rate > 0:
-                delay = (record.t_recv - previous) / self.rate
+            if first is None:
+                first = record.t_recv
+            elif self.rate > 0:
+                # Schedule against the start time, not the previous record, so sleep
+                # overhead does not accumulate into a lower replay rate.
+                delay = start + (record.t_recv - first) / self.rate - time.monotonic()
                 if delay > 0:
                     time.sleep(min(delay, 10.0))
-            previous = record.t_recv
             self.node.handle_text(record.text(), record.t_recv)
             count += 1
         return count
