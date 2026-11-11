@@ -199,22 +199,29 @@ def analyze(records: Iterable[Record], hand: str = 'right',
     report['emulated_intervals'] = emulated_intervals
     report['present_frames'] = sum(1 for a in absent if not a)
 
-    # Position jump at re-acquisition after each absent interval.
+    # Pose jump at re-acquisition: after every interval in which the pose was not tracked
+    # (absent or emulated), compare the last tracked sample before it with the first
+    # tracked sample after it. Emulated samples never serve as reference.
+    tracked_flags = [h is not None and not h.emulated_position for h in hand_samples]
+    untracked_intervals = _intervals(times, [not t for t in tracked_flags], end_time)
     jumps = []
-    for iv in absent_intervals:
+    for iv in untracked_intervals:
         before = next((hand_samples[i] for i in range(len(samples) - 1, -1, -1)
-                       if times[i] < iv['start'] and hand_samples[i] is not None), None)
+                       if times[i] < iv['start'] and tracked_flags[i]), None)
         after = next((hand_samples[i] for i in range(len(samples))
-                      if times[i] >= iv['end'] and hand_samples[i] is not None), None)
+                      if times[i] >= iv['end'] and tracked_flags[i]), None)
         if before is not None and after is not None:
             dist = math.dist(before.position, after.position)
-            jumps.append({'after_absent_ending_at': iv['end'],
+            jumps.append({'untracked_from': iv['start'], 'reacquired_at': iv['end'],
                           'position_jump_mm': dist * 1000.0,
-                          'angle_jump_deg': _angle_between(before.orientation, after.orientation)})
+                          'angle_jump_deg': _angle_between(before.orientation, after.orientation),
+                          'pass': dist * 1000.0 < PASS_POSITION_MM
+                          and _angle_between(before.orientation, after.orientation) < PASS_ANGLE_DEG})
+    report['untracked_intervals'] = untracked_intervals
     report['reacquisition_jumps'] = jumps
 
     # Still-controller spread over tracked (present, not emulated) frames.
-    tracked = [h for h in hand_samples if h is not None and not h.emulated_position]
+    tracked = [h for h, flag in zip(hand_samples, tracked_flags) if flag]
     if tracked:
         n = len(tracked)
         mean = [sum(h.position[i] for h in tracked) / n for i in range(3)]
@@ -307,8 +314,11 @@ def format_report(report: Dict[str, Any]) -> str:
         lines.append(f"  emulated {iv['start']:.2f} .. {iv['end']:.2f} s "
                      f"({iv['duration']:.2f} s)")
     for j in report['reacquisition_jumps']:
-        lines.append(f"  re-acquired at {j['after_absent_ending_at']:.2f} s: position jump "
-                     f"{j['position_jump_mm']:.1f} mm, angle jump {j['angle_jump_deg']:.2f} deg")
+        lines.append(f"  re-acquired at {j['reacquired_at']:.2f} s (untracked since "
+                     f"{j['untracked_from']:.2f} s): position jump {j['position_jump_mm']:.1f} mm, "
+                     f"angle jump {j['angle_jump_deg']:.2f} deg  "
+                     f"[{'PASS' if j['pass'] else 'FAIL'} < {PASS_POSITION_MM:g} mm / "
+                     f"{PASS_ANGLE_DEG:g} deg]")
     sp = report['spread']
     if sp:
         lines.append(f"spread over {sp['tracked_frames']} tracked frames (still controller):")

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Copyright 2026 Shuaib Olanrewaju
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -50,7 +51,7 @@ async def play(url: str, path: str, rate: float, loop: bool, frames_only: bool) 
                 due = start + (rec.t_recv - t0) / rate if rate > 0 else start
                 delay = due - time.monotonic()
                 if delay > 0:
-                    await asyncio.sleep(min(delay, 10.0))
+                    await asyncio.sleep(delay)
                 await ws.send(rec.text())
                 sent += 1
             if not loop:

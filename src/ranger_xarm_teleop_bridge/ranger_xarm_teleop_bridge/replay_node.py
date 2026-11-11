@@ -80,8 +80,8 @@ class ReplaySource:
                 # Schedule against the start time, not the previous record, so sleep
                 # overhead does not accumulate into a lower replay rate.
                 delay = start + (record.t_recv - first) / self.rate - time.monotonic()
-                if delay > 0:
-                    time.sleep(min(delay, 10.0))
+                if delay > 0 and self._stop.wait(delay):
+                    break
             self.node.handle_text(record.text(), record.t_recv)
             count += 1
         return count

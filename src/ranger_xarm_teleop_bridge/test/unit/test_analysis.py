@@ -61,8 +61,12 @@ def test_dropped_controller_intervals_and_reacquisition():
     assert absent[0]['end'] == pytest.approx(3.0, abs=0.03)
     assert len(emulated) == 1 and emulated[0]['start'] == pytest.approx(4.0, abs=0.03)
     assert emulated[0]['end'] == pytest.approx(5.0, abs=0.03)
-    assert len(report['reacquisition_jumps']) == 1
-    assert report['reacquisition_jumps'][0]['position_jump_mm'] < 2.0
+    jumps = report['reacquisition_jumps']
+    assert [j['reacquired_at'] for j in jumps] == [pytest.approx(3.0, abs=0.03),
+                                                   pytest.approx(5.0, abs=0.03)]
+    assert jumps[0]['position_jump_mm'] < 2.0 and jumps[0]['pass']
+    assert jumps[1]['position_jump_mm'] < 2.0 and jumps[1]['pass']
+    assert len(report['untracked_intervals']) == 2
     # Emulated frames are excluded from the spread, so the 2 cm drift does not show.
     assert report['spread']['max_deviation_mm'] < 1.0
     left = analyze(records('dropped_controller'), hand='left')
