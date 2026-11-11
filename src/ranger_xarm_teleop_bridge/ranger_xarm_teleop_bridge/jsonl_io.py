@@ -57,11 +57,17 @@ def _dump_line(obj: dict) -> str:
 class RecordWriter:
     """Write relay messages to a JSONL file, flushing every line."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, overwrite: bool = False) -> None:
+        """Open ``path`` for writing; refuse an existing file unless ``overwrite`` is set."""
         self._path = os.fspath(path)
         parent = os.path.dirname(os.path.abspath(self._path))
         os.makedirs(parent, exist_ok=True)
-        self._file = open(self._path, 'w', encoding='utf-8', newline='\n')
+        mode = 'w' if overwrite else 'x'
+        try:
+            self._file = open(self._path, mode, encoding='utf-8', newline='\n')
+        except FileExistsError as err:
+            raise FileExistsError(
+                f'{self._path} exists; choose another name or pass overwrite') from err
 
     def __enter__(self) -> 'RecordWriter':
         return self
