@@ -211,12 +211,11 @@ def analyze(records: Iterable[Record], hand: str = 'right',
         after = next((hand_samples[i] for i in range(len(samples))
                       if times[i] >= iv['end'] and tracked_flags[i]), None)
         if before is not None and after is not None:
-            dist = math.dist(before.position, after.position)
+            dist_mm = math.dist(before.position, after.position) * 1000.0
+            angle = _angle_between(before.orientation, after.orientation)
             jumps.append({'untracked_from': iv['start'], 'reacquired_at': iv['end'],
-                          'position_jump_mm': dist * 1000.0,
-                          'angle_jump_deg': _angle_between(before.orientation, after.orientation),
-                          'pass': dist * 1000.0 < PASS_POSITION_MM
-                          and _angle_between(before.orientation, after.orientation) < PASS_ANGLE_DEG})
+                          'position_jump_mm': dist_mm, 'angle_jump_deg': angle,
+                          'pass': dist_mm < PASS_POSITION_MM and angle < PASS_ANGLE_DEG})
     report['untracked_intervals'] = untracked_intervals
     report['reacquisition_jumps'] = jumps
 
@@ -314,11 +313,12 @@ def format_report(report: Dict[str, Any]) -> str:
         lines.append(f"  emulated {iv['start']:.2f} .. {iv['end']:.2f} s "
                      f"({iv['duration']:.2f} s)")
     for j in report['reacquisition_jumps']:
-        lines.append(f"  re-acquired at {j['reacquired_at']:.2f} s (untracked since "
-                     f"{j['untracked_from']:.2f} s): position jump {j['position_jump_mm']:.1f} mm, "
+        verdict = 'PASS' if j['pass'] else 'FAIL'
+        lines.append(f"  re-acquired at {j['reacquired_at']:.2f} s "
+                     f"(untracked since {j['untracked_from']:.2f} s): "
+                     f"position jump {j['position_jump_mm']:.1f} mm, "
                      f"angle jump {j['angle_jump_deg']:.2f} deg  "
-                     f"[{'PASS' if j['pass'] else 'FAIL'} < {PASS_POSITION_MM:g} mm / "
-                     f"{PASS_ANGLE_DEG:g} deg]")
+                     f'[{verdict} < {PASS_POSITION_MM:g} mm / {PASS_ANGLE_DEG:g} deg]')
     sp = report['spread']
     if sp:
         lines.append(f"spread over {sp['tracked_frames']} tracked frames (still controller):")
