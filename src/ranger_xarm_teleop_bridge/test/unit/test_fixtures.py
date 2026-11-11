@@ -139,9 +139,9 @@ def test_still_controller_viewer_sweeps_and_controllers_do_not_follow():
 def test_moving_controller():
     parsed = [f for _, f in frames('moving_controller')]
     start, end = parsed[0].right, parsed[-1].right
-    assert end.position[0] - start.position[0] == pytest.approx(0.4, abs=0.01)
+    assert end.position[0] - start.position[0] == pytest.approx(0.4, abs=1e-6)
     assert end.position[1] == start.position[1] and end.position[2] == start.position[2]
-    assert angle_deg(start.orientation, end.orientation) == pytest.approx(90.0, abs=2.0)
+    assert angle_deg(start.orientation, end.orientation) == pytest.approx(90.0, abs=1e-3)
     for f in parsed:
         t = seconds(f)
         b = f.right.buttons

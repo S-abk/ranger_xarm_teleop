@@ -177,7 +177,7 @@ def moving_controller() -> List[str]:
     n = 6 * RATE_HZ
     for i in range(n):
         t = i / RATE_HZ
-        s = i / n
+        s = i / (n - 1)
         position = (RIGHT_STILL[0] + 0.4 * s, RIGHT_STILL[1], RIGHT_STILL[2])
         trigger = min(max((t - 2.0) / 2.0, 0.0), 1.0)
         stick = (0.5, -0.5) if i >= _idx(3.0) else (0.0, 0.0)
