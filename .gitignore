@@ -5,3 +5,6 @@ log/
 __pycache__/
 *.pyc
 .pytest_cache/
+# Real headset recordings stay local; promote a short clip to a test fixture when needed.
+recordings/*
+!recordings/.gitkeep

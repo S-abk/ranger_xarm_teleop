@@ -1,0 +1,12 @@
+# Written for ranger_xarm_teleop (not part of upstream vr-teleop-kit).
+# Dependencies of the vendored relay (src/vr_teleop_kit/relay/server.py), for the
+# relay's own virtual environment (.venv, installed by tools/relay_setup.sh).
+# Versions are pinned to upstream requirements.lock.txt at commit 80589ee.
+# websockets is the websocket backend used by uvicorn[standard].
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+aiortc==1.15.0
+av==15.1.0
+opencv-python-headless==4.13.0.92
+numpy==2.2.6
+websockets==17.0.1
