@@ -25,6 +25,11 @@ Published
                                  the fixed tool-to-tip transform, same stamp
   /tf_static                     arm base -> quest_world, at each calibration
 
+Service
+  /teleop/disarm                 std_srvs/Trigger: disarm (the clutch releases, the arm goes
+                                 back to MoveIt once it has stopped). There is no service
+                                 to arm: that is the arm button only.
+
 Clocks. Input staleness, the target cycle and every timeout run on the monotonic clock
 of this machine: a frame's age is measured from its local arrival, never by comparing
 header stamps from another clock. ``header.stamp`` of the outputs is this node's ROS
@@ -65,7 +70,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Joy, JointState
 from std_msgs.msg import String
-from std_srvs.srv import SetBool
+from std_srvs.srv import SetBool, Trigger
 import tf2_ros
 from tf2_msgs.msg import TFMessage
 
@@ -73,6 +78,7 @@ TARGET_TOPIC = '/teleop/target_pose'
 STATE_TOPIC = '/teleop/state'
 OWNER_TOPIC = '/teleop/mux/owner'
 SET_OWNER_SERVICE = '/teleop/mux/set_owner'
+DISARM_SERVICE = '/teleop/disarm'
 
 # Poses are published best effort, depth 1; a little depth here lets the pose, joy and
 # status of one frame be paired by stamp whatever order they arrive in.
@@ -219,6 +225,7 @@ class TeleopNode(Node):
         self.servo_params_client = self.create_client(GetParameters, f'{servo}/get_parameters')
         self.owner_client = self.create_client(SetArmOwner, SET_OWNER_SERVICE)
 
+        self.create_service(Trigger, DISARM_SERVICE, self._on_disarm)
         self.timer = self.create_timer(self.params.target_period, self._on_timer,
                                        clock=self.steady)
         self.get_logger().info(
@@ -607,6 +614,14 @@ class TeleopNode(Node):
             if wanted == ArmOwner.OWNER_TELEOP:
                 # No retry loop: the operator presses the arm button again.
                 self._disarm('ownership was refused')
+
+    def _on_disarm(self, request, response):
+        """Disarm on request; arming stays a deliberate press of the arm button."""
+        was = self.state.want_armed
+        self._disarm('requested on ' + DISARM_SERVICE)
+        response.success = True
+        response.message = 'disarmed' if was else 'was not armed'
+        return response
 
     def _disarm(self, why: str) -> None:
         if self.state.want_armed:
