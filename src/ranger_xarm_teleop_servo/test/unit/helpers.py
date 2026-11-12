@@ -28,7 +28,8 @@ FIXTURES = os.path.join(PKG_DIR, 'test', 'fixtures')
 BRIDGE_FIXTURES = os.path.join(os.path.dirname(PKG_DIR), 'ranger_xarm_teleop_bridge', 'test',
                                'fixtures')
 
-# The simulation-only values (the gate document leaves the real ones PENDING).
+# Values for these tests (the gate document leaves the real ones PENDING). The view cone
+# is 45 deg here so the fixtures cross it; the simulation-only file uses another value.
 VALUES = {
     'max_offset_translation_m': 0.30,
     'max_offset_rotation_deg': 60.0,

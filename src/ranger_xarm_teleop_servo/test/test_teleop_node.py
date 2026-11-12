@@ -404,6 +404,10 @@ def test_tool_pose_age_uses_joint_state_arrival_and_the_transform_stamp(ros):
         node.joint_state_arrival = 100.0
         node.tf_buffer = _Buffer(rclpy.time.Time().to_msg())
         assert node.measured_tool_pose() == (None, math.inf)
+        # Stamped in the future (clock reset or skew): its age cannot be judged.
+        node.tf_buffer = _Buffer((node.get_clock().now()
+                                  + rclpy.duration.Duration(seconds=5.0)).to_msg())
+        assert node.measured_tool_pose() == (None, math.inf)
     finally:
         node.close()
         node.destroy_node()
@@ -440,14 +444,140 @@ def test_servo_parameters_changed_while_running_release_the_clutch(ros):
         h.close()
 
 
-def test_servo_halt_releases_the_clutch_and_is_reported(ros):
+@pytest.mark.parametrize('code', [2, 5, 6])   # halt for singularity, for collision, joint bound
+def test_servo_halt_releases_the_clutch_and_is_reported(ros, code):
     def halt(node):
-        node.servo_status = 5                           # ServoStatus.HALT_FOR_COLLISION
+        node.servo_status = code
     h = _Midway(ros, 2.5, halt)
     try:
         h.play('clutch_line')
         assert 40 < len(h.targets) < 80
         halted = [s for s in h.states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
-        assert halted and all(s.servo_status == 5 and not s.clutch_engaged for s in halted)
+        assert halted and all(s.servo_status == code and not s.clutch_engaged for s in halted)
     finally:
         h.close()
+
+
+@pytest.mark.parametrize('code', [0, 1, 3, 4])    # no warning, and the three "decelerate" codes
+def test_servo_slowing_does_not_release_the_clutch(ros, code):
+    def slow(node):
+        node.servo_status = code
+    h = _Midway(ros, 2.5, slow)
+    try:
+        h.play('clutch_line')
+        assert len(h.targets) > 140
+        assert not any(s.hold_reason == TeleopState.HOLD_SERVO_HALTED for s in h.states)
+    finally:
+        h.close()
+
+
+class _Future:
+
+    def __init__(self, result):
+        self._result = result
+
+    def add_done_callback(self, callback):
+        callback(self)
+
+    def result(self):
+        return self._result
+
+
+class _Client:
+    """A service client that answers at once with the next prepared result."""
+
+    def __init__(self, make_result):
+        self.make_result = make_result
+        self.requests = []
+        self.ready = True
+
+    def service_is_ready(self):
+        return self.ready
+
+    def call_async(self, request):
+        self.requests.append(request)
+        return _Future(self.make_result(request))
+
+
+class _Ok:
+
+    success = True
+    message = ''
+
+
+def test_servo_management_reads_the_parameters_again_every_second(ros):
+    """The real ``manage_servo``: pause, verify, start, and re-verify while running (G-7)."""
+    node = TeleopNode(node_name='teleop_servo_management',
+                      parameter_overrides=overrides({**LIMITS, 'motion_enabled': True}))
+    try:
+        clock = {'t': 50.0}
+        node.mono = lambda: clock['t']
+        caps = {'linear': 0.25}
+        node.pause_client = _Client(lambda request: _Ok())
+        node.type_client = _Client(lambda request: _Ok())
+        node.servo_params_client = _Client(lambda request: _Result(
+            _Value(caps['linear']), _Value(1.0), _Value(bool_value=True)))
+
+        def cycle(want, dt=0.02):
+            clock['t'] += dt
+            node.manage_servo(clock['t'], want)
+
+        cycle(False)                                    # unknown -> pause
+        assert node.servo_state == teleop_node.SERVO_PAUSED
+        assert [r.data for r in node.pause_client.requests] == [True]
+        cycle(False)                                    # first verification
+        assert node.servo_verified and len(node.servo_params_client.requests) == 1
+        node.servo_status = 5                           # a halt reported before this start
+        cycle(True)                                     # pose mode, then unpause
+        assert node.servo_state == teleop_node.SERVO_ACTIVE
+        assert node.pause_client.requests[-1].data is False
+        assert node.servo_status == -1                  # ... is history once it runs again
+        for _ in range(40):                             # 0.8 s: no new read yet
+            cycle(True)
+        assert len(node.servo_params_client.requests) == 1
+        for _ in range(15):                             # past one second: read again
+            cycle(True)
+        assert len(node.servo_params_client.requests) == 2 and node.servo_verified
+        # The cap is raised while Servo runs: the next read catches it.
+        caps['linear'] = 1.0
+        for _ in range(55):
+            cycle(True)
+        assert len(node.servo_params_client.requests) == 3
+        assert not node.servo_verified and 'differ' in node.servo_refusal
+        # Put back: verified again on the next read, with no restart needed.
+        caps['linear'] = 0.25
+        for _ in range(55):
+            cycle(True)
+        assert node.servo_verified and node.servo_refusal == ''
+        # The parameter service disappears: not verified.
+        node.servo_params_client.ready = False
+        for _ in range(55):
+            cycle(True)
+        assert not node.servo_verified
+        # The gate is told so: under the clutch that is a release.
+        node.servo_state = teleop_node.SERVO_ACTIVE
+        assert not (node.servo_state == teleop_node.SERVO_ACTIVE and node.servo_verified)
+        # Not wanted any more: paused, whatever the verification state.
+        cycle(False)
+        assert node.pause_client.requests[-1].data is True
+        assert node.servo_state == teleop_node.SERVO_PAUSED
+    finally:
+        node.close()
+        node.destroy_node()
+
+
+def test_servo_that_stops_answering_is_unknown_and_unverified(ros):
+    node = TeleopNode(node_name='teleop_servo_silent',
+                      parameter_overrides=overrides({**LIMITS, 'motion_enabled': True}))
+    try:
+        node.mono = lambda: 10.0
+        node.servo_state = teleop_node.SERVO_ACTIVE
+        node.servo_verified = True
+        node.servo_call_since = 8.0                     # a call sent two seconds ago
+        node.pause_client = _Client(lambda request: _Ok())
+        node.pause_client.ready = False
+        node.manage_servo(10.0, True)
+        assert node.servo_state == teleop_node.SERVO_UNKNOWN and not node.servo_verified
+    finally:
+        node.close()
+        node.destroy_node()

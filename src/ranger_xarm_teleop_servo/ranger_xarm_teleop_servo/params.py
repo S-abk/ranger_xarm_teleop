@@ -45,6 +45,7 @@ TARGET_RATE_HZ = 50.0
 DEFAULTS = {
     'motion_enabled': False,            # G-1
     'filter_cutoff_hz': 8.0,            # 0 disables the low-pass filter
+    'view_cone_tilt_deg': 0.0,          # cone axis tilted down from the headset's forward axis
     'keep_out_planes': (),              # flat list, 4 numbers per plane: nx, ny, nz, d
     'wrist_offset': (0.0, 0.0, 0.0),    # wrist point in the tool frame (keep-out check)
     'wrist_pivot_offset': (0.0, 0.0, 0.0),
@@ -77,6 +78,7 @@ class GateParams:
     max_offset_translation: float
     max_offset_rotation: float
     view_cone_angle: float
+    view_cone_tilt: float
     step_translation_limit: float
     step_rotation_limit: float
     linear_speed_cap: float
@@ -156,6 +158,10 @@ def build_params(values: Mapping[str, Any]) -> GateParams:
     min_horizontal = float(opt('calibration_min_horizontal'))
     if not 0.0 < min_horizontal <= 1.0:
         raise ValueError('calibration_min_horizontal: expected a value in (0, 1]')
+    tilt_deg = float(opt('view_cone_tilt_deg'))
+    if not math.isfinite(tilt_deg) or not -90.0 <= tilt_deg <= 90.0:
+        raise ValueError(f'view_cone_tilt_deg: expected -90 to 90, got {tilt_deg!r}')
+    tilt = math.radians(tilt_deg)
     cone = math.radians(_positive('view_cone_half_angle_deg', values['view_cone_half_angle_deg']))
     if cone > math.pi:
         raise ValueError('view_cone_half_angle_deg: expected at most 180')
@@ -168,6 +174,7 @@ def build_params(values: Mapping[str, Any]) -> GateParams:
         max_offset_rotation=math.radians(_positive('max_offset_rotation_deg',
                                                    values['max_offset_rotation_deg'])),
         view_cone_angle=cone,
+        view_cone_tilt=tilt,
         step_translation_limit=_positive('step_translation_limit_m',
                                          values['step_translation_limit_m']),
         step_rotation_limit=math.radians(_positive('step_rotation_limit_deg',

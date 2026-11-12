@@ -27,9 +27,18 @@ def load_limits(path: str) -> dict:
     with open(path, encoding='utf-8') as handle:
         data = yaml.safe_load(handle) or {}
     merged = {}
-    for section in data.values():
-        if isinstance(section, dict):
-            merged.update(section.get('ros__parameters') or {})
+
+    def collect(section) -> None:
+        # ROS parameter files may nest namespaces and node names above ros__parameters.
+        if not isinstance(section, dict):
+            return
+        for key, value in section.items():
+            if key == 'ros__parameters' and isinstance(value, dict):
+                merged.update(value)
+            else:
+                collect(value)
+
+    collect(data)
     return merged
 
 
@@ -37,7 +46,8 @@ def load_limits(path: str) -> dict:
 # switches that guard them come from the limits file and the launch arguments only.
 RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translation_m',
             'max_offset_rotation_deg', 'view_cone_half_angle_deg', 'step_translation_limit_m',
-            'step_rotation_limit_deg', 'linear_speed_cap_m_s', 'angular_speed_cap_rad_s')
+            'step_rotation_limit_deg', 'linear_speed_cap_m_s', 'angular_speed_cap_rad_s',
+            'tool_pose_timeout_s')
 
 
 def check_extra_params_file(path: str) -> None:

@@ -176,17 +176,20 @@ def head_valid(frame: Frame) -> bool:
     return frame.head is not None and frame.head_present and not frame.head_emulated
 
 
-def view_angle(head: Pose, controller_position) -> float:
+def view_angle(head: Pose, controller_position, tilt: float = 0.0) -> float:
     """
-    Return the angle between the headset's forward axis and the direction to a point.
+    Return the angle between the view cone's axis and the direction to a point.
 
-    After the bridge's axis conversion the headset looks along its local +x.
+    After the bridge's axis conversion the headset looks along its local +x, with
+    local +z up. The cone axis is that forward axis tilted down by ``tilt`` (about the
+    headset's own left-right axis), for operators who look ahead and hold the
+    controller low.
     """
     direction = v_sub(controller_position, head.p)
     distance = v_norm(direction)
     if distance < 1e-9:
         return 0.0
-    forward = q_rotate(head.q, (1.0, 0.0, 0.0))
+    forward = q_rotate(head.q, (math.cos(tilt), 0.0, -math.sin(tilt)))
     cosine = v_dot(forward, direction) / distance
     return math.acos(max(-1.0, min(1.0, cosine)))
 
@@ -201,7 +204,8 @@ def _pose_reason(frame: Frame, params: GateParams) -> Hold:
         return Hold.HEAD_ABSENT
     if frame.head_emulated:
         return Hold.HEAD_EMULATED
-    if view_angle(frame.head, frame.controller.p) > params.view_cone_angle:
+    if view_angle(frame.head, frame.controller.p,
+                  params.view_cone_tilt) > params.view_cone_angle:
         return Hold.OUT_OF_VIEW
     return Hold.NONE
 
@@ -261,13 +265,15 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
         if tripped != Hold.NONE:
             if held or tripped != Hold.INPUT_JUMP:
                 events.append(text)
-            if trip == Hold.NONE and held:
-                trip = tripped
+            if trip in (Hold.NONE, Hold.CLUTCH_RELEASED) and held:
+                trip = tripped              # a fault outranks a plain release seen earlier
         # Cycles run at 50 Hz and frames arrive at 90 Hz: a condition that shows on
         # one frame and is gone on the next must still release the clutch, so every
         # frame is judged here, not only the newest one at the next cycle.
-        if trip == Hold.NONE and held:
-            trip = _pose_reason(frame, params)
+        if trip in (Hold.NONE, Hold.CLUTCH_RELEASED) and held:
+            reason = _pose_reason(frame, params)
+            if reason != Hold.NONE:
+                trip = reason
         if (trip == Hold.NONE and state.engaged and frame.controller_present
                 and not frame.grip):
             trip = Hold.CLUTCH_RELEASED     # a release, even if the grip closes again at once

@@ -13,7 +13,7 @@
     limits_are_simulation_only: true
     max_offset_translation_m: 0.30     # from the tool pose at clutch engagement
     max_offset_rotation_deg: 60.0
-    view_cone_half_angle_deg: 45.0     # headset forward axis to the controller
+    view_cone_half_angle_deg: 65.0     # cone axis (headset forward, see view_cone_tilt_deg) to the controller
     step_translation_limit_m: 0.030    # per 20 ms target cycle (1.5 m/s)
     step_rotation_limit_deg: 10.0      # per 20 ms target cycle (500 deg/s)
     linear_speed_cap_m_s: 0.25         # MoveIt Servo scale.linear

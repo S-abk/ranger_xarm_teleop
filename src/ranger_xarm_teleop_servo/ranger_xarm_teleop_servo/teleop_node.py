@@ -100,11 +100,15 @@ REQUEST_RETRY_S = 1.0       # pause between ownership requests after a refusal
 
 # MoveIt Servo interface states.
 SERVO_UNKNOWN, SERVO_PAUSED, SERVO_STARTING, SERVO_ACTIVE, SERVO_STOPPING = range(5)
-SERVO_HALT_CODES = (ServoStatus.HALT_FOR_SINGULARITY, ServoStatus.HALT_FOR_COLLISION)
+# Statuses in which MoveIt Servo stops the arm (a joint at its bound halts all joints).
+SERVO_HALT_CODES = (ServoStatus.HALT_FOR_SINGULARITY, ServoStatus.HALT_FOR_COLLISION,
+                    ServoStatus.JOINT_BOUND)
+FUTURE_STAMP_TOLERANCE_S = 0.05     # a transform stamped further ahead than this is not trusted
 
 _REQUIRED_DOUBLES = gate_params.REQUIRED
 _OPTIONAL = {
     'filter_cutoff_hz': Parameter.Type.DOUBLE,
+    'view_cone_tilt_deg': Parameter.Type.DOUBLE,
     'keep_out_planes': Parameter.Type.DOUBLE_ARRAY,
     'wrist_pivot_offset': Parameter.Type.DOUBLE_ARRAY,
     'pointing_axis': Parameter.Type.DOUBLE_ARRAY,
@@ -184,15 +188,15 @@ class TeleopNode(Node):
         self.static = StaticGraph()
         self.tool_to_tip: Optional[Pose] = None
         self.wrist_known = not self.wrist_frame
-        self.tf_buffer = tf2_ros.Buffer()
-        # The transforms arrive at the controller rate. They get their own thread so
-        # they never queue in front of the headset input in this node's executor.
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=True)
-        # Joint states (controller rate) only tell how fresh the robot side is. They
-        # are received by a small node on its own thread for the same reason.
+        self.tf_buffer = tf2_ros.Buffer(node=self)      # this node's clock (simulation time)
+        # Transforms and joint states arrive at the controller rate. A second node on
+        # its own executor thread receives both, so they never queue in front of the
+        # headset input in this node's executor. Joint states only tell how fresh the
+        # robot side is.
         self.joint_state_arrival: Optional[float] = None
         self.watcher = Node(f'{node_name}_watcher',
                             parameter_overrides=[self.get_parameter('use_sim_time')])
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.watcher)
         self.watcher.create_subscription(JointState, '/joint_states', self._on_joint_state, 10)
         self._watch_executor = SingleThreadedExecutor()
         self._watch_executor.add_node(self.watcher)
@@ -354,17 +358,12 @@ class TeleopNode(Node):
                     f'in {self.tool_frame}')
 
     def close(self) -> None:
-        """Stop the helper threads (joint-state watcher, transform listener) and their nodes."""
-        for executor in (self._watch_executor, getattr(self.tf_listener, 'executor', None)):
-            if executor is not None:
-                try:
-                    executor.shutdown(timeout_sec=1.0)
-                except Exception:  # noqa: B902 - already shut down with the context
-                    pass
+        """Stop the watcher thread (joint states and transforms) and its node."""
+        try:
+            self._watch_executor.shutdown(timeout_sec=1.0)
+        except Exception:  # noqa: B902 - already shut down with the context
+            pass
         self._watch_thread.join(2.0)
-        thread = getattr(self.tf_listener, 'dedicated_listener_thread', None)
-        if thread is not None:
-            thread.join(2.0)
         self.watcher.destroy_node()
 
     def _watch(self) -> None:
@@ -412,8 +411,15 @@ class TeleopNode(Node):
         stamp = rclpy.time.Time.from_msg(t.header.stamp)
         if stamp.nanoseconds <= 0:
             return None, math.inf           # a chain of static transforms only: no measurement
-        age = max(self.mono() - self.joint_state_arrival,
-                  (self.get_clock().now() - stamp).nanoseconds * 1e-9)
+        stamp_age = (self.get_clock().now() - stamp).nanoseconds * 1e-9
+        if stamp_age < -FUTURE_STAMP_TOLERANCE_S:
+            # Stamped ahead of this node's clock (clock reset or skew): its age cannot
+            # be judged, so it is not used.
+            self.get_logger().warning(
+                f'tool transform is stamped {-stamp_age:.2f} s in the future; not used',
+                throttle_duration_sec=2.0)
+            return None, math.inf
+        age = max(self.mono() - self.joint_state_arrival, stamp_age)
         return Pose((tr.x, tr.y, tr.z), (ro.x, ro.y, ro.z, ro.w)), age
 
     # ---- the target cycle ----
@@ -549,6 +555,7 @@ class TeleopNode(Node):
             self.get_logger().error('MoveIt Servo did not answer; treating it as unknown')
             self.servo_call_since = None
             self.servo_state = SERVO_UNKNOWN
+            self.servo_verified = False
         if self.servo_state == SERVO_UNKNOWN:
             if self.pause_client.service_is_ready():
                 self._call(self.pause_client, SetBool.Request(data=True), self._paused)

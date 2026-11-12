@@ -240,3 +240,15 @@ def test_move_arm_tool_sends_nothing_on_a_description_that_is_not_a_simulator(en
         process.stop()
         publisher_node.destroy_node()
         rclpy.shutdown(context=context)
+
+
+@pytest.mark.parametrize('document', [
+    {'teleop_servo': {'ros__parameters': {'limits_are_simulation_only': False}}},
+    {'/**': {'teleop_servo': {'ros__parameters': {'motion_enabled': True}}}},
+    {'/ns': {'node': {'ros__parameters': {'view_cone_half_angle_deg': 180.0}}}},
+])
+def test_extra_parameter_file_is_checked_under_any_node_or_namespace_key(tmp_path, document):
+    path = tmp_path / 'extra.yaml'
+    path.write_text(yaml.safe_dump(document), encoding='utf-8')
+    with pytest.raises(ValueError):
+        check_extra_params_file(str(path))

@@ -212,6 +212,7 @@ only: a tool frame that is not rigidly attached to the tip is refused (no target
 | no calibration for the current session id and reset count | no target |
 | measured tool pose older than 100 ms (by joint-state arrival and by the transform's stamp), or MoveIt Servo not confirmed running, or its speed caps / collision checking no longer as required (re-read every second) | no target; clutch released if engaged |
 | target beyond the offset limit from the engagement pose | clamped onto the limit |
+| (view cone) | the cone's axis is the headset's forward axis, tilted down by `view_cone_tilt_deg` (default 0) about the headset's left-right axis; its half-angle is the required `view_cone_half_angle_deg` |
 | tool point or wrist point (`wrist_frame`) beyond a keep-out plane (`keep_out_planes`, flat list `nx ny nz d` per plane, allowed side `n . x >= d`, in `xarm_link_base`) | pushed back onto the plane; if that breaks another bound, the last accepted target is kept |
 | self-collision, scene collision, singularity, joint limit | MoveIt Servo slows (`active_limit`, `servo_status`); when it halts, the clutch is released (`hold_reason` 19) so the target cannot run on ahead of a standing arm |
 

@@ -555,3 +555,54 @@ def test_servo_halt_under_the_clutch_releases_so_the_target_cannot_run_ahead():
     state = on_frame(state, frame(4), p)
     state, output = tick(state, Env(0.07, True, TOOL_START, 0.0, True), p)
     assert output.target is None and output.hold == Hold.SERVO_HALTED         # latched
+
+
+def test_view_cone_axis_can_be_tilted_down():
+    """A controller held low is outside a level cone and inside one tilted toward it."""
+    low = Pose((0.4, 0.0, 1.6 - 0.4), HAND.q)               # 45 deg below the forward axis
+    assert view_angle(HEAD, low.p) == pytest.approx(math.radians(45.0))
+    assert view_angle(HEAD, low.p, math.radians(30.0)) == pytest.approx(math.radians(15.0))
+    assert view_angle(HEAD, low.p, math.radians(45.0)) == pytest.approx(0.0, abs=1e-7)
+    # The tilt is about the headset's own left-right axis: it follows a head turn.
+    turned = Pose(HEAD.p, q_from_yaw(math.radians(90.0)))
+    low_left = (0.0, 0.4, 1.2)
+    assert view_angle(turned, low_left, math.radians(45.0)) == pytest.approx(0.0, abs=1e-7)
+    # And it narrows the view upward by the same amount.
+    high = (0.4, 0.0, 2.0)
+    assert view_angle(HEAD, high, math.radians(30.0)) == pytest.approx(math.radians(75.0))
+
+    level = run(stream(60, lambda k: low), params(view_cone_half_angle_deg=40.0),
+                state=ready_state())
+    tilted = run(stream(60, lambda k: low),
+                 params(view_cone_half_angle_deg=40.0, view_cone_tilt_deg=30.0),
+                 state=ready_state())
+    assert not targets(level) and hold_at(level, 0.5) == Hold.OUT_OF_VIEW
+    assert targets(tilted)
+
+
+def test_view_cone_tilt_defaults_to_zero_and_is_validated():
+    assert params().view_cone_tilt == 0.0
+    assert params(view_cone_tilt_deg=15.0).view_cone_tilt == pytest.approx(math.radians(15.0))
+    for bad in (91.0, -91.0, float('nan')):
+        with pytest.raises(ValueError):
+            params(view_cone_tilt_deg=bad)
+
+
+@pytest.mark.parametrize('bad, reason', [
+    ({'controller_emulated': True}, Hold.POSE_EMULATED),
+    ({'seq': 5}, Hold.SEQ_BACKWARDS),
+    ({'head_emulated': True}, Hold.HEAD_EMULATED),
+])
+def test_fault_after_a_grip_release_in_the_same_cycle_is_not_lost(bad, reason):
+    """Grip opens on one frame, a fault shows on the next, both inside one cycle."""
+    k = between_cycles()
+
+    def one(i):
+        fields = dict(bad) if i == k + 1 else {}
+        return frame(i, grip=i != k, **fields)
+    steps = run([one(i) for i in range(k + 60)], state=ready_state())
+    # The fault outranks the plain release: one engagement only, latched on the fault
+    # until the grip is released again (it is held to the end here).
+    (span,) = engaged_spans(steps)
+    assert span[1] < k / 90.0
+    assert hold_at(steps, (k + 40) / 90.0) == reason
