@@ -93,6 +93,29 @@ def test_reset_event_is_listed():
     assert before['spread']['pass_position'] and before['resets']['count'] == 0
 
 
+def test_reset_lists_the_reported_movement():
+    report = analyze(records('reset_event'), hand='left')
+    event = report['resets']['events'][0]
+    assert event['distance_m'] == pytest.approx(math.hypot(0.1, 0.05))
+    assert event['angle_deg'] == pytest.approx(10.0)
+    json.dumps(report)
+    text = format_report(report)
+    assert 'moved 0.112 m, rotated 10.00 deg' in text
+    assert 'seq 180): 0 -> 1' in text
+
+
+def test_reset_without_a_reported_movement():
+    recs = [frame(0, 0.0), frame(1, 0.1), frame(2, 0.2, reset=1), frame(3, 0.3, reset=1)]
+    report = analyze(recs, hand='right')
+    event = report['resets']['events'][0]
+    assert event['distance_m'] is None and event['angle_deg'] is None
+    assert 'movement not reported' in format_report(report)
+    # A reset_event with a null transform is also "not reported".
+    recs[2].msg['reset_event'] = {'count': 1, 'transform': None}
+    event = analyze(recs, hand='right')['resets']['events'][0]
+    assert event['distance_m'] is None and event['angle_deg'] is None
+
+
 def test_new_session_is_listed_like_a_reset():
     report = analyze(records('new_session'), hand='right')
     assert report['resets']['count'] == 0

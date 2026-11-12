@@ -46,13 +46,17 @@ republishes a recording directly through the same bridge code path (no relay nee
 | Topic | Type | QoS |
 |---|---|---|
 | `/teleop/input/left/pose`, `/teleop/input/right/pose` | `geometry_msgs/PoseStamped` in `quest_world` (raw grip pose) | best effort, depth 1 |
+| `/teleop/input/head/pose` | `geometry_msgs/PoseStamped` in `quest_world` (headset pose) | best effort, depth 1 |
 | `/teleop/input/joy` | `sensor_msgs/Joy` | best effort, depth 1 |
 | `/teleop/input/status` | `ranger_xarm_teleop_interfaces/InputStatus` | reliable, depth 10 |
 
 All messages built from one headset frame carry the identical `header.stamp` (ROS time at
 publication). A pose is published only for a controller whose pose the headset reported; a
 hand-tracked input source counts as not present and is flagged `hand_tracked` in the status.
-The headset pose is never published as a controller pose. An emulated position is published
+The headset pose is never published as a controller pose; it goes only to
+`/teleop/input/head/pose`, for every frame that has a headset pose, with the same stamp and the
+same axis conversion, and is used only to judge whether a controller is in view and for
+operator displays, never as an arm command. An emulated position is published
 with `emulated_position` set in the status.
 
 **Hands are never controllers.** When the Touch controllers are put down, the Quest 3 switches
@@ -68,7 +72,11 @@ warns when one looks like a hand.
 `InputStatus.session_id` is a random 32-bit number the web client draws each time an XR
 session starts (Start Teleop, page reload). Together with `reset_count` it identifies one
 stable `quest_world` frame: when either changes, earlier poses and the calibration no longer
-apply (safety gate G-4, G-13). Frames without `session_id`, `seq`, `t_xr` or `reset_count`
+apply (safety gate G-4, G-13). When the headset resets the reference space, the client sends
+`reset_event: {count, transform}` once on the next frame, where `transform` is how far the headset
+says the frame moved (`{position, orientation}` in WebXR axes) or `null` when it did not say; the
+bridge logs every change of `reset_count` with that distance and angle, and
+`tools/analyze_input.py` lists them per reset. Frames without `session_id`, `seq`, `t_xr` or `reset_count`
 come from an unpatched client and are rejected as malformed.
 
 ### Frames

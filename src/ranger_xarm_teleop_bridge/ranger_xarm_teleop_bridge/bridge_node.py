@@ -21,6 +21,7 @@ one conversion (INV-1, INV-6). It never raises (INV-7): malformed input is logge
 
 Per headset frame it publishes, all with the identical ``header.stamp`` (ROS time, taken once):
   /teleop/input/left/pose, /teleop/input/right/pose  geometry_msgs/PoseStamped (present hands)
+  /teleop/input/head/pose                            geometry_msgs/PoseStamped (viewer present)
   /teleop/input/joy                                  sensor_msgs/Joy
   /teleop/input/status                               ranger_xarm_teleop_interfaces/InputStatus
 """
@@ -33,7 +34,8 @@ from typing import Dict, List, Optional
 
 from geometry_msgs.msg import PoseStamped
 from ranger_xarm_teleop_bridge.axes import xr_pose_to_ros
-from ranger_xarm_teleop_bridge.frame_parse import Ignored, Malformed, parse_text, ParsedFrame
+from ranger_xarm_teleop_bridge.frame_parse import (Ignored, Malformed, parse_text, ParsedFrame,
+                                                   ResetEvent)
 from ranger_xarm_teleop_bridge.joy_layout import build_joy_arrays
 from ranger_xarm_teleop_bridge.jsonl_io import RecordWriter
 from ranger_xarm_teleop_interfaces.msg import HandStatus, InputStatus
@@ -46,6 +48,7 @@ import websockets
 
 HANDS = ('left', 'right')
 POSE_TOPICS = {hand: f'/teleop/input/{hand}/pose' for hand in HANDS}
+HEAD_POSE_TOPIC = '/teleop/input/head/pose'
 JOY_TOPIC = '/teleop/input/joy'
 STATUS_TOPIC = '/teleop/input/status'
 
@@ -65,8 +68,21 @@ class FrameMessages:
     """The messages built from one headset frame; they share one stamp."""
 
     poses: Dict[str, PoseStamped] = field(default_factory=dict)
+    # The headset pose; never a controller pose, so it is not in ``poses``.
+    head: Optional[PoseStamped] = None
     joy: Optional[Joy] = None
     status: Optional[InputStatus] = None
+
+
+def _ros_time(stamp) -> str:
+    return f'{stamp.sec}.{stamp.nanosec:09d}'
+
+
+def _reset_movement(event: ResetEvent) -> str:
+    """Describe how far the headset says a reset moved the frame."""
+    if event.position is None or event.orientation is None:
+        return 'movement not reported by the headset'
+    return f'moved {event.distance_m:.3f} m, rotated {event.angle_deg:.2f} deg'
 
 
 class BridgeNode(Node):
@@ -87,6 +103,7 @@ class BridgeNode(Node):
 
         self.pose_pubs = {hand: self.create_publisher(PoseStamped, POSE_TOPICS[hand], POSE_QOS)
                           for hand in HANDS}
+        self.head_pub = self.create_publisher(PoseStamped, HEAD_POSE_TOPIC, POSE_QOS)
         self.joy_pub = self.create_publisher(Joy, JOY_TOPIC, JOY_QOS)
         self.status_pub = self.create_publisher(InputStatus, STATUS_TOPIC, STATUS_QOS)
 
@@ -96,6 +113,7 @@ class BridgeNode(Node):
         self.ignored_types: Dict[str, int] = {}
         self.last_seq: Optional[int] = None
         self.last_session_id: Optional[int] = None
+        self.last_reset_count: Optional[int] = None
         self.connected = False
         self._frames_at_last_stats = 0
         self._last_warn = 0.0
@@ -133,11 +151,20 @@ class BridgeNode(Node):
             if result.session_id != self.last_session_id:
                 self.get_logger().info(f'XR session id {result.session_id} '
                                        f'(was {self.last_session_id}); quest_world redefined')
-            elif self.last_seq is not None and result.seq != self.last_seq + 1:
-                self.get_logger().warning(f'sequence jump {self.last_seq} -> {result.seq}',
-                                          throttle_duration_sec=LOG_THROTTLE_S)
+            else:
+                if self.last_seq is not None and result.seq != self.last_seq + 1:
+                    self.get_logger().warning(f'sequence jump {self.last_seq} -> {result.seq}',
+                                              throttle_duration_sec=LOG_THROTTLE_S)
+                if (self.last_reset_count is not None
+                        and result.reset_count != self.last_reset_count):
+                    self._log_reset(result, stamp)
+            if result.reset_event is not None:
+                self.get_logger().info(
+                    f'reset_event at ROS time {_ros_time(stamp)}, seq {result.seq}: '
+                    f'count {result.reset_event.count}, {_reset_movement(result.reset_event)}')
             self.last_session_id = result.session_id
             self.last_seq = result.seq
+            self.last_reset_count = result.reset_count
         except Exception as exc:  # noqa: B902 - a frame must never take the node down
             self._count_malformed(f'unexpected {type(exc).__name__}: {exc}')
 
@@ -177,15 +204,12 @@ class BridgeNode(Node):
                 hand_status.pose_present = True
                 hand_status.emulated_position = bool(sample.emulated_position)
                 # The one axis conversion, once per present controller pose (INV-1).
-                position, orientation = xr_pose_to_ros(sample.position, sample.orientation)
-                pose = PoseStamped()
-                pose.header.stamp = stamp
-                pose.header.frame_id = self.frame_id
-                pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = position
-                (pose.pose.orientation.x, pose.pose.orientation.y,
-                 pose.pose.orientation.z, pose.pose.orientation.w) = orientation
-                out.poses[hand] = pose
+                out.poses[hand] = self._pose_stamped(sample.position, sample.orientation, stamp)
             setattr(status, hand, hand_status)
+
+        if frame.viewer is not None:
+            # The headset pose: same conversion, same stamp, never a controller pose.
+            out.head = self._pose_stamped(frame.viewer.position, frame.viewer.orientation, stamp)
 
         axes, buttons = build_joy_arrays(frame)
         joy = Joy()
@@ -197,18 +221,40 @@ class BridgeNode(Node):
         out.status = status
         return out
 
+    def _pose_stamped(self, xr_position, xr_orientation, stamp) -> PoseStamped:
+        """Convert one WebXR pose with the one axis conversion (INV-1) into a PoseStamped."""
+        position, orientation = xr_pose_to_ros(xr_position, xr_orientation)
+        pose = PoseStamped()
+        pose.header.stamp = stamp
+        pose.header.frame_id = self.frame_id
+        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = position
+        (pose.pose.orientation.x, pose.pose.orientation.y,
+         pose.pose.orientation.z, pose.pose.orientation.w) = orientation
+        return pose
+
     def publish_frame(self, messages: FrameMessages) -> None:
         """Publish the messages of one frame; a no-op once the context is shut down."""
         if not self.context.ok():
             return
         for hand, pose in messages.poses.items():
             self.pose_pubs[hand].publish(pose)
+        if messages.head is not None:
+            self.head_pub.publish(messages.head)
         if messages.joy is not None:
             self.joy_pub.publish(messages.joy)
         if messages.status is not None:
             self.status_pub.publish(messages.status)
 
     # ---- bookkeeping ----
+
+    def _log_reset(self, frame: ParsedFrame, stamp) -> None:
+        """Log (never throttled) a change of the reference-space reset count."""
+        event = frame.reset_event
+        movement = (_reset_movement(event) if event is not None
+                    else 'movement not reported by the headset')
+        self.get_logger().info(
+            f'reference-space reset at ROS time {_ros_time(stamp)}, seq {frame.seq}: '
+            f'reset_count {self.last_reset_count} -> {frame.reset_count}, {movement}')
 
     def _warn_hand_like(self, hands: List[str], frame: ParsedFrame) -> None:
         what = []

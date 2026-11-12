@@ -14,16 +14,19 @@
 """INV-2, INV-4, INV-7: strict parsing of relay messages."""
 
 import json
+import math
 import os
 
 from parse_helpers import button, hand, load_make_fixtures, valid_frame
 import pytest
 
 from ranger_xarm_teleop_bridge.frame_parse import (
-    Ignored, Malformed, parse_message, parse_text, ParsedFrame)
+    Ignored, Malformed, ORIENTATION_NORM_TOLERANCE, parse_message, parse_text, ParsedFrame,
+    ResetEvent)
 from ranger_xarm_teleop_bridge.jsonl_io import read_records
 
 FIX = load_make_fixtures()
+FIX_TOLERANCE = ORIENTATION_NORM_TOLERANCE
 
 
 def parse(frame):
@@ -559,3 +562,117 @@ def test_every_truncation_never_raises():
                                    float('nan')])
 def test_parse_message_never_raises_on_any_value(value):
     assert isinstance(parse_message(value), (Ignored, Malformed))
+
+
+# ---- reset_event -----------------------------------------------------------------
+
+def with_reset_event(value):
+    frame = valid_frame()
+    frame['reset_event'] = value
+    return frame
+
+
+def test_reset_event_absent_is_none():
+    assert parse(valid_frame()).reset_event is None
+
+
+def test_reset_event_null_transform():
+    event = parse(with_reset_event({'count': 3, 'transform': None})).reset_event
+    assert event == ResetEvent(3, None, None)
+    assert event.distance_m is None and event.angle_deg is None
+
+
+def test_reset_event_valid_transform():
+    half = math.radians(30.0) / 2.0
+    transform = {'position': [0.3, 0.0, -0.4],
+                 'orientation': [0.0, math.sin(half), 0.0, math.cos(half)]}
+    result = parse(with_reset_event({'count': 1, 'transform': transform}))
+    assert isinstance(result, ParsedFrame)
+    event = result.reset_event
+    assert event.count == 1
+    assert event.position == (0.3, 0.0, -0.4)
+    assert event.orientation == tuple(transform['orientation'])
+    assert event.distance_m == pytest.approx(0.5)
+    assert event.angle_deg == pytest.approx(30.0)
+    assert type(event.count) is int
+    assert result.seq == 5 and result.left is not None   # the rest of the frame is unchanged
+
+
+def test_reset_event_angle_is_independent_of_the_quaternion_sign():
+    half = math.radians(30.0) / 2.0
+    q = [0.0, -math.sin(half), 0.0, -math.cos(half)]
+    event = parse(with_reset_event({'count': 1, 'transform': {'position': [0, 0, 0],
+                                                              'orientation': q}})).reset_event
+    assert event.angle_deg == pytest.approx(30.0)
+
+
+def test_reset_event_is_frozen():
+    event = parse(with_reset_event({'count': 1, 'transform': None})).reset_event
+    with pytest.raises(AttributeError):
+        event.count = 2
+
+
+GOOD_TRANSFORM = {'position': [0.1, 0.0, 0.0], 'orientation': [0.0, 0.0, 0.0, 1.0]}
+
+
+@pytest.mark.parametrize('value, fragment', [
+    (None, 'reset_event: expected an object'),
+    ([], 'reset_event: expected an object'),
+    ('x', 'reset_event: expected an object'),
+    ({}, 'reset_event.count: missing'),
+    ({'transform': None}, 'reset_event.count: missing'),
+    ({'count': -1, 'transform': None}, 'reset_event.count: expected an integer >= 0'),
+    ({'count': 1.5, 'transform': None}, 'reset_event.count: expected an integer >= 0'),
+    ({'count': True, 'transform': None}, 'reset_event.count: expected an integer >= 0'),
+    ({'count': '1', 'transform': None}, 'reset_event.count: expected an integer >= 0'),
+    ({'count': 1}, 'reset_event.transform: missing'),
+    ({'count': 1, 'transform': 'moved'}, 'reset_event.transform: expected an object or null'),
+    ({'count': 1, 'transform': []}, 'reset_event.transform: expected an object or null'),
+    ({'count': 1, 'transform': {}}, 'reset_event.transform.position: missing'),
+    ({'count': 1, 'transform': {'orientation': [0, 0, 0, 1]}},
+     'reset_event.transform.position: missing'),
+    ({'count': 1, 'transform': {'position': [0, 0, 0]}},
+     'reset_event.transform.orientation: missing'),
+    ({'count': 1, 'transform': dict(GOOD_TRANSFORM, position=[0.1, 0.0])},
+     'reset_event.transform.position: expected 3 finite numbers'),
+    ({'count': 1, 'transform': dict(GOOD_TRANSFORM, position=[0.1, 0.0, 'x'])},
+     'reset_event.transform.position: expected 3 finite numbers'),
+    ({'count': 1, 'transform': dict(GOOD_TRANSFORM, position=[0.1, 0.0, None])},
+     'reset_event.transform.position: expected 3 finite numbers'),
+    ({'count': 1, 'transform': dict(GOOD_TRANSFORM, orientation=[0.0, 0.0, 1.0])},
+     'reset_event.transform.orientation: expected 4 finite numbers'),
+    ({'count': 1, 'transform': dict(GOOD_TRANSFORM, orientation=[0.0, 0.0, 0.0, 2.0])},
+     'reset_event.transform.orientation: expected a unit quaternion'),
+    ({'count': 1, 'transform': dict(GOOD_TRANSFORM, orientation=[0.0, 0.0, 0.0, 0.0])},
+     'reset_event.transform.orientation: expected a unit quaternion'),
+])
+def test_reset_event_malformed_shapes(value, fragment):
+    assert_malformed(with_reset_event(value), fragment)
+
+
+@pytest.mark.parametrize('token', ['NaN', 'Infinity', '-Infinity'])
+def test_reset_event_non_finite_numbers_rejected(token):
+    text = json.dumps(with_reset_event({'count': 1, 'transform': GOOD_TRANSFORM}))
+    text = text.replace('[0.1, 0.0, 0.0]', f'[{token}, 0.0, 0.0]')
+    assert isinstance(parse_text(text), Malformed)
+
+
+def test_reset_event_orientation_uses_the_hand_norm_tolerance():
+    edge = 1.0 + FIX_TOLERANCE * 0.9
+    ok = dict(GOOD_TRANSFORM, orientation=[0.0, 0.0, 0.0, edge])
+    assert isinstance(parse(with_reset_event({'count': 1, 'transform': ok})), ParsedFrame)
+    bad = dict(GOOD_TRANSFORM, orientation=[0.0, 0.0, 0.0, 1.0 + FIX_TOLERANCE * 1.5])
+    assert_malformed(with_reset_event({'count': 1, 'transform': bad}), 'unit quaternion')
+
+
+def test_reset_event_fixture_frame_carries_the_event_once():
+    path = os.path.join(os.path.dirname(FIX.__file__), 'reset_event.jsonl')
+    frames = [parse_text(r.text()) for r in read_records(path)]
+    carrying = [f for f in frames if f.reset_event is not None]
+    assert len(carrying) == 1
+    rising = next(i for i in range(1, len(frames))
+                  if frames[i].reset_count != frames[i - 1].reset_count)
+    assert frames[rising] is carrying[0]
+    assert carrying[0].reset_event.count == carrying[0].reset_count == 1
+    assert carrying[0].reset_event.distance_m == pytest.approx(math.hypot(0.1, 0.05))
+    assert carrying[0].reset_event.angle_deg == pytest.approx(10.0)
