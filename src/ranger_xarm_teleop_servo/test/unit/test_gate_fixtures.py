@@ -24,13 +24,12 @@ import math
 import os
 import sys
 
+from helpers import (bridge_fixture, engaged_spans, fixture, FIXTURES, hold_at, max_step,
+                     params, PERIOD, ready_for, run, same_pose, targets, TOOL_START)
 import pytest
 from ranger_xarm_teleop_servo.frames import hold_grip
 from ranger_xarm_teleop_servo.gate import Hold
 from ranger_xarm_teleop_servo.rotations import q_between, q_from_yaw, q_mul, v_norm, v_sub
-
-from helpers import (bridge_fixture, engaged_spans, fixture, FIXTURES, hold_at, max_step,
-                     params, PERIOD, ready_for, run, same_pose, targets, TOOL_START)
 
 GRIP_ON = 1.2
 TRIGGER_AT = 2.5

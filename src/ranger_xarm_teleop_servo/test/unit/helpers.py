@@ -70,10 +70,11 @@ def run(frames, gate_params=None, **kwargs):
 
 def frame(k, controller=HAND, grip=True, rate=90.0, **fields):
     """Return frame number ``k`` of a clean stream at ``rate`` frames per second."""
-    base = dict(arrival=k / rate, xr_time=100.0 + k / rate, session_id=7, seq=1000 + k,
-                reset_count=0, controller=controller, controller_present=controller is not None,
-                controller_emulated=False, head=HEAD, head_present=True, head_emulated=False,
-                grip=grip, calibrate=False, arm=False)
+    base = {'arrival': k / rate, 'xr_time': 100.0 + k / rate, 'session_id': 7,
+            'seq': 1000 + k, 'reset_count': 0, 'controller': controller,
+            'controller_present': controller is not None, 'controller_emulated': False,
+            'head': HEAD, 'head_present': True, 'head_emulated': False, 'grip': grip,
+            'calibrate': False, 'arm': False}
     base.update(fields)
     return Frame(**base)
 

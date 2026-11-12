@@ -20,6 +20,7 @@ done
 python3 "$HERE/measure_tracking.py" record "$RUN" --duration "$SECS" &
 recorder=$!
 sleep 1
-ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:="$REC" -p start_delay_s:=1.5
+ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:="$REC" \
+  -p wait_for_subscriber_s:=15.0 -p start_delay_s:=1.0
 wait $recorder
 python3 "$HERE/measure_tracking.py" report "$RUN"

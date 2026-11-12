@@ -23,7 +23,7 @@ from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from controller_manager_msgs.srv import ListControllers
-from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
+from ranger_xarm_teleop_interfaces.msg import ArmOwner, InputStatus, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
 import rclpy
 from rclpy.action import ActionClient
@@ -111,11 +111,13 @@ class Probe:
         self.states = []            # (monotonic, TeleopState)
         self.joints = []            # (monotonic, [q1..q6])
         self.owner = None
+        self.inputs = []            # monotonic arrival of every input status
         self.moveit_controller = moveit_controller
         self.teleop_controller = teleop_controller
         self.node.create_subscription(TeleopState, '/teleop/state', self._on_state, 50)
         self.node.create_subscription(JointState, '/joint_states', self._on_joints, 50)
         self.node.create_subscription(ArmOwner, '/teleop/mux/owner', self._on_owner, 10)
+        self.node.create_subscription(InputStatus, '/teleop/input/status', self._on_input, 50)
         self.trajectory_pub = self.node.create_publisher(
             JointTrajectory, f'/{teleop_controller}/joint_trajectory', 10)
         self.action = ActionClient(self.node, FollowJointTrajectory,
@@ -152,6 +154,10 @@ class Probe:
                 self.joints.append((time.monotonic(), [msg.position[index[j]]
                                                        for j in ARM_JOINTS]))
 
+    def _on_input(self, msg):
+        with self.lock:
+            self.inputs.append(time.monotonic())
+
     def _on_owner(self, msg):
         with self.lock:
             self.owner = msg
@@ -182,6 +188,14 @@ class Probe:
     def states_since(self, t):
         with self.lock:
             return [s for when, s in self.states if when >= t]
+
+    def timed_states_since(self, t):
+        with self.lock:
+            return [(when, s) for when, s in self.states if when >= t]
+
+    def inputs_since(self, t):
+        with self.lock:
+            return [when for when in self.inputs if when >= t]
 
     def joint_positions(self):
         with self.lock:
@@ -252,9 +266,10 @@ class Probe:
         self.trajectory_pub.publish(msg)
 
 
-def replay(env, fixture, log_path, start_delay=1.5):
+def replay(env, fixture, log_path, start_delay=1.0):
     """Start the replay node on a servo fixture; return the process."""
     return Process(
         ['ros2', 'run', 'ranger_xarm_teleop_bridge', 'replay_node', '--ros-args',
          '-p', f'file:={os.path.join(SERVO_FIXTURES, fixture + ".jsonl")}',
-         '-p', f'start_delay_s:={start_delay}'], env, log_path)
+         '-p', 'wait_for_subscriber_s:=15.0', '-p', f'start_delay_s:={start_delay}'],
+        env, log_path)

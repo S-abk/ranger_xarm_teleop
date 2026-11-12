@@ -68,11 +68,11 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Joy, JointState
+from sensor_msgs.msg import JointState, Joy
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
-import tf2_ros
 from tf2_msgs.msg import TFMessage
+import tf2_ros
 
 TARGET_TOPIC = '/teleop/target_pose'
 STATE_TOPIC = '/teleop/state'
@@ -357,11 +357,12 @@ class TeleopNode(Node):
         self.servo_status = int(msg.code)
 
     def measured_tool_pose(self):
-        """Return ``(pose, age)`` of the tool frame in the base frame; ``(None, inf)`` if unknown."""
+        """Return ``(pose, age)`` of the tool in the base frame; ``(None, inf)`` if unknown."""
         if self.joint_state_arrival is None:
             return None, math.inf
         try:
-            t = self.tf_buffer.lookup_transform(self.base_frame, self.tool_frame, rclpy.time.Time())
+            t = self.tf_buffer.lookup_transform(self.base_frame, self.tool_frame,
+                                                rclpy.time.Time())
         except tf2_ros.TransformException as err:
             self.get_logger().warning(f'no tool pose: {err}', throttle_duration_sec=2.0)
             return None, math.inf
@@ -576,8 +577,8 @@ class TeleopNode(Node):
         if self.state.want_armed and self.params.motion_enabled:
             if owner != ArmOwner.OWNER_TELEOP:
                 wanted = ArmOwner.OWNER_TELEOP
-        elif owner == ArmOwner.OWNER_TELEOP and self.servo_state in (SERVO_PAUSED,
-                                                                    SERVO_UNKNOWN):
+        elif (owner == ArmOwner.OWNER_TELEOP
+              and self.servo_state in (SERVO_PAUSED, SERVO_UNKNOWN)):
             wanted = ArmOwner.OWNER_MOVEIT
         if self.state.want_armed and not self.params.motion_enabled:
             self._disarm('motion_enabled is false')

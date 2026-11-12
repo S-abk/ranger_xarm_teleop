@@ -16,6 +16,8 @@
 from dataclasses import replace
 import math
 
+from helpers import (engaged_spans, frame, HAND, HEAD, hold_at, max_step, moved, params,
+                     PERIOD, ready_state, run, stream, targets, TOOL_START)
 import numpy as np
 import pytest
 from ranger_xarm_teleop_servo.calibration import Calibration
@@ -23,9 +25,6 @@ from ranger_xarm_teleop_servo.gate import (Env, GateState, Hold, Limit, on_frame
                                            view_angle, within_bounds)
 from ranger_xarm_teleop_servo.rotations import (Pose, q_between, q_from_axis_angle, q_from_yaw,
                                                 q_mul, q_rotate, v_add, v_dot, v_norm, v_sub)
-
-from helpers import (engaged_spans, frame, HAND, HEAD, hold_at, max_step, moved, params,
-                     PERIOD, ready_state, run, stream, targets, TOOL_START)
 
 
 def still(k):
@@ -342,12 +341,12 @@ def test_no_target_without_a_calibration_for_this_session_and_reset_count():
 
 def test_calibration_button_calibrates_and_reset_invalidates_until_redone():
     def fields(k):
-        return dict(calibrate=20 <= k < 30 or 200 <= k < 210,
-                    reset_count=1 if k >= 150 else 0,
-                    grip=60 <= k < 120 or 240 <= k < 300)
+        return {'calibrate': 20 <= k < 30 or 200 <= k < 210,
+                'reset_count': 1 if k >= 150 else 0,
+                'grip': 60 <= k < 120 or 240 <= k < 300}
     pointing = Pose(HAND.p, q_from_yaw(math.radians(25.0)))
     frames = [frame(k, controller=pointing, **fields(k)) for k in range(330)]
-    steps, state = run(frames, state=GateState(want_armed=True)), None
+    steps = run(frames, state=GateState(want_armed=True))
     first, second = engaged_spans(steps)
     assert 60 / 90.0 <= first[0] and first[1] < 120 / 90.0
     assert 240 / 90.0 <= second[0]
@@ -366,12 +365,12 @@ def test_grip_held_without_calibration_then_calibrated_does_not_engage_until_reg
 
 
 @pytest.mark.parametrize('fields, text', [
-    (dict(controller_emulated=True), 'POSE_EMULATED'),
-    (dict(controller=None), None),
-    (dict(head_emulated=True), 'HEAD_EMULATED'),
-    (dict(head=None, head_present=False), 'HEAD_ABSENT'),
-    (dict(controller=Pose(HAND.p, q_from_axis_angle((0.0, 1.0, 0.0), 1.5))), 'vertical'),
-    (dict(controller=Pose((-0.5, 0.0, 1.4), HAND.q)), 'OUT_OF_VIEW'),
+    ({'controller_emulated': True}, 'POSE_EMULATED'),
+    ({'controller': None}, None),
+    ({'head_emulated': True}, 'HEAD_EMULATED'),
+    ({'head': None, 'head_present': False}, 'HEAD_ABSENT'),
+    ({'controller': Pose(HAND.p, q_from_axis_angle((0.0, 1.0, 0.0), 1.5))}, 'vertical'),
+    ({'controller': Pose((-0.5, 0.0, 1.4), HAND.q)}, 'OUT_OF_VIEW'),
 ])
 def test_calibration_is_refused_on_untrustworthy_input(fields, text):
     p = params()

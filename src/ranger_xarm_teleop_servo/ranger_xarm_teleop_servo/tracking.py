@@ -27,7 +27,7 @@ All times compared here come from the recorder's one monotonic clock.
 """
 
 import math
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Sequence
 
 import numpy as np
 

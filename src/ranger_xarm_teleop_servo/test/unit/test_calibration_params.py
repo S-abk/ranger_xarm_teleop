@@ -15,14 +15,13 @@
 
 import math
 
+from helpers import VALUES
 import pytest
 from ranger_xarm_teleop_servo.calibration import calibrate, Calibration, heading_from_pointing
 from ranger_xarm_teleop_servo.mapping import clutch_relative
 from ranger_xarm_teleop_servo.params import build_params, MissingValue, parse_planes, REQUIRED
 from ranger_xarm_teleop_servo.rotations import (Pose, q_from_axis_angle, q_from_yaw, q_mul,
                                                 q_rotate, v_sub)
-
-from helpers import VALUES
 
 X = (1.0, 0.0, 0.0)
 

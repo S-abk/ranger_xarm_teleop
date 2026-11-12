@@ -27,7 +27,7 @@ from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 
-from stack_helpers import Probe, Process, READY, replay, child_environment
+from stack_helpers import child_environment, Probe, Process, READY, replay
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
 ELSEWHERE = [0.3, -0.4, -0.9, 0.2, 1.1, -0.3]
@@ -96,7 +96,9 @@ def test_switch_is_refused_while_a_trajectory_executes_and_ownership_stays(stack
     handle = probe.send_goal(ELSEWHERE, seconds=4.0)
     assert handle.accepted
     time.sleep(1.0)
+    asked = time.monotonic()
     response = probe.set_owner(ArmOwner.OWNER_TELEOP)
+    assert time.monotonic() - asked < 2.5        # a goal in progress is refused, not waited out
     assert not response.success
     assert response.status in (ArmOwner.STATUS_REFUSED_GOAL_ACTIVE,
                                ArmOwner.STATUS_REFUSED_MOVING)

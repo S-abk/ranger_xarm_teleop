@@ -23,6 +23,9 @@ the owner. This node reports the owner and performs the switch, and only when
 * no trajectory goal is accepted, executing or canceling on either controller,
 * teleop is idle (clutch released).
 
+If the arm has only just stopped, or the joint-state stream had a hole, the request
+waits up to ``still_wait_s`` for an unbroken run of still samples before it is decided.
+
 The switch is one strict ``switch_controller`` call, confirmed by reading the
 controller states back. A refused or failed switch leaves the owner as it was; the
 reason is in the service response and in ``/teleop/mux/owner``.
@@ -79,12 +82,14 @@ class ArmMuxNode(Node):
         self.declare_parameter('still_duration_s', MuxParams.still_duration)
         self.declare_parameter('joint_state_timeout_s', MuxParams.joint_state_timeout)
         self.declare_parameter('switch_timeout_s', 3.0)
+        self.declare_parameter('still_wait_s', 1.0)
 
         self.moveit_controller = str(self.get_parameter('moveit_controller').value)
         self.teleop_controller = str(self.get_parameter('teleop_controller').value)
         manager = str(self.get_parameter('controller_manager').value).rstrip('/')
         self.joints = [str(j) for j in self.get_parameter('joints').value]
         self.switch_timeout = float(self.get_parameter('switch_timeout_s').value)
+        self.still_wait = float(self.get_parameter('still_wait_s').value)
         self.tracker = StillnessTracker(MuxParams(
             still_speed=float(self.get_parameter('still_speed_rad_s').value),
             still_duration=float(self.get_parameter('still_duration_s').value),
@@ -231,15 +236,27 @@ class ArmMuxNode(Node):
             self.owner = current
         if current == wanted:
             return MuxStatus.OK, ''
-        with self.lock:
-            goal_active = any(self.goal_status.values())
-            status = check_switch(self.mono(), self.tracker, goal_active, self.teleop_active())
-            still = self.tracker.still_for()
-            motion = self.tracker.last_motion
+        # "Stopped" needs an unbroken run of still joint-state samples. If that run is
+        # not long enough yet (the arm has just stopped, or the stream had a hole), wait
+        # for it a little; the conditions are checked again on every pass, and the
+        # switch is only requested on a pass where all of them hold.
+        deadline = self.mono() + self.still_wait
+        while True:
+            with self.lock:
+                goal_active = any(self.goal_status.values())
+                status = check_switch(self.mono(), self.tracker, goal_active,
+                                      self.teleop_active())
+                still = self.tracker.still_for()
+                motion = self.tracker.last_motion
+            if status not in (MuxStatus.REFUSED_MOVING, MuxStatus.STALE_JOINT_STATE) \
+                    or self.mono() >= deadline:
+                break
+            time.sleep(0.02)
         if status != MuxStatus.OK:
             return status, {
-                MuxStatus.REFUSED_MOVING: (f'the arm is moving or just stopped (still for {still:.2f} s; '
-                                            f'last motion: {motion})'),
+                MuxStatus.REFUSED_MOVING: (
+                    f'the arm is moving or just stopped (still for {still:.2f} s; '
+                    f'last motion: {motion})'),
                 MuxStatus.REFUSED_GOAL_ACTIVE: 'a trajectory goal is executing',
                 MuxStatus.REFUSED_TELEOP_ACTIVE: 'the teleop clutch is engaged',
                 MuxStatus.STALE_JOINT_STATE: 'no fresh joint state',

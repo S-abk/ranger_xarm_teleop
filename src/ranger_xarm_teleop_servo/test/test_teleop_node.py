@@ -332,11 +332,13 @@ def test_gate_trigger_through_the_node(harness):
 # ---- MoveIt Servo verification ----
 
 class _Value:
+
     def __init__(self, double_value=0.0, bool_value=False):
         self.double_value, self.bool_value = double_value, bool_value
 
 
 class _Result:
+
     def __init__(self, *values):
         self.values = list(values)
 

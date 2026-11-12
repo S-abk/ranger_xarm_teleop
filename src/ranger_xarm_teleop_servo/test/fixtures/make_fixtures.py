@@ -69,8 +69,8 @@ def smooth(t: float, start: float, duration: float) -> float:
 # Direction the calibrated controller points along, in WebXR axes (forward is -z).
 FORWARD = (-math.sin(math.radians(CAL_YAW_DEG)), 0.0, -math.cos(math.radians(CAL_YAW_DEG)))
 # A tilted grip, to show the mapping does not depend on how the controller is held.
-HELD = qmul(yaw(CAL_YAW_DEG), (math.sin(math.radians(-25.0)), 0.0, 0.0,
-                                math.cos(math.radians(-25.0))))
+TILT = (math.sin(math.radians(-25.0)), 0.0, 0.0, math.cos(math.radians(-25.0)))
+HELD = qmul(yaw(CAL_YAW_DEG), TILT)
 
 
 def along(distance: float) -> Vec:
@@ -79,7 +79,7 @@ def along(distance: float) -> Vec:
 
 
 def buttons(grip: bool, a: bool, b: bool) -> List[Dict[str, Any]]:
-    """Seven xr-standard buttons: [1] grip, [4] A, [5] B."""
+    """Return seven xr-standard buttons: [1] grip, [4] A, [5] B."""
     pressed = {1: grip, 4: a, 5: b}
     return [{'p': pressed.get(k, False), 't': pressed.get(k, False),
              'v': 1.0 if pressed.get(k, False) else 0.0} for k in range(7)]
@@ -87,7 +87,7 @@ def buttons(grip: bool, a: bool, b: bool) -> List[Dict[str, Any]]:
 
 def hand(position: Vec, orientation: Quat, grip: bool, a: bool = False, b: bool = False,
          emulated: bool = False) -> Dict[str, Any]:
-    """One controller entry of a frame."""
+    """Return one controller entry of a frame."""
     return {'position': [round(v, 6) for v in position],
             'orientation': [round(v, 8) for v in orientation],
             'emulated_position': emulated,
@@ -97,14 +97,14 @@ def hand(position: Vec, orientation: Quat, grip: bool, a: bool = False, b: bool 
 
 
 def viewer(orientation: Quat = (0.0, 0.0, 0.0, 1.0), emulated: bool = False) -> Dict[str, Any]:
-    """The headset entry of a frame."""
+    """Return the headset entry of a frame."""
     return {'position': list(HEAD), 'orientation': [round(v, 8) for v in orientation],
             'emulated_position': emulated}
 
 
 def line(i: int, right: Optional[Dict[str, Any]], head: Optional[Dict[str, Any]],
          reset_count: int = 0, seq: Optional[int] = None, session_id: int = SESSION_ID) -> str:
-    """One recording line for frame index ``i``."""
+    """Return one recording line for frame index ``i``."""
     t_xr = round(T_XR_START_MS + i * 1000.0 / RATE_HZ, 6)
     jitter = 0.0004 * math.sin(1.7 * i) + 0.0002 * math.sin(0.37 * i)
     frame = {'type': 'xr_frame', 't_client': round(t_xr + 0.4, 6), 't_xr': t_xr,
@@ -223,8 +223,9 @@ def clutch_into_body() -> List[str]:
 
 def gate_absent() -> List[str]:
     """Grip held; the controller is absent from 2.5 s to 3.0 s."""
-    return record(3.6, slow_motion, held_until(9.0),
-                  lambda i, t, right: line(i, None, viewer()) if TRIGGER_AT <= t < 3.0 else None)
+    def change(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        return line(i, None, viewer()) if TRIGGER_AT <= t < 3.0 else None
+    return record(3.6, slow_motion, held_until(9.0), change)
 
 
 def gate_emulated() -> List[str]:
@@ -276,8 +277,9 @@ def gate_seq_backwards() -> List[str]:
 def generate() -> Dict[str, List[str]]:
     """Return fixture name -> exact file lines (without newlines)."""
     makers = [clutch_line, clutch_circle, clutch_rotation, clutch_reengage, clutch_jump,
-              clutch_stall, clutch_release_moving, clutch_into_body, gate_absent, gate_emulated, gate_out_of_view, gate_head_emulated,
-              gate_reset, gate_session, gate_seq_backwards]
+              clutch_stall, clutch_release_moving, clutch_into_body, gate_absent,
+              gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
+              gate_seq_backwards]
     return {maker.__name__: maker() for maker in makers}
 
 
