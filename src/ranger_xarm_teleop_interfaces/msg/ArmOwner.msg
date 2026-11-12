@@ -14,7 +14,7 @@ uint8 owner
 uint8 STATUS_OK = 0
 uint8 STATUS_REFUSED_MOVING = 1         # an arm joint was moving
 uint8 STATUS_REFUSED_GOAL_ACTIVE = 2    # a trajectory goal was accepted or executing
-uint8 STATUS_REFUSED_TELEOP_ACTIVE = 3  # the clutch was engaged or MoveIt Servo was not paused
+uint8 STATUS_REFUSED_TELEOP_ACTIVE = 3  # the teleop node reported an engaged clutch
 uint8 STATUS_STALE_JOINT_STATE = 4      # no fresh joint state to judge "stopped" from
 uint8 STATUS_SWITCH_FAILED = 5          # the controller manager refused or did not confirm the switch
 uint8 status

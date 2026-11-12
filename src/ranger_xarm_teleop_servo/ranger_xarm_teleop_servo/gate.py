@@ -38,6 +38,8 @@ Rules, by ID:
 * G-6  offset limit and keep-out planes are applied after the filter and re-checked on
   the final pose; a pose that fails the re-check is replaced by the last accepted one.
 * G-10 filter and limiter state restart from the measured tool pose at every engagement.
+* While engaged, MoveIt Servo no longer running, or reporting a halt, releases the
+  clutch: a target must not move on while the arm stands still.
 * G-13 a calibration made under another (session id, reset count) is not used.
 
 A release caused by anything but the grip latches: the clutch engages again only
@@ -78,6 +80,7 @@ class Hold(IntEnum):
     STEP_REJECTED = 16
     TOOL_POSE_STALE = 17
     SERVO_NOT_READY = 18
+    SERVO_HALTED = 19
 
 
 class Limit(IntEnum):
@@ -123,6 +126,7 @@ class Env:
     tool_pose: Optional[Pose]         # measured tool pose in the arm base frame
     tool_pose_age: float              # seconds; inf when unknown
     servo_active: bool                # MoveIt Servo confirmed running in pose mode
+    servo_halted: bool = False        # MoveIt Servo reports a halt (collision, singularity)
 
 
 @dataclass(frozen=True)
@@ -251,14 +255,22 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
     calibration = state.calibration
     if prev is not None:
         tripped, text = _between_frames(prev, frame, params)
+        # Only a held or engaged clutch can be released; otherwise the levels
+        # (calibration validity, pose state) carry the condition.
+        held = state.engaged or frame.grip or bool(state.buttons and state.buttons[0])
         if tripped != Hold.NONE:
-            # Only a held or engaged clutch can be released; otherwise the levels
-            # (calibration validity, pose state) carry the condition.
-            held = state.engaged or frame.grip or bool(state.buttons and state.buttons[0])
             if held or tripped != Hold.INPUT_JUMP:
                 events.append(text)
             if trip == Hold.NONE and held:
                 trip = tripped
+        # Cycles run at 50 Hz and frames arrive at 90 Hz: a condition that shows on
+        # one frame and is gone on the next must still release the clutch, so every
+        # frame is judged here, not only the newest one at the next cycle.
+        if trip == Hold.NONE and held:
+            trip = _pose_reason(frame, params)
+        if (trip == Hold.NONE and state.engaged and frame.controller_present
+                and not frame.grip):
+            trip = Hold.CLUTCH_RELEASED     # a release, even if the grip closes again at once
     buttons = state.buttons
     if frame.controller_present:
         # Button edges, against the last frame that had a controller. The first such
@@ -298,6 +310,10 @@ def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Ho
         return Hold.NOT_CALIBRATED
     if env.tool_pose is None or not env.tool_pose_age <= params.tool_pose_timeout:
         return Hold.TOOL_POSE_STALE
+    if state.engaged and not env.servo_active:
+        return Hold.SERVO_NOT_READY         # MoveIt Servo stopped running under the clutch
+    if state.engaged and env.servo_halted:
+        return Hold.SERVO_HALTED            # the arm stands still; the target must not run on
     return Hold.NONE
 
 
@@ -402,6 +418,11 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
                                  tuple(events))
 
     reason = _condition(state, env, params, age)
+    if reason == Hold.CLUTCH_RELEASED:
+        # The grip was seen open on a frame since the last cycle. Not latched: if it is
+        # closed again, the next cycle engages afresh, with new per-engagement state.
+        events.append('clutch released')
+        return out(_released(state, latched), None, reason, Limit.NONE, False)
     if reason != Hold.NONE:
         if (state.engaged or grip_seen) and latched == Hold.NONE:
             latched = reason

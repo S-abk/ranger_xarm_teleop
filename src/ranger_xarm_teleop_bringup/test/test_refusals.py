@@ -26,8 +26,8 @@ import time
 
 from ament_index_python.packages import get_package_share_directory
 import pytest
-from ranger_xarm_teleop_bringup.limits import (check_limits_file, load_limits,
-                                               SimulationOnlyRefused)
+from ranger_xarm_teleop_bringup.limits import (check_extra_params_file, check_limits_file,
+                                               load_limits, RESERVED, SimulationOnlyRefused)
 import rclpy
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from stack_helpers import child_environment, Process
@@ -183,3 +183,60 @@ def test_only_the_mock_and_simulator_wrappers_enable_motion_and_simulation():
         assert "'simulation': 'true'" in sources[name]
         assert 'SIMULATION_ONLY_limits.yaml' in sources[name]
         assert re.search(r"'motion_enabled', default_value='true'", sources[name])
+
+
+@pytest.mark.parametrize('name', RESERVED)
+def test_extra_parameter_file_may_not_set_a_limit_or_a_guard(tmp_path, name):
+    path = tmp_path / 'extra.yaml'
+    path.write_text(yaml.safe_dump({'/**': {'ros__parameters': {name: False}}}),
+                    encoding='utf-8')
+    with pytest.raises(ValueError, match=name):
+        check_extra_params_file(str(path))
+
+
+def test_extra_parameter_file_with_other_settings_is_accepted(tmp_path):
+    path = tmp_path / 'extra.yaml'
+    path.write_text(yaml.safe_dump({'/**': {'ros__parameters': {
+        'keep_out_planes': [0.0, 0.0, 1.0, 0.1], 'wrist_frame': 'xarm_link6'}}}),
+        encoding='utf-8')
+    check_extra_params_file(str(path))
+
+
+def test_core_launch_refuses_an_extra_file_that_overrides_the_guard(env, tmp_path):
+    """The simulation-only flag cannot be switched off by a second parameter file."""
+    path = tmp_path / 'extra.yaml'
+    path.write_text(yaml.safe_dump({'/**': {'ros__parameters': {
+        'limits_are_simulation_only': False}}}), encoding='utf-8')
+    launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_core.launch.py',
+                      f'limits_file:={SIM_LIMITS}', 'simulation:=true',
+                      f'teleop_params_file:={path}'], env, str(tmp_path / 'launch.log'))
+    try:
+        code = launch.wait(60.0)
+        output = launch.output()
+        assert code is not None and code != 0, output
+        assert 'limits_are_simulation_only' in output
+        assert 'process started' not in output
+    finally:
+        launch.stop()
+
+
+def test_move_arm_tool_sends_nothing_on_a_description_that_is_not_a_simulator(env, tmp_path):
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools',
+                        'move_arm.py')
+    if not os.path.exists(tool):
+        pytest.skip('tools/ is not next to the source tree')
+    context = rclpy.Context()
+    rclpy.init(context=context, domain_id=int(env['ROS_DOMAIN_ID']))
+    publisher_node = rclpy.create_node('fake_robot_description', context=context)
+    latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    publisher = publisher_node.create_publisher(String, '/robot_description', latched)
+    publisher.publish(String(data=urdf('example_vendor/RealArmHardware')))
+    process = Process(['python3', tool], env, str(tmp_path / 'move_arm.log'))
+    try:
+        assert process.wait(40.0) == 3, process.output()
+        assert 'REFUSED, nothing sent' in process.output()
+    finally:
+        process.stop()
+        publisher_node.destroy_node()
+        rclpy.shutdown(context=context)

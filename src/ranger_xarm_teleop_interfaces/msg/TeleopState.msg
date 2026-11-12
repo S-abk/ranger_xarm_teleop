@@ -34,6 +34,7 @@ uint8 HOLD_INPUT_JUMP = 15         # G-5: raw controller motion between two head
 uint8 HOLD_STEP_REJECTED = 16      # G-5: target step beyond the per-cycle limit
 uint8 HOLD_TOOL_POSE_STALE = 17    # G-11: measured tool pose too old or unavailable
 uint8 HOLD_SERVO_NOT_READY = 18    # MoveIt Servo did not confirm it is running in pose mode
+uint8 HOLD_SERVO_HALTED = 19       # MoveIt Servo halted (collision or singularity), see servo_status
 uint8 hold_reason
 
 # Bound that shaped the target of this cycle (G-6, G-8).

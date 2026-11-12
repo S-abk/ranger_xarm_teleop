@@ -18,19 +18,28 @@ Move the simulated arm to a joint pose through a trajectory controller's action.
     tools/move_arm.py [--controller xarm6_traj_controller] [--seconds 4] q1 q2 q3 q4 q5 q6
 
 Angles in radians. Used to put the arm in a posture with room to move before a teleop
-run. Needs a sourced workspace. The goal is rejected while teleop owns the arm (the
+run. Needs a sourced workspace. **Simulation only:** it reads ``/robot_description`` and
+sends nothing unless every ros2_control hardware plugin in it is a simulator (exit
+status 3 otherwise). On a robot, move the arm through MoveIt. The goal is rejected while teleop owns the arm (the
 MoveIt controller is then inactive); that rejection is what the command mux relies on.
 Exit status 0 only when the goal was accepted and succeeded.
 """
 
 import argparse
+import os
 import sys
 
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                'src', 'ranger_xarm_teleop_servo'))
+from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
 
 READY = [0.0, -0.6, -0.7, 0.0, 1.3, 0.0]
 
@@ -50,6 +59,20 @@ def main() -> int:
                           f'/{args.controller}/follow_joint_trajectory')
     code = 1
     try:
+        description = []
+        latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        node.create_subscription(String, '/robot_description',
+                                 lambda msg: description.append(msg.data), latched)
+        for _ in range(100):
+            if description:
+                break
+            rclpy.spin_once(node, timeout_sec=0.1)
+        try:
+            require_simulator(description[0] if description else '')
+        except NotASimulator as err:
+            print(f'REFUSED, nothing sent: {err}')
+            return 3
         if not client.wait_for_server(10.0):
             print('no action server')
             return 2

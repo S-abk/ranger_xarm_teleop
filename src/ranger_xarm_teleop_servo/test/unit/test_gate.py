@@ -17,7 +17,7 @@ from dataclasses import replace
 import math
 
 from helpers import (engaged_spans, frame, HAND, HEAD, hold_at, max_step, moved, params,
-                     PERIOD, ready_state, run, stream, targets, TOOL_START)
+                     PERIOD, ready_state, run, same_pose, stream, targets, TOOL_START)
 import numpy as np
 import pytest
 from ranger_xarm_teleop_servo.calibration import Calibration
@@ -479,3 +479,79 @@ def test_calibration_changed_while_engaged_does_not_change_the_mapping():
     state, output = tick(state, Env(0.02, True, TOOL_START, 0.0, True), p)
     assert v_sub(output.target.p, TOOL_START.p) == pytest.approx((0.01, 0.0, 0.0), abs=1e-12)
     assert q_mul(output.target.q, (0.0, 0.0, 0.0, 1.0)) == pytest.approx(TOOL_START.q)
+
+
+# ---- conditions that show on a frame between two cycles ----
+
+def between_cycles():
+    """Return k such that frames k and k + 1 both arrive between the same two cycles."""
+    for k in range(40, 200):
+        if math.floor(k / 90.0 / PERIOD) == math.floor((k + 1) / 90.0 / PERIOD) \
+                and (k / 90.0) % PERIOD > 1e-6:
+            return k
+    raise AssertionError('no such frame')
+
+
+@pytest.mark.parametrize('fields, reason', [
+    ({'controller_emulated': True}, Hold.POSE_EMULATED),
+    ({'controller': None}, Hold.POSE_ABSENT),
+    ({'head_emulated': True}, Hold.HEAD_EMULATED),
+    ({'head': None, 'head_present': False}, Hold.HEAD_ABSENT),
+    ({'head': Pose(HEAD.p, q_from_yaw(math.radians(120.0)))}, Hold.OUT_OF_VIEW),
+])
+def test_condition_on_one_frame_between_two_cycles_still_releases(fields, reason):
+    """Valid, bad, valid within one 20 ms cycle: the newest frame alone would hide it."""
+    k = between_cycles()
+    frames = [frame(i, **(fields if i == k else {})) for i in range(k + 60)]
+    steps = run(frames, state=ready_state())
+    (span,) = engaged_spans(steps)
+    assert span[1] < k / 90.0
+    assert hold_at(steps, (k + 1) / 90.0 + PERIOD) == reason
+    assert hold_at(steps, (k + 50) / 90.0) == reason        # latched while the grip is held
+
+
+def test_grip_opened_and_closed_within_one_cycle_restarts_the_engagement():
+    """G-2, G-10: a release seen on a single frame is a release; state starts afresh."""
+    k = between_cycles()
+
+    def motion(i):
+        return moved(HAND, dx=0.1 * i / 90.0)
+    frames = stream(k + 90, motion, grip=lambda i: i != k)
+    steps = run(frames, state=ready_state())
+    first, second = engaged_spans(steps)
+    assert first[1] < k / 90.0 < second[0] <= k / 90.0 + 4 * PERIOD
+    events = [e for s in steps for e in s.output.events]
+    assert sum('clutch engaged' in e for e in events) == 2
+    by_time = dict(targets(steps))
+    assert same_pose(by_time[second[0]], by_time[first[1]])      # restarted from the tool pose
+    assert max_step(steps)[0] < 0.004
+
+
+def engaged_state(p):
+    state = ready_state()
+    for i in range(3):
+        state = on_frame(state, frame(i), p)
+    state, output = tick(state, Env(0.03, True, TOOL_START, 0.0, True), p)
+    assert output.engaged
+    return on_frame(state, frame(3), p)
+
+
+def test_servo_no_longer_running_under_the_clutch_releases():
+    p = params()
+    state, output = tick(engaged_state(p), Env(0.05, True, TOOL_START, 0.0, False), p)
+    assert output.target is None and not output.engaged
+    assert output.hold == Hold.SERVO_NOT_READY and not output.want_servo_active
+    state = on_frame(state, frame(4), p)
+    state, output = tick(state, Env(0.07, True, TOOL_START, 0.0, True), p)
+    assert output.target is None and output.hold == Hold.SERVO_NOT_READY      # latched
+
+
+def test_servo_halt_under_the_clutch_releases_so_the_target_cannot_run_ahead():
+    p = params()
+    env = Env(0.05, True, TOOL_START, 0.0, True, servo_halted=True)
+    state, output = tick(engaged_state(p), env, p)
+    assert output.target is None and not output.engaged
+    assert output.hold == Hold.SERVO_HALTED
+    state = on_frame(state, frame(4), p)
+    state, output = tick(state, Env(0.07, True, TOOL_START, 0.0, True), p)
+    assert output.target is None and output.hold == Hold.SERVO_HALTED         # latched

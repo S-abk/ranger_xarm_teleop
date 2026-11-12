@@ -44,6 +44,7 @@ from collections import deque
 from dataclasses import replace
 import math
 import sys
+import threading
 import time
 from typing import Dict, Optional
 
@@ -64,7 +65,7 @@ from ranger_xarm_teleop_servo.static_frames import StaticGraph
 from rcl_interfaces.srv import GetParameters
 import rclpy
 from rclpy.clock import Clock, ClockType
-from rclpy.executors import ExternalShutdownException
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -94,10 +95,12 @@ TF_STATIC_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
 PAIR_WAIT_S = 0.02          # how long a status waits for the pose and joy of its frame
 OWNER_TIMEOUT_S = 0.5       # mux state older than this counts as "no owner"
 SERVICE_TIMEOUT_S = 1.0     # a Servo or mux call without an answer is abandoned
+VERIFY_PERIOD_S = 1.0       # how often MoveIt Servo's caps and collision checking are re-read
 REQUEST_RETRY_S = 1.0       # pause between ownership requests after a refusal
 
 # MoveIt Servo interface states.
 SERVO_UNKNOWN, SERVO_PAUSED, SERVO_STARTING, SERVO_ACTIVE, SERVO_STOPPING = range(5)
+SERVO_HALT_CODES = (ServoStatus.HALT_FOR_SINGULARITY, ServoStatus.HALT_FOR_COLLISION)
 
 _REQUIRED_DOUBLES = gate_params.REQUIRED
 _OPTIONAL = {
@@ -182,14 +185,26 @@ class TeleopNode(Node):
         self.tool_to_tip: Optional[Pose] = None
         self.wrist_known = not self.wrist_frame
         self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        # The transforms arrive at the controller rate. They get their own thread so
+        # they never queue in front of the headset input in this node's executor.
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=True)
+        # Joint states (controller rate) only tell how fresh the robot side is. They
+        # are received by a small node on its own thread for the same reason.
         self.joint_state_arrival: Optional[float] = None
+        self.watcher = Node(f'{node_name}_watcher',
+                            parameter_overrides=[self.get_parameter('use_sim_time')])
+        self.watcher.create_subscription(JointState, '/joint_states', self._on_joint_state, 10)
+        self._watch_executor = SingleThreadedExecutor()
+        self._watch_executor.add_node(self.watcher)
+        self._watch_thread = threading.Thread(target=self._watch, daemon=True)
+        self._watch_thread.start()
 
         # Simulation check and MoveIt Servo verification.
         self.robot_description_checked = not self.simulation_only
         self.started = self.mono()
         self.servo_state = SERVO_UNKNOWN
         self.servo_verified = False
+        self.servo_verified_at = -math.inf
         self.servo_call_since: Optional[float] = None
         self.servo_status = -1
         self.servo_refusal = ''
@@ -201,6 +216,9 @@ class TeleopNode(Node):
         self.owner_request_since: Optional[float] = None
         self.owner_retry_after = 0.0
         self.published_calibration = None
+        self._cycle_started: Optional[float] = None
+        self._cycle_took = 0.0
+        self._cycle_slowest = ''
         self.last_hold = None
 
         self.target_pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 10)
@@ -214,7 +232,6 @@ class TeleopNode(Node):
         self.create_subscription(Joy, JOY_TOPIC, self._on_joy, JOY_QOS)
         self.create_subscription(InputStatus, STATUS_TOPIC, self._on_status, STATUS_QOS)
         self.create_subscription(TFMessage, '/tf_static', self._on_tf_static, TF_STATIC_QOS)
-        self.create_subscription(JointState, '/joint_states', self._on_joint_state, 10)
         self.create_subscription(String, '/robot_description', self._on_robot_description,
                                  LATCHED_QOS)
         self.create_subscription(ArmOwner, OWNER_TOPIC, self._on_owner, 10)
@@ -336,8 +353,28 @@ class TeleopNode(Node):
                     f'wrist point {self.wrist_frame} at {[round(v, 4) for v in found.p]} m '
                     f'in {self.tool_frame}')
 
+    def close(self) -> None:
+        """Stop the helper threads (joint-state watcher, transform listener) and their nodes."""
+        for executor in (self._watch_executor, getattr(self.tf_listener, 'executor', None)):
+            if executor is not None:
+                try:
+                    executor.shutdown(timeout_sec=1.0)
+                except Exception:  # noqa: B902 - already shut down with the context
+                    pass
+        self._watch_thread.join(2.0)
+        thread = getattr(self.tf_listener, 'dedicated_listener_thread', None)
+        if thread is not None:
+            thread.join(2.0)
+        self.watcher.destroy_node()
+
+    def _watch(self) -> None:
+        try:
+            self._watch_executor.spin()
+        except Exception:  # noqa: B902 - ends with the context; staleness then stops motion
+            pass
+
     def _on_joint_state(self, msg: JointState) -> None:
-        self.joint_state_arrival = self.mono()
+        self.joint_state_arrival = self.mono()      # one assignment: safe across threads
 
     def _on_robot_description(self, msg: String) -> None:
         if not self.simulation_only or self.robot_description_checked:
@@ -367,14 +404,33 @@ class TeleopNode(Node):
             self.get_logger().warning(f'no tool pose: {err}', throttle_duration_sec=2.0)
             return None, math.inf
         tr, ro = t.transform.translation, t.transform.rotation
-        # Freshness is the local arrival of the newest joint state (monotonic clock).
-        return (Pose((tr.x, tr.y, tr.z), (ro.x, ro.y, ro.z, ro.w)),
-                self.mono() - self.joint_state_arrival)
+        # Two ages, the larger counts. (1) On the monotonic clock: the local arrival of
+        # the newest joint state; a robot side that stops reporting ages in real time
+        # whatever any clock says. (2) The transform's own stamp against this node's
+        # ROS time (both from the clock the robot side runs on): a transform that is
+        # old by its stamp is stale however recently a joint state arrived.
+        stamp = rclpy.time.Time.from_msg(t.header.stamp)
+        if stamp.nanoseconds <= 0:
+            return None, math.inf           # a chain of static transforms only: no measurement
+        age = max(self.mono() - self.joint_state_arrival,
+                  (self.get_clock().now() - stamp).nanoseconds * 1e-9)
+        return Pose((tr.x, tr.y, tr.z), (ro.x, ro.y, ro.z, ro.w)), age
 
     # ---- the target cycle ----
 
     def _on_timer(self) -> None:
         now = self.mono()
+        # A cycle that starts late means this process was not running its callbacks
+        # (a blocking call, or the machine was busy); the gate will see stale input.
+        # Say so, with where the previous cycle spent its time (G-11).
+        if self._cycle_started is not None and now - self._cycle_started > 3 * \
+                self.params.target_period:
+            self.get_logger().warning(
+                f'late cycle: {(now - self._cycle_started) * 1000.0:.0f} ms since the previous '
+                f'one, which took {self._cycle_took * 1000.0:.0f} ms '
+                f'(longest step: {self._cycle_slowest})')
+        self._cycle_started = now
+        marks = [('input', now)]
         self._assemble()
         if self.simulation_only and not self.robot_description_checked:
             limit = float(self.get_parameter('robot_description_timeout_s').value)
@@ -383,13 +439,17 @@ class TeleopNode(Node):
                     'simulation-only limit values, but no robot description arrived to show '
                     'that this is a simulation')
         owner = self.current_owner(now)
+        marks.append(('robot description', self.mono()))
         tool, tool_age = self.measured_tool_pose()
         ready = (self.robot_description_checked and self.tool_to_tip is not None
                  and self.wrist_known)
         env = Env(now=now, owner_is_teleop=owner == ArmOwner.OWNER_TELEOP,
                   tool_pose=tool if ready else None, tool_pose_age=tool_age,
-                  servo_active=self.servo_state == SERVO_ACTIVE)
+                  servo_active=self.servo_state == SERVO_ACTIVE and self.servo_verified,
+                  servo_halted=self.servo_status in SERVO_HALT_CODES)
+        marks.append(('tool pose', self.mono()))
         self.state, output = tick(self.state, env, self.params)
+        marks.append(('gate', self.mono()))
         for event in output.events:
             self.get_logger().info(event)
         if output.hold != self.last_hold:
@@ -404,10 +464,17 @@ class TeleopNode(Node):
         stamp = self.get_clock().now().to_msg()
         if output.target is not None:
             self.publish_target(output.target, stamp)
+        marks.append(('publish target', self.mono()))
         self.publish_calibration(stamp)
         self.manage_servo(now, output.want_servo_active)
+        marks.append(('servo calls', self.mono()))
         self.manage_ownership(now, owner)
+        marks.append(('mux calls', self.mono()))
         self.state_pub.publish(self.build_state(output, owner, tool, stamp))
+        marks.append(('publish state', self.mono()))
+        steps = [(b[1] - a[1], b[0]) for a, b in zip(marks, marks[1:])]
+        self._cycle_took = marks[-1][1] - now
+        self._cycle_slowest = '%s %.0f ms' % (max(steps)[1], max(steps)[0] * 1000.0)
 
     def publish_target(self, target: Pose, stamp) -> None:
         """Publish the tool-frame target and the same target at the servo tip, one stamp."""
@@ -486,21 +553,27 @@ class TeleopNode(Node):
             if self.pause_client.service_is_ready():
                 self._call(self.pause_client, SetBool.Request(data=True), self._paused)
             return
-        if not self.servo_verified:
-            if self.servo_params_client.service_is_ready() and not self.servo_refusal:
+        if not want_active and self.servo_state in (SERVO_ACTIVE, SERVO_STARTING):
+            self.servo_state = SERVO_STOPPING
+            self._call(self.pause_client, SetBool.Request(data=True), self._paused)
+            return
+        # MoveIt Servo's parameters can be changed while it runs, so they are read again
+        # every VERIFY_PERIOD_S, also under an engaged clutch (G-7).
+        if now - self.servo_verified_at >= VERIFY_PERIOD_S:
+            if self.servo_params_client.service_is_ready():
                 request = GetParameters.Request(names=[
                     'moveit_servo.scale.linear', 'moveit_servo.scale.rotational',
                     'moveit_servo.check_collisions'])
                 self._call(self.servo_params_client, request, self._verified)
+                return
+            self.servo_verified = False     # cannot be read: not verified
+        if not self.servo_verified:
             return
         if want_active and self.servo_state == SERVO_PAUSED:
             self.servo_state = SERVO_STARTING
             self._call(self.type_client,
                        ServoCommandType.Request(command_type=ServoCommandType.Request.POSE),
                        self._type_set)
-        elif not want_active and self.servo_state in (SERVO_ACTIVE, SERVO_STARTING):
-            self.servo_state = SERVO_STOPPING
-            self._call(self.pause_client, SetBool.Request(data=True), self._paused)
 
     def _call(self, client, request, done) -> None:
         self.servo_call_since = self.mono()
@@ -526,24 +599,36 @@ class TeleopNode(Node):
 
     def _verified(self, result) -> None:
         values = result.values
+        refusal = ''
         if len(values) != 3:
-            self.servo_refusal = 'MoveIt Servo did not report its speed caps'
+            refusal = 'MoveIt Servo did not report its speed caps'
         else:
-            linear, rotational, collisions = (values[0].double_value, values[1].double_value,
-                                              values[2].bool_value)
-            if abs(linear - self.params.linear_speed_cap) > 1e-9 \
-                    or abs(rotational - self.params.angular_speed_cap) > 1e-9:
-                self.servo_refusal = (
-                    f'MoveIt Servo speed caps ({linear} m/s, {rotational} rad/s) differ from '
+            refusal = self._servo_mismatch(values)
+        self.servo_verified_at = self.mono()
+        if refusal:
+            if refusal != self.servo_refusal:
+                self.get_logger().error(refusal + '; teleop is disabled until it is corrected')
+            self.servo_refusal = refusal
+            self.servo_verified = False     # the gate releases the clutch on the next cycle
+            return
+        if not self.servo_verified:
+            self.get_logger().info(
+                'MoveIt Servo verified: speed caps match, collision checking on')
+        self.servo_refusal = ''
+        self.servo_verified = True
+
+    def _servo_mismatch(self, values) -> str:
+        """Return why MoveIt Servo's parameters are not acceptable, or ''."""
+        linear, rotational, collisions = (values[0].double_value, values[1].double_value,
+                                          values[2].bool_value)
+        if abs(linear - self.params.linear_speed_cap) > 1e-9 \
+                or abs(rotational - self.params.angular_speed_cap) > 1e-9:
+            return (f'MoveIt Servo speed caps ({linear} m/s, {rotational} rad/s) differ from '
                     f'the limit values ({self.params.linear_speed_cap} m/s, '
                     f'{self.params.angular_speed_cap} rad/s)')
-            elif not collisions:
-                self.servo_refusal = 'MoveIt Servo collision checking is off'
-        if self.servo_refusal:
-            self.get_logger().error(self.servo_refusal + '; teleop stays disabled')
-            return
-        self.servo_verified = True
-        self.get_logger().info('MoveIt Servo verified: speed caps match, collision checking on')
+        if not collisions:
+            return 'MoveIt Servo collision checking is off'
+        return ''
 
     def _type_set(self, result) -> None:
         if not result.success or self.servo_state != SERVO_STARTING:
@@ -555,6 +640,7 @@ class TeleopNode(Node):
 
     def _unpaused(self, result) -> None:
         if result.success and self.servo_state == SERVO_STARTING:
+            self.servo_status = -1          # a halt reported before this start is history
             self.servo_state = SERVO_ACTIVE
         else:
             self.servo_state = SERVO_UNKNOWN
@@ -649,6 +735,7 @@ def main(args=None) -> None:
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        node.close()
         node.destroy_node()
         rclpy.try_shutdown()
     sys.exit(code)

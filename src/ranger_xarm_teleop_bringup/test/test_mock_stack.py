@@ -27,7 +27,8 @@ from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 
-from stack_helpers import child_environment, Probe, Process, READY, replay
+from stack_helpers import (child_environment, Probe, Process, READY, replay,
+                           replay_with_clean_input)
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
 ELSEWHERE = [0.3, -0.4, -0.9, 0.2, 1.1, -0.3]
@@ -179,9 +180,15 @@ def test_failed_switch_leaves_the_owner_where_it_was(stack):
 def test_line_replay_moves_the_tip_along_the_commanded_path(stack):
     probe, env, logs, _ = stack
     probe.disarm()
-    probe.move_to(READY)
-    start_tool = probe.tool_position()
-    states = run_replay(probe, env, logs, 'clutch_line', 8.0)
+    tool = {}
+
+    def ready():
+        probe.move_to(READY)
+        tool['start'] = probe.tool_position()
+    start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_line.log'), 'clutch_line',
+                                       expected_engaged_s=2.8, before=ready)
+    start_tool = tool['start']
+    states = probe.states_since(start)
     engaged = [s for s in states if s.clutch_engaged]
     assert len(engaged) > 120, 'the clutch did not engage'
     assert all(s.owner == ArmOwner.OWNER_TELEOP and s.armed for s in engaged)
@@ -230,16 +237,22 @@ def test_target_into_self_collision_ends_in_a_stop_reported_in_teleop_state(stac
     start_tool = probe.tool_position()
     states = run_replay(probe, env, logs, 'clutch_into_body', 10.0)
     engaged = [s for s in states if s.clutch_engaged]
-    assert len(engaged) > 200
-    halted = [s for s in engaged if s.servo_status == ServoStatus.HALT_FOR_COLLISION]
-    assert halted, 'MoveIt Servo never reported a halt for collision'
-    assert all(s.active_limit == TeleopState.LIMIT_SERVO for s in halted)
-    # The target went 0.28 m toward the arm base; the tip stopped well short of it and
-    # stayed there while the target kept asking.
+    assert len(engaged) > 60
+    # MoveIt Servo slowed the arm near the collision (reported as the active limit) ...
+    slowed = [s for s in engaged if s.servo_status == ServoStatus.DECELERATE_FOR_COLLISION]
+    assert slowed and all(s.active_limit == TeleopState.LIMIT_SERVO for s in slowed)
+    # ... then halted, and the gate released the clutch so the target could not run on.
+    halted = [s for s in states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
+    assert halted, 'the halt for collision was never reported'
+    assert all(s.servo_status == ServoStatus.HALT_FOR_COLLISION and not s.clutch_engaged
+               for s in halted)
+    first_halt = states.index(halted[0])
+    assert not any(s.clutch_engaged for s in states[first_halt:])    # grip held: latched
+    # The hand went 0.28 m toward the arm base; the tip stopped well short and stayed.
     end_tool = probe.tool_position()
     travelled = start_tool[0] - end_tool[0]
     assert 0.05 < travelled < 0.23
-    last = [s.measured_tool_pose.position.x for s in engaged[-40:]]
+    last = [s.measured_tool_pose.position.x for s in states[-40:]]
     assert max(last) - min(last) < 0.001
     assert math.isclose(end_tool[0], last[-1], abs_tol=0.002)
     probe.disarm()

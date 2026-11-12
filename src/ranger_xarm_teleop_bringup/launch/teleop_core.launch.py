@@ -32,7 +32,7 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from ranger_xarm_teleop_bringup.limits import check_limits_file
+from ranger_xarm_teleop_bringup.limits import check_extra_params_file, check_limits_file
 import yaml
 
 
@@ -108,6 +108,7 @@ def launch_setup(context, *args, **kwargs):
 
     teleop_parameters = [limits_file]
     if arg('teleop_params_file'):
+        check_extra_params_file(arg('teleop_params_file'))     # raises: no overriding
         teleop_parameters.append(arg('teleop_params_file'))
     teleop_parameters.append({'motion_enabled': _true(arg('motion_enabled')),
                               'tool_frame': arg('tool_frame'),

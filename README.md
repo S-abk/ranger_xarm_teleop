@@ -168,7 +168,7 @@ ros2 launch ranger_xarm_gazebo sim.launch.py headless:=true          # terminal 
 ros2 launch ranger_xarm_teleop_bringup teleop_sim.launch.py          # terminal 2 (starts move_group too)
 # then the input: the live bridge (see above) or a recording
 ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:=<recording.jsonl> \
-    -p wait_for_subscriber_s:=15.0 -p start_delay_s:=1.0
+    -p wait_for_subscriber_s:=15.0 -p start_delay_s:=3.0
 ```
 
 **Operating it** (right controller):
@@ -207,20 +207,21 @@ only: a tool frame that is not rigidly attached to the tip is refused (no target
 | `motion_enabled` false (the default), not armed, or teleop does not own the arm | no target |
 | grip released | no target from that cycle on |
 | no input for 100 ms, measured from local arrival on a monotonic clock | clutch released |
-| controller pose absent or emulated; headset pose absent or emulated; controller outside the view cone; reset count or session id changed; sequence or headset time went backwards | clutch released |
+| controller pose absent or emulated; headset pose absent or emulated; controller outside the view cone; reset count or session id changed; sequence or headset time went backwards (judged on every headset frame, not only the newest one at each 50 Hz cycle) | clutch released |
 | raw controller motion between two headset frames faster than the per-cycle limit allows (checked before filtering), or a step of the final target beyond the per-cycle limit | clutch released, never slowed into a smaller jump |
 | no calibration for the current session id and reset count | no target |
-| measured tool pose older than 100 ms, or MoveIt Servo not confirmed running | no target |
+| measured tool pose older than 100 ms (by joint-state arrival and by the transform's stamp), or MoveIt Servo not confirmed running, or its speed caps / collision checking no longer as required (re-read every second) | no target; clutch released if engaged |
 | target beyond the offset limit from the engagement pose | clamped onto the limit |
 | tool point or wrist point (`wrist_frame`) beyond a keep-out plane (`keep_out_planes`, flat list `nx ny nz d` per plane, allowed side `n . x >= d`, in `xarm_link_base`) | pushed back onto the plane; if that breaks another bound, the last accepted target is kept |
-| self-collision, scene collision, singularity, joint limit | MoveIt Servo slows and halts; `active_limit` and `servo_status` report it |
+| self-collision, scene collision, singularity, joint limit | MoveIt Servo slows (`active_limit`, `servo_status`); when it halts, the clutch is released (`hold_reason` 19) so the target cannot run on ahead of a standing arm |
 
 **The limit values have no defaults.** Maximum offset, view cone, per-cycle limits and speed
 caps are required parameters; the teleop node exits if one is missing. For simulation,
 `config/SIMULATION_ONLY_limits.yaml` supplies values. That file marks itself simulation-only:
 the node then starts only if every ros2_control hardware plugin in the robot description is a
 simulator, and `teleop_core.launch.py` refuses the file unless called with `simulation:=true`,
-which only `teleop_mock.launch.py` and `teleop_sim.launch.py` do. A robot needs its own limits
+which only `teleop_mock.launch.py` and `teleop_sim.launch.py` do. An extra parameter file
+(`teleop_params_file`) may not set a limit value, `motion_enabled` or the simulation-only flag. A robot needs its own limits
 file, written by whoever is responsible for it, and its own launch path.
 
 Clocks: MoveIt Servo, the mux, the teleop node and the controllers use simulation time under a
@@ -240,7 +241,7 @@ the clutch is released. A refused or failed switch leaves the owner as it was an
 ### Measuring a run
 
 ```bash
-tools/move_arm.py [--controller xarm_xarm6_traj_controller]      # a posture with room to move
+tools/move_arm.py [--controller xarm_xarm6_traj_controller]      # a posture with room to move (simulation only)
 tools/replay_measured.sh src/ranger_xarm_teleop_servo/test/fixtures/clutch_circle.jsonl /tmp/run.jsonl
 tools/measure_tracking.py report /tmp/run.jsonl
 ```
@@ -249,4 +250,10 @@ reports, per engagement, the distance of the measured tip from the commanded pat
 following error and lag, the delay from controller motion to joint motion, and how far the tip
 travels after the last target. The fixtures `clutch_*.jsonl` and `gate_*.jsonl` are synthetic
 (`test/fixtures/make_fixtures.py`); `clip_*.jsonl` are cuts of real headset recordings.
+
+Timing note: when a new ROS participant joins the graph (a command-line tool, a node being
+started), DDS endpoint matching can delay messages or block a publish call for 0.1 to 0.3 s.
+Under a held clutch that is a release on stale data (`hold_reason` 6 or 17), by design. The
+teleop node logs `late cycle: ...` when its own cycle was delayed. Start a replay with
+`wait_for_subscriber_s` and a few seconds of `start_delay_s`, as above.
 

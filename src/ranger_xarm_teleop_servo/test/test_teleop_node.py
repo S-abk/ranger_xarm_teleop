@@ -87,6 +87,7 @@ class Harness:
         self.tool = TOOL_START
         node.measured_tool_pose = lambda: (self.tool, 0.0)
         node.manage_servo = self._servo
+        node.servo_verified = True
         node.manage_ownership = self._ownership
         node.owner = ArmOwner.OWNER_MOVEIT
         node.owner_arrival = 0.0
@@ -111,6 +112,7 @@ class Harness:
         self.node.owner_arrival = now
 
     def close(self):
+        self.node.close()
         self.node.destroy_node()
 
     def feed(self, parsed, arrival, drop=()):
@@ -179,6 +181,7 @@ def test_motion_enabled_defaults_to_false_and_then_nothing_is_published(ros):
     try:
         assert node.params.motion_enabled is False
     finally:
+        node.close()
         node.destroy_node()
     quiet = Harness(ros, motion_enabled=False)
     try:
@@ -359,3 +362,92 @@ def test_servo_with_matching_caps_and_collision_checking_is_accepted(harness):
     h = harness()
     h.node._verified(_Result(_Value(0.25), _Value(1.0), _Value(bool_value=True)))
     assert h.node.servo_verified and not h.node.servo_refusal
+
+
+# ---- reviewer findings: tool pose stamp, Servo re-verification, Servo halt ----
+
+class _Buffer:
+    """A TF buffer that returns one transform with a chosen stamp."""
+
+    def __init__(self, stamp):
+        self.stamp = stamp
+
+    def lookup_transform(self, target, source, when):
+        t = TransformStamped()
+        t.header.stamp = self.stamp
+        t.transform.translation.x = 0.3
+        t.transform.rotation.w = 1.0
+        return t
+
+
+def test_tool_pose_age_uses_joint_state_arrival_and_the_transform_stamp(ros):
+    node = TeleopNode(node_name='teleop_tool_age',
+                      parameter_overrides=overrides({**LIMITS, 'motion_enabled': True}))
+    try:
+        node.tf_buffer = _Buffer(node.get_clock().now().to_msg())
+        node.joint_state_arrival = None
+        assert node.measured_tool_pose() == (None, math.inf)        # no joint state yet
+        node.mono = lambda: 100.0
+        node.joint_state_arrival = 100.0                            # a joint state just arrived
+        pose, age = node.measured_tool_pose()
+        assert pose.p == (0.3, 0.0, 0.0) and age < 0.05
+        # Old by its stamp, however fresh the joint state.
+        node.tf_buffer = _Buffer((node.get_clock().now()
+                                  - rclpy.duration.Duration(seconds=0.5)).to_msg())
+        pose, age = node.measured_tool_pose()
+        assert age > 0.45 and age > node.params.tool_pose_timeout
+        # Fresh by its stamp, but the joint states stopped half a second ago (real time).
+        node.tf_buffer = _Buffer(node.get_clock().now().to_msg())
+        node.joint_state_arrival = 99.5
+        assert node.measured_tool_pose()[1] == pytest.approx(0.5)
+        # No time in the transform at all (static chain): not a measurement.
+        node.joint_state_arrival = 100.0
+        node.tf_buffer = _Buffer(rclpy.time.Time().to_msg())
+        assert node.measured_tool_pose() == (None, math.inf)
+    finally:
+        node.close()
+        node.destroy_node()
+
+
+class _Midway(Harness):
+    """A harness that changes something on the node at a given time."""
+
+    def __init__(self, bridge, at, change, **params):
+        super().__init__(bridge, **params)
+        self.at, self.change = at, change
+
+    def tick(self, now):
+        if now >= self.at and self.change is not None:
+            self.change(self.node)
+            self.change = None
+        super().tick(now)
+
+
+def test_servo_parameters_changed_while_running_release_the_clutch(ros):
+    """G-7: the caps are read again while running; a change ends the engagement."""
+    def raise_cap(node):
+        node._verified(_Result(_Value(0.25), _Value(1.0), _Value(bool_value=True)))
+        assert node.servo_verified
+        node._verified(_Result(_Value(1.0), _Value(1.0), _Value(bool_value=True)))
+    h = _Midway(ros, 2.5, raise_cap)
+    try:
+        h.play('clutch_line')
+        assert not h.node.servo_verified and 'differ' in h.node.servo_refusal
+        assert 40 < len(h.targets) < 80                 # engaged at 1.2 s, released at 2.5 s
+        after = [s for s in h.states if s.hold_reason == TeleopState.HOLD_SERVO_NOT_READY]
+        assert after and not any(s.clutch_engaged for s in h.states[-60:])
+    finally:
+        h.close()
+
+
+def test_servo_halt_releases_the_clutch_and_is_reported(ros):
+    def halt(node):
+        node.servo_status = 5                           # ServoStatus.HALT_FOR_COLLISION
+    h = _Midway(ros, 2.5, halt)
+    try:
+        h.play('clutch_line')
+        assert 40 < len(h.targets) < 80
+        halted = [s for s in h.states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
+        assert halted and all(s.servo_status == 5 and not s.clutch_engaged for s in halted)
+    finally:
+        h.close()

@@ -33,6 +33,22 @@ def load_limits(path: str) -> dict:
     return merged
 
 
+# What an extra parameter file of the teleop node may not set: the limit values and the
+# switches that guard them come from the limits file and the launch arguments only.
+RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translation_m',
+            'max_offset_rotation_deg', 'view_cone_half_angle_deg', 'step_translation_limit_m',
+            'step_rotation_limit_deg', 'linear_speed_cap_m_s', 'angular_speed_cap_rad_s')
+
+
+def check_extra_params_file(path: str) -> None:
+    """Raise ``ValueError`` when an extra parameter file sets a limit or a guard switch."""
+    found = sorted(set(load_limits(path)) & set(RESERVED))
+    if found:
+        raise ValueError(
+            f'{path} sets {", ".join(found)}: limit values and their guards may only come '
+            'from the limits file and the launch arguments')
+
+
 def check_limits_file(path: str, simulation: bool) -> dict:
     """
     Return the limit values of ``path``; refuse simulation-only values outside simulation.

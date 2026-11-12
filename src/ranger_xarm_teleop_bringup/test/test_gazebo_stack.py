@@ -34,7 +34,8 @@ import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from rcl_interfaces.srv import GetParameters
 
-from stack_helpers import child_environment, kill_gz_partition, Probe, Process, READY, replay
+from stack_helpers import (child_environment, kill_gz_partition, Probe, Process, READY,
+                           replay_with_clean_input)
 
 pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
                                 reason='set TELEOP_TEST_GAZEBO=1 to run the Gazebo tests')
@@ -99,19 +100,23 @@ def test_time_source_of_every_node(stack):
     probe, _, _ = stack
     for node_name in ('servo_node', 'teleop_servo', 'arm_mux', 'move_group', TELEOP, MOVEIT):
         assert use_sim_time(probe, node_name) is True, node_name
+    # Six new clients were just announced to every node. While endpoints are being
+    # matched a publish call can block for 0.1-0.2 s, which under a held clutch is a
+    # (correct) release on stale input; let the discovery settle before the replays.
+    time.sleep(3.0)
 
 
 def test_line_replay_moves_the_tip_along_the_commanded_path(stack):
     probe, env, logs = stack
     probe.disarm()
-    start_tool = probe.tool_position()
-    start = time.monotonic()
-    process = replay(env, 'clutch_line', str(logs / 'replay_line.log'))
-    try:
-        assert process.wait(60.0) == 0, process.output()
-    finally:
-        process.stop()
-    time.sleep(1.5)
+    tool = {}
+
+    def ready():
+        probe.move_to(READY, seconds=4.0)
+        tool['start'] = probe.tool_position()
+    start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_line.log'), 'clutch_line',
+                                       expected_engaged_s=2.8, before=ready)
+    start_tool = tool['start']
     engaged = [s for s in probe.states_since(start) if s.clutch_engaged]
     assert len(engaged) > 120
     end_tool = probe.tool_position()
@@ -131,18 +136,15 @@ def test_input_timeout_is_100_ms_of_real_time_not_of_simulation_time(stack):
     # Slow the simulation before the run (changing it while the clutch is held makes
     # the joint states pause, which the gate rightly answers with TOOL_POSE_STALE).
     set_real_time_factor(env, 0.3)              # simulation time now runs at 0.3 x real time
-    process = None
     try:
         time.sleep(2.0)
         slowed_at = time.monotonic()
-        start = slowed_at
-        process = replay(env, 'clutch_stall', str(logs / 'replay_stall.log'))
-        assert process.wait(60.0) == 0, process.output()
-        time.sleep(0.5)
+        # The recording has its own 0.5 s hole 1.3 s after the grip closes; a run in
+        # which the stream broke before that is repeated.
+        start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_stall.log'),
+                                           'clutch_stall', expected_engaged_s=1.1)
     finally:
         set_real_time_factor(env, 1.0)
-        if process is not None:
-            process.stop()
 
     states = probe.timed_states_since(start)
     assert any(s.clutch_engaged for _, s in states), 'the clutch did not engage'

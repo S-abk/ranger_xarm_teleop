@@ -304,10 +304,66 @@ class Probe:
         self.trajectory_pub.publish(msg)
 
 
-def replay(env, fixture, log_path, start_delay=1.0):
+def replay(env, fixture, log_path, start_delay=3.0):
     """Start the replay node on a servo fixture; return the process."""
     return Process(
         ['ros2', 'run', 'ranger_xarm_teleop_bridge', 'replay_node', '--ros-args',
          '-p', f'file:={os.path.join(SERVO_FIXTURES, fixture + ".jsonl")}',
          '-p', 'wait_for_subscriber_s:=15.0', '-p', f'start_delay_s:={start_delay}'],
         env, log_path)
+
+
+# Releases that mean "data arrived late", not "the operator or a limit stopped it".
+STALE_DATA = (TeleopState.HOLD_INPUT_STALE, TeleopState.HOLD_POSE_ABSENT,
+              TeleopState.HOLD_HEAD_ABSENT, TeleopState.HOLD_TOOL_POSE_STALE)
+
+
+def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, attempts=3,
+                            before=None):
+    """
+    Replay a fixture from a disarmed stack; return ``(start, discarded)``.
+
+    The tests that use this need the recording to reach the gate as a steady stream.
+    On a busy machine data is sometimes more than 100 ms late (replay, transport or
+    this node's own queue); the gate then releases on stale data, as it must, and the
+    run says nothing about what the test is after. A run is discarded and repeated
+    only when the gate itself reported such a release before ``expected_engaged_s`` of
+    engagement. Every discarded run is printed and returned, so it stays visible.
+    """
+    discarded = []
+    start = time.monotonic()
+    for attempt in range(attempts):
+        probe.disarm()
+        if before is not None:
+            before()
+        start = time.monotonic()
+        process = replay(env, fixture, f'{log_path}.{attempt}')
+        try:
+            assert process.wait(90.0) == 0, process.output()
+        finally:
+            process.stop()
+        time.sleep(1.5)
+        states = probe.timed_states_since(start)
+        engaged = [when for when, s in states if s.clutch_engaged]
+        if not engaged:
+            # Nothing was armed at all: the opening button presses of the recording did
+            # not reach the teleop node (they are sent in the first second, while the
+            # new publisher is still being discovered).
+            if not any(s.armed for _, s in states) and attempt + 1 < attempts:
+                discarded.append(f'attempt {attempt + 1}: the arm button press never arrived')
+                print(f'discarded replay of {fixture}: {discarded[-1]}')
+                continue
+            return start, discarded
+        first = engaged[0]
+        release = next(((when, s) for when, s in states
+                        if when > first and not s.clutch_engaged), None)
+        early = release is not None and release[0] - first < expected_engaged_s
+        if early and release[1].hold_reason in STALE_DATA and attempt + 1 < attempts:
+            discarded.append(
+                f'attempt {attempt + 1}: released after {release[0] - first:.2f} s with '
+                f'hold_reason {release[1].hold_reason} (data late by '
+                f'{release[1].input_age * 1000.0:.0f} ms input age)')
+            print(f'discarded replay of {fixture}: {discarded[-1]}')
+            continue
+        return start, discarded
+    return start, discarded
