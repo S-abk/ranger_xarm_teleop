@@ -335,12 +335,20 @@ def analyze(records: Iterable[Record], hand: str = 'right',
     # (quest_world) and, for comparison, relative to the headset. A room-fixed pose has a
     # small room spread and a headset spread that grows with the head motion; a pose that
     # follows the head shows the opposite.
+    # The PASS/FAIL verdict against the still-controller line only makes sense over a window
+    # the caller chose as the still part (``t_from``/``t_to``); over a whole recording the hand
+    # usually moves at some point, so without a window the numbers are reported and
+    # ``pass_position``/``pass_angle`` stay None.
+    windowed = t_from is not None or t_to is not None
     tracked = [h for h, flag in zip(hand_samples, tracked_flags) if flag]
     if tracked:
         report['spread'] = _spread([h.position for h in tracked],
                                    [h.orientation for h in tracked])
-        report['spread']['pass_position'] = report['spread']['max_deviation_mm'] < PASS_POSITION_MM
-        report['spread']['pass_angle'] = report['spread']['max_angle_deg'] < PASS_ANGLE_DEG
+        report['spread']['windowed'] = windowed
+        report['spread']['pass_position'] = (
+            report['spread']['max_deviation_mm'] < PASS_POSITION_MM if windowed else None)
+        report['spread']['pass_angle'] = (
+            report['spread']['max_angle_deg'] < PASS_ANGLE_DEG if windowed else None)
         in_viewer = [_in_viewer_frame(h, s.frame.viewer)
                      for h, flag, s in zip(hand_samples, tracked_flags, samples)
                      if flag and s.frame.viewer is not None]
@@ -386,6 +394,13 @@ def analyze(records: Iterable[Record], hand: str = 'right',
                                         for s in samples) / len(samples)),
     }
     return report
+
+
+def _verdict(passed: Optional[bool], line: str) -> str:
+    """Bracketed PASS/FAIL against ``line``, or the no-window note when there is no verdict."""
+    if passed is None:
+        return '[no verdict without a window]'
+    return f"[{'PASS' if passed else 'FAIL'} {line}]"
 
 
 def format_report(report: Dict[str, Any]) -> str:
@@ -448,13 +463,18 @@ def format_report(report: Dict[str, Any]) -> str:
                      f'[{verdict} < {PASS_POSITION_MM:g} mm / {PASS_ANGLE_DEG:g} deg]')
     sp = report['spread']
     if sp:
-        lines.append(f"spread over {sp['tracked_frames']} tracked frames (still controller):")
+        if sp['windowed']:
+            lines.append(f"spread over {sp['tracked_frames']} tracked frames in the window "
+                         '(still-controller verdict):')
+        else:
+            lines.append(f"spread over {sp['tracked_frames']} tracked frames "
+                         '(no verdict without a window: give the still part with --from/--to):')
         std = sp['std_mm']
         p2p = sp['peak_to_peak_mm']
         lines.append(f'  position std (mm) x/y/z: {std[0]:.2f} / {std[1]:.2f} / {std[2]:.2f}   '
                      f'peak-to-peak (mm): {p2p[0]:.2f} / {p2p[1]:.2f} / {p2p[2]:.2f}')
         lines.append(f"  max deviation from mean: {sp['max_deviation_mm']:.2f} mm  "
-                     f"[{'PASS' if sp['pass_position'] else 'FAIL'} < {PASS_POSITION_MM:g} mm]")
+                     f'{_verdict(sp["pass_position"], f"< {PASS_POSITION_MM:g} mm")}')
         sh = report['spread_in_headset']
         if sh:
             lines.append(f"  relative to the headset: max deviation {sh['max_deviation_mm']:.2f} "
@@ -463,7 +483,7 @@ def format_report(report: Dict[str, Any]) -> str:
                          '(room-fixed pose: room spread small, headset spread follows the head)')
         lines.append(f"  orientation: max {sp['max_angle_deg']:.3f} deg, "
                      f"rms {sp['rms_angle_deg']:.3f} deg from mean  "
-                     f"[{'PASS' if sp['pass_angle'] else 'FAIL'} < {PASS_ANGLE_DEG:g} deg]")
+                     f'{_verdict(sp["pass_angle"], f"< {PASS_ANGLE_DEG:g} deg")}')
     else:
         lines.append('spread: no tracked frames for this hand')
     v = report['viewer']

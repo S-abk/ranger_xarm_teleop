@@ -19,6 +19,16 @@ Quest ``xr-standard`` gamepad: ``buttons[0]`` trigger, ``[1]`` squeeze (grip),
 ``[5]`` B or Y; ``axes[0], [1]`` touchpad (unused), ``axes[2], [3]`` thumbstick
 x and y, raw and not flipped.
 
+Measured on a Quest 3 Touch Plus (right controller, ``recordings/button_clip.jsonl``,
+fixture ``clip_controller_buttons.jsonl``): every index above is confirmed; the trigger
+and grip analog values reach 1.0 when pressed; stick x is negative to the left and
+positive to the right. Stick y: with the stated order of the pushes (up, then down) it is
+positive when pushed up (forward) and negative when pulled down (back, toward the user);
+this is the opposite of the Gamepad API convention and stays provisional until a lone
+stick-up push is recorded. ``buttons[7]`` .. ``[11]`` are capacitive touch sensors
+(thumb rest, proximity) that report ``touched`` and analog values but never ``pressed``;
+``[2]`` and ``[6]`` are always silent. None of them is mapped.
+
 Output, left block then right block. A missing hand, a source that is not a
 real controller (``ParsedFrame.controller``), or a missing button or axis, gives
 zeros.

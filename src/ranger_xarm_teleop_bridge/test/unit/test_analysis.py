@@ -44,8 +44,13 @@ def frame(seq, t, pos=(0.2, 0.9, -0.4), reset=0, client_offset=0.0, hand='right'
 def test_still_controller_is_still_while_the_head_turns():
     report = analyze(records('still_controller'), hand='right')
     sp = report['spread']
-    assert sp['max_deviation_mm'] < 1.0 and sp['pass_position']
-    assert sp['max_angle_deg'] < 0.1 and sp['pass_angle']
+    assert sp['max_deviation_mm'] < 1.0 and sp['max_angle_deg'] < 0.1
+    # No window given: the numbers are reported, the verdict is not.
+    assert sp['windowed'] is False
+    assert sp['pass_position'] is None and sp['pass_angle'] is None
+    windowed = analyze(records('still_controller'), hand='right', t_from=0.0)['spread']
+    assert windowed['windowed'] is True
+    assert windowed['pass_position'] is True and windowed['pass_angle'] is True
     assert report['absent_intervals'] == [] and report['emulated_intervals'] == []
     assert report['resets']['count'] == 0 and report['seq']['missing'] == 0
     assert report['viewer']['yaw_span_deg'] > 170
@@ -79,8 +84,11 @@ def test_reset_event_is_listed():
     assert report['resets']['count'] == 1
     assert report['resets']['events'][0]['at'] == pytest.approx(2.5, abs=0.03)
     assert report['resets']['final_reset_count'] == 1
-    # The jump at the reset makes the whole file fail the still test; a window before it passes.
-    assert not report['spread']['pass_position']
+    # The jump at the reset makes the whole file fail the still line; a window before it passes.
+    assert report['spread']['max_deviation_mm'] >= 10.0
+    assert report['spread']['pass_position'] is None   # no window, no verdict
+    whole = analyze(records('reset_event'), hand='left', t_from=0.0)
+    assert whole['spread']['pass_position'] is False
     before = analyze(records('reset_event'), hand='left', t_to=2.4)
     assert before['spread']['pass_position'] and before['resets']['count'] == 0
 
@@ -98,7 +106,8 @@ def test_new_session_is_listed_like_a_reset():
     # seq restarted: reported as a jump, not as missing frames.
     assert report['seq']['jumps'] == [{'from': 179, 'to': 0, 'at': pytest.approx(2.5, abs=0.03)}]
     assert report['seq']['missing'] == 0
-    assert not report['spread']['pass_position']
+    assert report['spread']['max_deviation_mm'] >= 10.0
+    assert report['spread']['pass_position'] is None
     before = analyze(records('new_session'), hand='right', t_to=2.4)
     assert before['spread']['pass_position'] and before['sessions']['count'] == 0
     text = format_report(report)
@@ -169,8 +178,27 @@ def test_sources_and_gamepad_summary():
 def test_moving_controller_is_not_still():
     report = analyze(records('moving_controller'), hand='right')
     assert report['spread']['max_deviation_mm'] > 100
-    assert not report['spread']['pass_position']
-    assert not report['spread']['pass_angle']
+    assert report['spread']['pass_position'] is None and report['spread']['pass_angle'] is None
+    windowed = analyze(records('moving_controller'), hand='right', t_from=0.0, t_to=10.0)
+    assert windowed['spread']['pass_position'] is False
+    assert windowed['spread']['pass_angle'] is False
+
+
+def test_spread_verdict_only_with_a_window():
+    # Either bound makes a window; the text says so instead of printing a misleading verdict.
+    recs = records('still_controller')
+    whole = format_report(analyze(recs, hand='right'))
+    assert whole.count('[no verdict without a window]') == 2
+    assert 'no verdict without a window: give the still part with --from/--to' in whole
+    assert '[PASS < 10 mm]' not in whole and '[FAIL < 10 mm]' not in whole
+    assert '[PASS < 2 deg]' not in whole and '[FAIL < 2 deg]' not in whole
+    for kwargs in ({'t_from': 0.0}, {'t_to': 5.0}, {'t_from': 1.0, 't_to': 5.0}):
+        text = format_report(analyze(recs, hand='right', **kwargs))
+        assert 'still-controller verdict' in text
+        assert '[PASS < 10 mm]' in text and '[PASS < 2 deg]' in text
+        assert 'no verdict' not in text
+    moving = format_report(analyze(records('moving_controller'), hand='right', t_from=0.0))
+    assert '[FAIL < 10 mm]' in moving and '[FAIL < 2 deg]' in moving
 
 
 def test_malformed_fixture_counts():

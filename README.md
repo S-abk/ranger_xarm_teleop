@@ -92,27 +92,47 @@ Axes (float), left block then right block:
 |---|---|---|---|---|---|---|---|---|
 | | L trigger value | L grip value | L stick x | L stick y | R trigger value | R grip value | R stick x | R stick y |
 
-Values are the raw WebXR `xr-standard` gamepad values (stick y is positive when pushed back).
-A missing hand, or a source that is not a real controller, gives zeros for its block.
+Values are the raw WebXR `xr-standard` gamepad values, not flipped. A missing hand, or a
+source that is not a real controller, gives zeros for its block.
 
-Verification status against a real Quest 3 Touch Plus recording (`recordings/occlusion.jsonl`,
-12 buttons, 4 axes, controller held but not operated): index 1 (grip) is consistent with the
-analog squeeze value (partial values up to 0.23 while touched); every other index is
-**unverified** (nothing was pressed, no stick motion). The headset also reports capacitive
-touch on indices 0, 4, 5, 7, 8, 9, 10 and analog values on 7..10 (thumb rest / proximity
-sensors, not mapped). A button-by-button recording is needed to confirm 0, 3, 4, 5 and
-`axes[2]`, `axes[3]`; the `gamepad activity` table of `tools/analyze_input.py` shows per-index
-pressed/touched counts and value ranges for that purpose.
+**Verified on a Quest 3 Touch Plus** (`recordings/button_clip.jsonl`, right controller, each
+control operated once in the order trigger, grip, thumbstick click, A, B, stick full left, right,
+up, down; nine 0.1 s cuts of it are the fixture `test/fixtures/clip_controller_buttons.jsonl`,
+checked by `test/unit/test_real_clips.py`):
+
+| Control | XR source | Joy (right block) | Measured |
+|---|---|---|---|
+| trigger | `buttons[0]` | button 5, axis 4 | pressed, analog value 1.0 |
+| grip | `buttons[1]` | button 6, axis 5 | pressed, analog value 1.0 |
+| thumbstick click | `buttons[3]` | button 7 | pressed |
+| A (X on the left) | `buttons[4]` | button 8 | pressed |
+| B (Y on the left) | `buttons[5]` | button 9 | pressed |
+| stick x | `axes[2]` | axis 6 | **left is negative** (−0.98), right positive (+0.90) |
+| stick y | `axes[3]` | axis 7 | **provisional:** the third push gave +0.98 and the fourth −0.98; with the stated order (up, then down) **down (back, toward the user) is negative** and up (forward) positive |
+
+`axes[0]`, `axes[1]` (touchpad) stay 0.0; `buttons[2]` and `[6]` never report anything.
+**`buttons[7]`..`[11]` are capacitive touch sensors** (thumb rest and proximity): they report
+`touched` (indices 7–10 on most frames, 11 on a few) and analog values up to 1.0, and never
+report `pressed`. They are not mapped. The stick-y sign above is the opposite of the Gamepad
+API's standard-mapping convention (negative up) and rests on the order the controls were
+operated in, so it stays provisional until one stick-up push is recorded on its own; the bridge
+publishes the raw value either way. The left controller has not been recorded; its block is
+expected to use the same indices but is unverified.
 
 ## Recordings
 
 The bridge's `record_path` parameter and `tools/record_relay.py` write the raw relay text, one
 JSON object per line: `{"t_recv": <unix s>, "msg": {...}}` (or `"raw"` for non-JSON text).
-`tools/analyze_input.py <file> --hand right [--from s --to s]` reports the still-controller spread
-in the room and, for comparison, relative to the headset (a room-fixed pose has a small room
-spread and a headset spread that follows the head), the longest frame gap, every absent or
+`tools/analyze_input.py <file> --hand right [--from s --to s]` reports the controller's pose
+spread in the room and, for comparison, relative to the headset (a room-fixed pose has a small
+room spread and a headset spread that follows the head), the longest frame gap, every absent or
 emulated interval, re-acquisition jumps, reference-space resets, XR session changes, the input
 sources (button/axis counts, profiles, hand-like warning), per-index gamepad activity, viewer
-yaw span and the transport timing (clock offset and jitter).
+yaw span and the transport timing (clock offset and jitter). The still-controller PASS/FAIL
+verdict (10 mm / 2°) is printed only when a window is given with `--from`/`--to`, i.e. when
+the caller has chosen the part where the controller was still; without one the numbers are
+printed with `[no verdict without a window]`, because over a whole recording the hand usually
+moves at some point.
 `tools/clip_recording.py <in> <out> --from s --to s` cuts a clip verbatim, e.g. to promote it
-to a test fixture (`test/fixtures/clip_*.jsonl` are such clips from real recordings).
+to a test fixture (`test/fixtures/clip_*.jsonl` are such clips from real recordings;
+`clip_controller_buttons.jsonl` is nine short cuts of one recording joined together).
