@@ -19,8 +19,9 @@ Quest ``xr-standard`` gamepad: ``buttons[0]`` trigger, ``[1]`` squeeze (grip),
 ``[5]`` B or Y; ``axes[0], [1]`` touchpad (unused), ``axes[2], [3]`` thumbstick
 x and y, raw and not flipped.
 
-Output, left block then right block. A missing hand, or a missing button or
-axis, gives zeros.
+Output, left block then right block. A missing hand, a source that is not a
+real controller (``ParsedFrame.controller``), or a missing button or axis, gives
+zeros.
 
 Buttons (10 ints, 1 when ``pressed``):
 
@@ -98,6 +99,7 @@ def _hand_axes(hand: Optional[HandSample]) -> Tuple[float, ...]:
 
 def build_joy_arrays(frame: ParsedFrame) -> Tuple[Tuple[float, ...], Tuple[int, ...]]:
     """Return ``(axes, buttons)`` in the fixed layout above; never raises."""
-    axes = _hand_axes(frame.left) + _hand_axes(frame.right)
-    buttons = _hand_buttons(frame.left) + _hand_buttons(frame.right)
+    left, right = frame.controller('left'), frame.controller('right')
+    axes = _hand_axes(left) + _hand_axes(right)
+    buttons = _hand_buttons(left) + _hand_buttons(right)
     return axes, buttons

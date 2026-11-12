@@ -29,7 +29,7 @@ import asyncio
 from dataclasses import dataclass, field
 import threading
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from geometry_msgs.msg import PoseStamped
 from ranger_xarm_teleop_bridge.axes import xr_pose_to_ros
@@ -159,10 +159,16 @@ class BridgeNode(Node):
         status.viewer_emulated_position = bool(frame.viewer is not None
                                                and frame.viewer.emulated_position)
 
+        hand_like = [hand for hand in HANDS
+                     if getattr(frame, hand) is not None and frame.is_hand_tracked(hand)]
+        if hand_like:
+            self._warn_hand_like(hand_like, frame)
         for hand in HANDS:
-            sample = getattr(frame, hand)
+            # Only a source that looks like a real controller counts (defence in depth
+            # against a tracked hand presented as a controller-like source).
+            sample = frame.controller(hand)
             hand_status = HandStatus()
-            hand_status.hand_tracked = bool(getattr(frame, f'{hand}_hand_tracked'))
+            hand_status.hand_tracked = frame.is_hand_tracked(hand)
             if sample is None:
                 # Absent or a tracked hand: no pose, nothing substituted (INV-2).
                 hand_status.pose_present = False
@@ -203,6 +209,17 @@ class BridgeNode(Node):
             self.status_pub.publish(messages.status)
 
     # ---- bookkeeping ----
+
+    def _warn_hand_like(self, hands: List[str], frame: ParsedFrame) -> None:
+        what = []
+        for hand in hands:
+            source = getattr(frame, f'{hand}_source')
+            what.append(f'{hand} ({source.button_count} buttons, {source.axis_count} axes, '
+                        f'profiles {list(source.profiles)})')
+        joined = ', '.join(what)
+        self.get_logger().warning(
+            f'source looks like a tracked hand, published as not present + hand_tracked: {joined}',
+            throttle_duration_sec=LOG_THROTTLE_S)
 
     def _count_malformed(self, reason: str) -> None:
         self.malformed += 1

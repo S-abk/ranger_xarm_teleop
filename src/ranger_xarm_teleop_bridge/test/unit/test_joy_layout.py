@@ -110,13 +110,24 @@ def test_hand_tracked_gives_zero_block():
     assert axes[:4] == (0.0,) * 4 and buttons[:5] == (0,) * 5
 
 
-def test_short_arrays_give_zeros():
+def test_short_button_list_gives_zeros_for_the_missing_buttons():
+    frame = valid_frame()
+    frame['controllers']['right'] = hand(
+        buttons=[button(True, 1.0), button(True, 1.0)], axes=[0.1, 0.2, 0.3, 0.4])
+    axes, buttons = build_joy_arrays(parsed(frame))
+    assert axes[4:] == (1.0, 1.0, 0.3, 0.4)
+    assert buttons[5:] == (1, 1, 0, 0, 0)
+
+
+def test_source_with_fewer_than_four_axes_is_not_a_controller():
+    # The Quest 3 presents a tracked hand as a source with buttons but no axes; the
+    # whole block is zeros even when its buttons are pressed (a pinch is not a trigger).
     frame = valid_frame()
     frame['controllers']['right'] = hand(
         buttons=[button(True, 1.0), button(True, 1.0)], axes=[0.1, 0.2, 0.3])
     axes, buttons = build_joy_arrays(parsed(frame))
-    assert axes[4:] == (1.0, 1.0, 0.3, 0.0)
-    assert buttons[5:] == (1, 1, 0, 0, 0)
-    frame['controllers']['right'] = hand(buttons=[], axes=[])
+    assert axes[4:] == (0.0,) * 4 and buttons[5:] == (0,) * 5
+    frame['controllers']['right'] = hand(buttons=[button(True, 1.0)] * 10, axes=[])
     axes, buttons = build_joy_arrays(parsed(frame))
     assert axes[4:] == (0.0,) * 4 and buttons[5:] == (0,) * 5
+    assert axes[:4] == (0.0,) * 4 and buttons[:5] == (0,) * 5   # left untouched: unpressed

@@ -14,6 +14,7 @@
 """Tests of the recording analysis on the synthetic fixtures and on hand-made records."""
 
 import json
+import math
 import os
 
 import pytest
@@ -113,6 +114,56 @@ def test_session_changes_on_hand_made_records():
         (7, 9, 2), (9, 11, 4)]
     assert report['sessions']['final_session_id'] == 11
     assert report['resets']['count'] == 0
+
+
+def test_spread_in_headset_frame_tells_room_fixed_from_head_fixed():
+    # still_controller: controllers fixed in the room while the head sweeps +-90 deg.
+    room = analyze(records('still_controller'), hand='right')
+    assert room['spread']['max_deviation_mm'] < 1.0
+    assert room['spread_in_headset']['max_deviation_mm'] > 300.0
+    assert room['spread_in_headset']['max_angle_deg'] > 60.0
+    # A pose that follows the head: constant in the headset frame, moving in the room.
+    recs = []
+    for i in range(90):
+        yaw = math.radians(90.0 * math.sin(i / 10.0))
+        q = (0.0, math.sin(yaw / 2), 0.0, math.cos(yaw / 2))
+        viewer = {'position': [0.0, 1.6, 0.0], 'orientation': list(q), 'emulated_position': False}
+        # hand 0.5 m in front of the head (-z in the viewer frame), rotating with it
+        p = [-0.5 * math.sin(yaw), 1.4, -0.5 * math.cos(yaw)]
+        rec = frame(i, 10.0 + i / 90.0, pos=p)
+        rec.msg['viewer'] = viewer
+        rec.msg['controllers']['right']['orientation'] = list(q)
+        recs.append(rec)
+    head = analyze(recs, hand='right')
+    assert head['spread']['max_deviation_mm'] > 300.0
+    assert head['spread_in_headset']['max_deviation_mm'] < 1e-6
+    assert head['spread_in_headset']['max_angle_deg'] < 1e-3
+    assert 'relative to the headset' in format_report(head)
+
+
+def test_sources_and_gamepad_summary():
+    recs = [frame(0, 10.0), frame(1, 10.011), frame(2, 10.022)]
+    recs[1].msg['controllers']['right']['buttons'] = [{'p': True, 't': True, 'v': 1.0},
+                                                      {'p': False, 't': True, 'v': 0.3}]
+    recs[1].msg['controllers']['right']['axes'] = [0.0, 0.0, -0.5, 0.25]
+    recs[2].msg['controllers']['right']['profiles'] = ['generic-hand-select']
+    recs[2].msg['controllers']['right']['axes'] = []
+    report = analyze(recs, hand='right')
+    kinds = report['sources']['right']
+    assert len(kinds) == 3
+    assert sum(k['frames'] for k in kinds) == 3
+    assert [k['controller'] for k in kinds if k['profiles'] == ['generic-hand-select']] == [False]
+    # frames 0 and 2 have no axes (hand-like), frame 1 has four: a controller.
+    assert report['bridge_not_present_frames'] == 2
+    assert len(report['sources']['warnings']) == 2
+    assert [k['controller'] for k in kinds if k['axes'] == 4] == [True]
+    gp = report['gamepad']
+    assert gp['buttons'][0] == {'index': 0, 'pressed_frames': 1, 'touched_frames': 1,
+                                'max_value': 1.0}
+    assert gp['buttons'][1]['max_value'] == pytest.approx(0.3)
+    assert gp['axes'][2] == {'index': 2, 'min': -0.5, 'max': -0.5, 'nonzero_frames': 1}
+    text = format_report(report)
+    assert 'gamepad activity' in text and 'HAND-LIKE' in text and 'WARNING' in text
 
 
 def test_moving_controller_is_not_still():

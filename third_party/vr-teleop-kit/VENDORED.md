@@ -32,20 +32,22 @@ catches this and logs a warning; the relay itself is unaffected.
 against this copy; file header paths omitted). The change keeps the poses
 room-fixed and raw, and makes absent, emulated and hand-tracked inputs, reference-space
 resets and new XR sessions visible to the bridge, as required by the interface contract.
+Only a source that is a real controller is streamed as a pose; the bridge applies the same
+rule again on its side.
 
 Reason for each change:
 
 1. File header comment: marks the file as modified and points here.
 2. `xrSeq`, `xrResetCount`, `xrSessionId` declarations and `newXrSessionId()`: state for the sequence number, the reset count and the session id (a random 32-bit number from `crypto.getRandomValues`).
-3-4. `reset` listener and `newXrSessionId()` after each `requestReferenceSpace` site (teleop and calibration sessions): count reference-space resets (the room frame jumped) and draw a new session id every time an XR session starts (the room frame was redefined). The id is also written to the page log.
-5. Hand-tracked inputs: send `{hand_tracked: true}` for that hand instead of a pose, so the bridge treats it as not present and flags it as hand tracked.
-6. `position: rawPos` and `emulated_position`: stream the raw grip position (no wrist-pivot offset) and flag emulated poses.
+3-4. `requestSession(..., { optionalFeatures: ["local-floor", "hand-tracking"] })` at both sites, `reset` listener and `newXrSessionId()` after each `requestReferenceSpace` (teleop and calibration sessions): with the hand-tracking feature granted, tracked hands are `XRHand` sources (`src.hand` set) instead of controller-like sources; count reference-space resets (the room frame jumped); draw a new session id every time an XR session starts (the room frame was redefined). The id is also written to the page log.
+5. Controller rule: a source is streamed as a controller pose only when it has a gamepad with at least 4 axes (thumbstick) and a controller profile (`oculus-touch*`, `meta-quest-touch*`, `generic-trigger*`) and no `hand` profile. Anything else (an `XRHand`, no `gripSpace`, or a hand presented as a controller-like source: the Quest 3 does this with 10 buttons and 0 axes when the controllers are put down) is sent as `{hand_tracked: true, profiles, buttons: <count>, axes: <count>}`, so the bridge treats it as not present and the analysis can show what it was. The `targetRaySpace` fallback is gone: only `gripSpace` is used.
+6. `position: rawPos`, `emulated_position` and `profiles`: stream the raw grip position (no wrist-pivot offset), flag emulated poses, and send the source's WebXR input profiles.
 7. Viewer `emulated_position`: flag an emulated headset position.
 8. Unconditional `xr_frame` send with `t_xr`, `seq`, `reset_count`, `session_id`: frames go out even with no controller, so a missing controller is visible as absence. The bridge rejects frames without these fields as "client not patched".
 
 ```diff
 @@ -1,3 +1,4 @@
-+// Modified from oscardvs/vr-teleop-kit commit 80589ee for ranger_xarm_teleop. Changes: raw grip position (no wrist-pivot offset), emulated_position per pose, t_xr frame time, seq counter, reset_count, session_id drawn per XR session, hand-tracked sources not streamed, frame sent even with no controller. See third_party/vr-teleop-kit/VENDORED.md.
++// Modified from oscardvs/vr-teleop-kit commit 80589ee for ranger_xarm_teleop. Changes: raw grip position (no wrist-pivot offset), emulated_position per pose, t_xr frame time, seq counter, reset_count, session_id drawn per XR session, hand-tracking requested so hands are XRHand sources, profiles sent, only real controllers (thumbstick axes + controller profile) streamed as poses, frame sent even with no controller. See third_party/vr-teleop-kit/VENDORED.md.
  (() => {
    const $ = (id) => document.getElementById(id);
    // Live tick rate of get_action() in the teleop process. Populated from
@@ -60,7 +62,12 @@ Reason for each change:
    const append = (msg) => {
      const line = document.createElement("div");
      line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
-@@ -880,6 +885,8 @@
+@@ -876,10 +881,12 @@
+     try {
+       gl = canvas.getContext("webgl2", { xrCompatible: true });
+       if (!gl) throw new Error("WebGL2 unavailable");
+-      xrSession = await navigator.xr.requestSession(xrMode, { optionalFeatures: ["local-floor"] });
++      xrSession = await navigator.xr.requestSession(xrMode, { optionalFeatures: ["local-floor", "hand-tracking"] });
        xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
        xrRefSpace = await xrSession.requestReferenceSpace("local-floor")
          .catch(() => xrSession.requestReferenceSpace("local"));
@@ -69,7 +76,12 @@ Reason for each change:
        xrSession.addEventListener("end", () => {
          xrSession = null; xrRefSpace = null;
          videoGL = null; cameraAnchor = null;
-@@ -1004,6 +1011,8 @@
+@@ -1000,10 +1007,12 @@
+       try {
+         gl = canvas.getContext("webgl2", { xrCompatible: true });
+         if (!gl) throw new Error("WebGL2 unavailable");
+-        xrSession = await navigator.xr.requestSession(xrMode, { optionalFeatures: ["local-floor"] });
++        xrSession = await navigator.xr.requestSession(xrMode, { optionalFeatures: ["local-floor", "hand-tracking"] });
          xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
          xrRefSpace = await xrSession.requestReferenceSpace("local-floor")
            .catch(() => xrSession.requestReferenceSpace("local"));
@@ -78,16 +90,33 @@ Reason for each change:
  
          calibMode = true;
          calibrating = false;
-@@ -1411,6 +1420,8 @@
+@@ -1411,11 +1420,23 @@
      for (const src of xrSession.inputSources) {
        if (calibMode || calibrating) calibHandednessSeen.add(src.handedness || "(unset)");
        if (src.handedness !== "left" && src.handedness !== "right") continue;
-+      // A tracked hand is not a controller; the bridge treats it as not present.
-+      if (src.hand || !src.gripSpace) { controllers[src.handedness] = { hand_tracked: true }; continue; }
-       const space = src.gripSpace || src.targetRaySpace;
+-      const space = src.gripSpace || src.targetRaySpace;
++      // A tracked hand is not a controller; the bridge treats it as not present. Without the
++      // "hand-tracking" feature the Quest 3 presents hands as controller-like sources (10 buttons,
++      // 0 axes, src.hand null), so a source counts as a controller only when it has thumbstick
++      // axes and a controller profile.
++      const gp = src.gamepad;
++      const profiles = Array.isArray(src.profiles) ? Array.from(src.profiles) : [];
++      const isController = !!gp && gp.axes.length >= 4 && profiles.length > 0
++        && !profiles.some((p) => /hand/i.test(p))
++        && profiles.some((p) => /^(oculus-touch|meta-quest-touch|generic-trigger)/.test(p));
++      if (src.hand || !src.gripSpace || !isController) {
++        controllers[src.handedness] = { hand_tracked: true, profiles, buttons: gp ? gp.buttons.length : 0, axes: gp ? gp.axes.length : 0 };
++        continue;
++      }
++      const space = src.gripSpace;
        const pose = frame.getPose(space, xrRefSpace);
        if (!pose) continue;
-@@ -1434,7 +1445,8 @@
+       const t = pose.transform;
+-      const gp = src.gamepad;
+       const orient = xyzw(t.orientation);
+       const rawPos = xyz(t.position);
+       // Shift the reported readout point in the controller's local frame so
+@@ -1434,10 +1455,12 @@
          calibBuffers[src.handedness].push({ p: rawPos, R: quatToMat3(orient) });
        }
        controllers[src.handedness] = {
@@ -97,7 +126,11 @@ Reason for each change:
          orientation: orient,
          buttons: gp ? gp.buttons.map((b) => ({ p: b.pressed, t: b.touched, v: b.value })) : [],
          axes:    gp ? Array.from(gp.axes) : [],
-@@ -1503,11 +1515,10 @@
++        profiles,
+       };
+     }
+ 
+@@ -1503,11 +1526,10 @@
        viewer = {
          position: xyz(vt.position),
          orientation: xyzw(vt.orientation),

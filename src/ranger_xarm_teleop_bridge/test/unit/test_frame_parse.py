@@ -96,6 +96,74 @@ def test_hand_tracked_flag_is_false_for_controllers_and_absent_hands():
     assert result.right is None and result.right_hand_tracked is False
 
 
+def test_hand_like_source_is_not_a_controller_whatever_the_client_says():
+    frame = valid_frame()
+    frame['controllers']['right']['buttons'] = [button() for _ in range(10)]
+    frame['controllers']['right']['axes'] = []
+    result = parse(frame)
+    assert result.right is not None                     # raw sample kept for the analysis
+    assert result.right_hand_tracked is False           # the client did not flag it
+    assert result.controller('right') is None           # but the bridge treats it as a hand
+    assert result.is_hand_tracked('right') is True
+    assert result.controller('left') is result.left and not result.is_hand_tracked('left')
+    assert result.right_source.button_count == 10 and result.right_source.axis_count == 0
+
+
+@pytest.mark.parametrize('axes,profiles,controller', [
+    ([0.0, 0.0, 0.0, 0.0], [], True),
+    ([0.0, 0.0, 0.0, 0.0], ['meta-quest-touch-plus', 'oculus-touch-v3'], True),
+    ([0.0, 0.0, 0.0], ['meta-quest-touch-plus'], False),
+    ([], ['generic-hand-select'], False),
+    ([0.0, 0.0, 0.0, 0.0], ['generic-hand-select-grasp'], False),
+    ([0.0, 0.0, 0.0, 0.0], ['Generic-HAND'], False),
+    ([0.0] * 6, ['oculus-touch'], True),
+])
+def test_controller_rule_needs_four_axes_and_no_hand_profile(axes, profiles, controller):
+    frame = valid_frame()
+    frame['controllers']['right'] = dict(hand(axes=axes), profiles=profiles)
+    result = parse(frame)
+    assert result.right.profiles == tuple(profiles)
+    assert (result.controller('right') is not None) is controller
+    assert result.is_hand_tracked('right') is (not controller)
+    assert result.right_source.profiles == tuple(profiles)
+
+
+def test_client_flagged_hand_keeps_its_source_info():
+    frame = valid_frame()
+    frame['controllers']['right'] = {'hand_tracked': True, 'profiles': ['generic-hand'],
+                                     'buttons': 10, 'axes': 0}
+    result = parse(frame)
+    assert result.right is None and result.is_hand_tracked('right')
+    assert result.right_source.profiles == ('generic-hand',)
+    assert (result.right_source.button_count, result.right_source.axis_count) == (10, 0)
+    assert result.right_source.client_hand_tracked is True
+    frame['controllers']['right'] = {'hand_tracked': True}
+    source = parse(frame).right_source
+    assert (source.profiles, source.button_count, source.axis_count) == ((), 0, 0)
+
+
+@pytest.mark.parametrize('value,fragment', [
+    ('meta-quest-touch-plus', 'controllers.right.profiles: expected a list of strings'),
+    (['a', 1], 'controllers.right.profiles'),
+    ({'a': 1}, 'controllers.right.profiles'),
+])
+def test_profiles_must_be_a_list_of_strings(value, fragment):
+    frame = valid_frame()
+    frame['controllers']['right']['profiles'] = value
+    assert_malformed(frame, fragment)
+    frame = valid_frame()
+    frame['controllers']['right'] = {'hand_tracked': True, 'profiles': value}
+    assert_malformed(frame, fragment)
+
+
+def test_hand_tracked_entry_counts_must_be_integers():
+    frame = valid_frame()
+    frame['controllers']['right'] = {'hand_tracked': True, 'buttons': 'ten'}
+    assert_malformed(frame, 'controllers.right.buttons: expected an integer >= 0')
+    frame['controllers']['right'] = {'hand_tracked': True, 'axes': -1}
+    assert_malformed(frame, 'controllers.right.axes: expected an integer >= 0')
+
+
 def test_hand_tracked_false_is_a_normal_controller():
     frame = valid_frame()
     frame['controllers']['right'] = dict(hand(), hand_tracked=False)

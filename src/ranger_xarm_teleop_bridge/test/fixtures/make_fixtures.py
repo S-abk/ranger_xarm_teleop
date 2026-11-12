@@ -293,6 +293,12 @@ def _hand_tracked_right(frame: Dict[str, Any]) -> None:
     frame['controllers']['right'] = {'hand_tracked': True}
 
 
+def _hand_as_controller(frame: Dict[str, Any]) -> None:
+    """Turn the left hand into what the Quest 3 sends for a tracked hand (10 buttons, 0 axes)."""
+    frame['controllers']['left']['buttons'] = _buttons()[:7] + _buttons()[:3]
+    frame['controllers']['left']['axes'] = []
+
+
 def _tracked_with_junk(frame: Dict[str, Any]) -> None:
     frame['controllers']['left'] = {'hand_tracked': True, 'position': [1, 2], 'buttons': 7}
 
@@ -342,6 +348,12 @@ def _malformed_cases() -> List[Tuple[str, Any, str]]:
         ('frame', _set(('session_id',), 2 ** 32), 'malformed'),
         ('frame', _set(('session_id',), 1.0), 'malformed'),
         ('frame', _set(('session_id',), 2 ** 32 - 1), 'frame'),
+        ('frame', _set(('controllers', 'right', 'profiles'), 'meta-quest-touch-plus'),
+         'malformed'),
+        ('frame', _set(('controllers', 'right', 'profiles'), ['meta-quest-touch-plus', 3]),
+         'malformed'),
+        ('frame', _set(('controllers', 'right', 'profiles'), ['meta-quest-touch-plus']), 'frame'),
+        ('frame', _hand_as_controller, 'frame'),
     ]
 
 

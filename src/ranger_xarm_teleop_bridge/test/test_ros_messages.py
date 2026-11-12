@@ -145,6 +145,30 @@ def test_hand_tracked_source_is_not_present(node):
     assert list(msgs.joy.axes[4:]) == [0.0] * 4 and list(msgs.joy.buttons[5:]) == [0] * 5
 
 
+def test_real_hands_clip_publishes_no_pose_and_flags_hand_tracked(node):
+    frames = frames_of('clip_hands_head_turn')
+    assert len(frames) == 45
+    for frame in frames:
+        assert frame.left is not None and frame.right is not None    # headset sent poses
+        msgs = node.build_messages(frame, STAMP)
+        assert msgs.poses == {}
+        for side in ('left', 'right'):
+            status = getattr(msgs.status, side)
+            assert status.pose_present is False and status.hand_tracked is True
+        assert list(msgs.joy.buttons) == [0] * 10 and list(msgs.joy.axes) == [0.0] * 8
+
+
+def test_real_controller_clip_publishes_the_right_pose(node):
+    frames = frames_of('clip_controller_occlusion')
+    for frame in frames:
+        msgs = node.build_messages(frame, STAMP)
+        assert set(msgs.poses) == {'right'}
+        assert msgs.status.right.pose_present and not msgs.status.right.hand_tracked
+        assert msgs.status.right.emulated_position is frame.right.emulated_position
+        assert not msgs.status.left.pose_present and not msgs.status.left.hand_tracked
+        assert msgs.status.session_id == 128324305
+
+
 def test_hand_tracked_is_false_for_controllers_and_absent_hands(node):
     present = node.build_messages(frames_of('still_controller')[0], STAMP)
     assert not present.status.left.hand_tracked and not present.status.right.hand_tracked

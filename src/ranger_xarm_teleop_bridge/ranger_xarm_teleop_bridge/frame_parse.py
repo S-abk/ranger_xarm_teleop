@@ -23,6 +23,14 @@ accepted only if every present hand is valid; otherwise the whole frame is
 A hand that is omitted, or that is a tracked hand (``{"hand_tracked": true}``)
 is ``None``: not present; the tracked-hand case is flagged in ``left_hand_tracked``
 / ``right_hand_tracked``. No other pose is ever substituted (INV-2).
+
+Defence in depth against the headset presenting a tracked hand as a controller-like
+source (the Quest 3 does this when the Touch controllers are put down: 10 buttons,
+0 axes, no ``XRHand``): ``ParsedFrame.controller(side)`` returns the sample only if
+it looks like a real controller (at least ``MIN_CONTROLLER_AXES`` gamepad axes and
+no ``hand`` profile), whatever the client said; otherwise the side is not present
+and ``is_hand_tracked(side)`` is true. The raw sample stays in ``left``/``right``
+for the analysis. The optional ``profiles`` list of a source is kept.
 ``session_id``, ``seq``, ``t_xr`` and ``t_client`` are carried through unchanged
 (INV-4). A frame without ``session_id`` (or any other field the patched client
 adds) is malformed.
@@ -33,11 +41,12 @@ axes happens elsewhere (``axes.py``).
 from dataclasses import dataclass
 import json
 import math
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 ORIENTATION_NORM_TOLERANCE = 1e-3
 UINT32_MAX = 2 ** 32 - 1
 PATCHED_CLIENT_KEYS = ('session_id', 'seq', 't_xr', 'reset_count')
+MIN_CONTROLLER_AXES = 4   # a Touch controller reports 4 axes (and 12 buttons); hands report 0
 
 
 @dataclass(frozen=True)
@@ -58,6 +67,24 @@ class HandSample:
     emulated_position: bool
     buttons: Tuple[Button, ...]
     axes: Tuple[float, ...]
+    profiles: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SourceInfo:
+    """What the headset said about an input source, controller or not."""
+
+    profiles: Tuple[str, ...]
+    button_count: int
+    axis_count: int
+    client_hand_tracked: bool
+
+
+def is_controller(sample: HandSample) -> bool:
+    """Return True when the sample looks like a real controller, not a tracked hand."""
+    if len(sample.axes) < MIN_CONTROLLER_AXES:
+        return False
+    return not any('hand' in p.lower() for p in sample.profiles)
 
 
 @dataclass(frozen=True)
@@ -81,9 +108,26 @@ class ParsedFrame:
     left: Optional[HandSample]
     right: Optional[HandSample]
     viewer: Optional[ViewerSample]
-    # True when the input source was a tracked hand; the hand itself is then None.
+    # True when the client reported a tracked hand; the hand itself is then None.
     left_hand_tracked: bool = False
     right_hand_tracked: bool = False
+    # Everything the client said about the source for that side (None: nothing sent).
+    left_source: Optional[SourceInfo] = None
+    right_source: Optional[SourceInfo] = None
+
+    def controller(self, side: str) -> Optional[HandSample]:
+        """Return the sample for ``side`` only if it is a real controller, else None."""
+        sample = getattr(self, side)
+        if sample is None or not is_controller(sample):
+            return None
+        return sample
+
+    def is_hand_tracked(self, side: str) -> bool:
+        """Return True when the source for ``side`` is a tracked hand, by client flag or shape."""
+        if getattr(self, f'{side}_hand_tracked'):
+            return True
+        sample = getattr(self, side)
+        return sample is not None and not is_controller(sample)
 
 
 @dataclass(frozen=True)
@@ -200,12 +244,34 @@ def _button(value: Any, name: str) -> Button:
     return Button(pressed=value['p'], touched=touched, value=analog)
 
 
-def _hand(value: Any, name: str) -> Tuple[Optional[HandSample], bool]:
-    """Return (sample, hand_tracked); a tracked hand gives (None, True)."""
+def _profiles(obj: dict, prefix: str) -> Tuple[str, ...]:
+    if 'profiles' not in obj:
+        return ()
+    value = obj['profiles']
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        raise _Invalid(f'{prefix}.profiles: expected a list of strings')
+    return tuple(value)
+
+
+def _optional_count(obj: dict, key: str, prefix: str) -> int:
+    """Return the count sent for ``key`` of a hand-tracked entry (an int, or a list's length)."""
+    if key not in obj:
+        return 0
+    value = obj[key]
+    if isinstance(value, list):
+        return len(value)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise _Invalid(f'{prefix}.{key}: expected an integer >= 0')
+    return value
+
+
+def _hand(value: Any, name: str) -> Tuple[Optional[HandSample], SourceInfo]:
+    """Return (sample, source info); a client-flagged tracked hand gives (None, info)."""
     if not isinstance(value, dict):
         raise _Invalid(f'{name}: expected an object')
     if value.get('hand_tracked') is True:
-        return None, True
+        return None, SourceInfo(_profiles(value, name), _optional_count(value, 'buttons', name),
+                                _optional_count(value, 'axes', name), True)
     position = _position(value, name)
     orientation = _orientation(value, name)
     emulated = _emulated(value, name)
@@ -217,7 +283,9 @@ def _hand(value: Any, name: str) -> Tuple[Optional[HandSample], bool]:
     if not isinstance(axes, list):
         raise _Invalid(f'{name}.axes: expected a list')
     parsed_axes = tuple(_number(a, f'{name}.axes[{i}]') for i, a in enumerate(axes))
-    return HandSample(position, orientation, emulated, parsed_buttons, parsed_axes), False
+    profiles = _profiles(value, name)
+    sample = HandSample(position, orientation, emulated, parsed_buttons, parsed_axes, profiles)
+    return sample, SourceInfo(profiles, len(parsed_buttons), len(parsed_axes), False)
 
 
 def _viewer(value: Any) -> Optional[ViewerSample]:
@@ -245,16 +313,20 @@ def _frame(obj: dict) -> ParsedFrame:
         raise _Invalid('controllers: expected an object')
     if 'viewer' not in obj:
         raise _Invalid('viewer: missing (expected an object or null)')
-    hands = {}
-    tracked = {}
+    hands: Dict[str, Optional[HandSample]] = {}
+    sources: Dict[str, Optional[SourceInfo]] = {}
     for side in ('left', 'right'):
-        hands[side], tracked[side] = None, False
+        hands[side], sources[side] = None, None
         if side in controllers:
-            hands[side], tracked[side] = _hand(controllers[side], f'controllers.{side}')
+            hands[side], sources[side] = _hand(controllers[side], f'controllers.{side}')
     viewer = _viewer(obj['viewer'])
     return ParsedFrame(session_id, seq, xr_time, client_time, reset_count,
                        hands['left'], hands['right'], viewer,
-                       left_hand_tracked=tracked['left'], right_hand_tracked=tracked['right'])
+                       left_hand_tracked=bool(sources['left']
+                                              and sources['left'].client_hand_tracked),
+                       right_hand_tracked=bool(sources['right']
+                                               and sources['right'].client_hand_tracked),
+                       left_source=sources['left'], right_source=sources['right'])
 
 
 def parse_message(obj: Any) -> ParseResult:

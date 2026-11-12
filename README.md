@@ -11,7 +11,7 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 | `src/ranger_xarm_teleop_interfaces` | `InputStatus` / `HandStatus` messages |
 | `src/ranger_xarm_teleop_bridge` | Bridge node (relay WebSocket → `/teleop/input/*`), JSONL replay node, pure parsing/conversion/analysis modules and their tests |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
-| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py` |
+| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py` |
 | `recordings/` | Local headset recordings (git-ignored) |
 
 ## Build and test
@@ -55,6 +55,16 @@ hand-tracked input source counts as not present and is flagged `hand_tracked` in
 The headset pose is never published as a controller pose. An emulated position is published
 with `emulated_position` set in the status.
 
+**Hands are never controllers.** When the Touch controllers are put down, the Quest 3 switches
+to hand tracking and, unless the session has the `hand-tracking` feature, presents each hand as a
+controller-like input source (10 buttons, 0 axes, no `XRHand`). The web client requests the
+feature and, independently, streams a source as a controller only if it has at least 4 gamepad
+axes and a controller profile; the bridge applies the same rule again (`ParsedFrame.controller`):
+a source with fewer than 4 axes, or with a `hand` profile, is published as not present with
+`hand_tracked` set, whatever the client said. A real Touch controller reports 12 buttons and
+4 axes. `tools/analyze_input.py` prints every source's button and axis counts and profiles and
+warns when one looks like a hand.
+
 `InputStatus.session_id` is a random 32-bit number the web client draws each time an XR
 session starts (Start Teleop, page reload). Together with `reset_count` it identifies one
 stable `quest_world` frame: when either changes, earlier poses and the calibration no longer
@@ -83,13 +93,26 @@ Axes (float), left block then right block:
 | | L trigger value | L grip value | L stick x | L stick y | R trigger value | R grip value | R stick x | R stick y |
 
 Values are the raw WebXR `xr-standard` gamepad values (stick y is positive when pushed back).
-A missing hand gives zeros for its block.
+A missing hand, or a source that is not a real controller, gives zeros for its block.
+
+Verification status against a real Quest 3 Touch Plus recording (`recordings/occlusion.jsonl`,
+12 buttons, 4 axes, controller held but not operated): index 1 (grip) is consistent with the
+analog squeeze value (partial values up to 0.23 while touched); every other index is
+**unverified** (nothing was pressed, no stick motion). The headset also reports capacitive
+touch on indices 0, 4, 5, 7, 8, 9, 10 and analog values on 7..10 (thumb rest / proximity
+sensors, not mapped). A button-by-button recording is needed to confirm 0, 3, 4, 5 and
+`axes[2]`, `axes[3]`; the `gamepad activity` table of `tools/analyze_input.py` shows per-index
+pressed/touched counts and value ranges for that purpose.
 
 ## Recordings
 
 The bridge's `record_path` parameter and `tools/record_relay.py` write the raw relay text, one
 JSON object per line: `{"t_recv": <unix s>, "msg": {...}}` (or `"raw"` for non-JSON text).
 `tools/analyze_input.py <file> --hand right [--from s --to s]` reports the still-controller spread
-(pass line 10 mm / 2°), the longest frame gap, every absent or emulated interval, re-acquisition
-jumps, reference-space resets, XR session changes, viewer yaw span and the transport timing
-(clock offset and jitter).
+in the room and, for comparison, relative to the headset (a room-fixed pose has a small room
+spread and a headset spread that follows the head), the longest frame gap, every absent or
+emulated interval, re-acquisition jumps, reference-space resets, XR session changes, the input
+sources (button/axis counts, profiles, hand-like warning), per-index gamepad activity, viewer
+yaw span and the transport timing (clock offset and jitter).
+`tools/clip_recording.py <in> <out> --from s --to s` cuts a clip verbatim, e.g. to promote it
+to a test fixture (`test/fixtures/clip_*.jsonl` are such clips from real recordings).

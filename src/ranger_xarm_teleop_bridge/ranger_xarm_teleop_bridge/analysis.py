@@ -17,13 +17,18 @@ Statistics over a JSONL recording of relay text, for the head-turn and occlusion
 Pure: no ROS imports. Everything is computed on the raw WebXR values (spread and angles
 are invariant under the axis conversion). Positions in metres (reported in mm), angles
 in degrees, times in seconds relative to the first record unless stated.
+
+The per-hand statistics use every source the headset reported for that hand, including
+one that looks like a tracked hand (which the bridge publishes as not present): the
+``sources`` section says what each source was and warns when it is not a controller.
 """
 
 from dataclasses import dataclass
 import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ranger_xarm_teleop_bridge.frame_parse import Ignored, Malformed, parse_text, ParsedFrame
+from ranger_xarm_teleop_bridge.frame_parse import (HandSample, Ignored, is_controller, Malformed,
+                                                   parse_text, ParsedFrame, ViewerSample)
 from ranger_xarm_teleop_bridge.jsonl_io import Record
 
 PASS_POSITION_MM = 10.0   # head-turn pass line (human-approved): max deviation from the mean
@@ -59,6 +64,55 @@ def _mean_quaternion(quats: Sequence[Sequence[float]]) -> Tuple[float, float, fl
     if norm == 0.0:
         return (0.0, 0.0, 0.0, 1.0)
     return (acc[0] / norm, acc[1] / norm, acc[2] / norm, acc[3] / norm)
+
+
+def _qmul(a: Sequence[float], b: Sequence[float]) -> Tuple[float, float, float, float]:
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz)
+
+
+def _qconj(q: Sequence[float]) -> Tuple[float, float, float, float]:
+    return (-q[0], -q[1], -q[2], q[3])
+
+
+def _rotate(q: Sequence[float], v: Sequence[float]) -> Tuple[float, float, float]:
+    """Rotate vector ``v`` by unit xyzw quaternion ``q``."""
+    out = _qmul(_qmul(q, (v[0], v[1], v[2], 0.0)), _qconj(q))
+    return (out[0], out[1], out[2])
+
+
+def _in_viewer_frame(hand: HandSample,
+                     viewer: ViewerSample) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    """Return the hand pose expressed in the headset frame (position and xyzw orientation)."""
+    inv = _qconj(viewer.orientation)
+    delta = tuple(hand.position[i] - viewer.position[i] for i in range(3))
+    return _rotate(inv, delta), _qmul(inv, hand.orientation)
+
+
+def _spread(positions: Sequence[Sequence[float]],
+            orientations: Sequence[Sequence[float]]) -> Dict[str, Any]:
+    """Return the position and orientation spread of a set of poses."""
+    n = len(positions)
+    mean = [sum(p[i] for p in positions) / n for i in range(3)]
+    std = [math.sqrt(sum((p[i] - mean[i]) ** 2 for p in positions) / n) for i in range(3)]
+    p2p = [max(p[i] for p in positions) - min(p[i] for p in positions) for i in range(3)]
+    max_dev = max(math.dist(p, mean) for p in positions)
+    q_mean = _mean_quaternion(orientations)
+    angles = [_angle_between(q, q_mean) for q in orientations]
+    return {
+        'tracked_frames': n,
+        'mean_position_m': mean,
+        'std_mm': [s * 1000.0 for s in std],
+        'peak_to_peak_mm': [p * 1000.0 for p in p2p],
+        'max_deviation_mm': max_dev * 1000.0,
+        'mean_orientation_xyzw': list(q_mean),
+        'max_angle_deg': max(angles),
+        'rms_angle_deg': math.sqrt(sum(a * a for a in angles) / n),
+    }
 
 
 def _viewer_yaw_deg(q: Sequence[float]) -> float:
@@ -107,6 +161,55 @@ def _intervals(times: List[float], flags: List[bool], end_time: float) -> List[D
     if start is not None:
         out.append({'start': start, 'end': end_time, 'duration': end_time - start})
     return out
+
+
+def _sources(samples: List[Sample]) -> Dict[str, Any]:
+    """Summarise, per side, every distinct kind of input source the headset reported."""
+    out: Dict[str, Any] = {'left': [], 'right': [], 'warnings': []}
+    for side in ('left', 'right'):
+        kinds: Dict[Tuple[Any, ...], int] = {}
+        for s in samples:
+            info = getattr(s.frame, f'{side}_source')
+            if info is None:
+                continue
+            key = (info.profiles, info.button_count, info.axis_count, info.client_hand_tracked)
+            kinds[key] = kinds.get(key, 0) + 1
+        ranked = sorted(kinds.items(), key=lambda kv: -kv[1])
+        for (profiles, buttons, axes, flagged), count in ranked:
+            controller = (not flagged and axes >= 4
+                          and not any('hand' in p.lower() for p in profiles))
+            out[side].append({'profiles': list(profiles), 'buttons': buttons, 'axes': axes,
+                              'client_hand_tracked': flagged, 'frames': count,
+                              'controller': controller})
+            if not controller:
+                why = ('flagged hand_tracked by the client' if flagged
+                       else f'{buttons} buttons, {axes} axes, profiles {list(profiles)}')
+                out['warnings'].append(f'{side}: {count} frames look like a tracked hand ({why}); '
+                                       f'the bridge publishes them as not present')
+    return out
+
+
+def _gamepad_activity(hand_samples: List[Optional[HandSample]]) -> Dict[str, Any]:
+    """Per button index: pressed/touched frames and max value; per axis: min and max."""
+    buttons: List[Dict[str, Any]] = []
+    axes: List[Dict[str, Any]] = []
+    for h in hand_samples:
+        if h is None:
+            continue
+        for i, b in enumerate(h.buttons):
+            while len(buttons) <= i:
+                buttons.append({'index': len(buttons), 'pressed_frames': 0, 'touched_frames': 0,
+                                'max_value': 0.0})
+            buttons[i]['pressed_frames'] += int(b.pressed)
+            buttons[i]['touched_frames'] += int(b.touched)
+            buttons[i]['max_value'] = max(buttons[i]['max_value'], b.value)
+        for i, a in enumerate(h.axes):
+            while len(axes) <= i:
+                axes.append({'index': len(axes), 'min': a, 'max': a, 'nonzero_frames': 0})
+            axes[i]['min'] = min(axes[i]['min'], a)
+            axes[i]['max'] = max(axes[i]['max'], a)
+            axes[i]['nonzero_frames'] += int(abs(a) > 0.01)
+    return {'buttons': buttons, 'axes': axes}
 
 
 # ---- the analysis ----
@@ -228,32 +331,31 @@ def analyze(records: Iterable[Record], hand: str = 'right',
     report['untracked_intervals'] = untracked_intervals
     report['reacquisition_jumps'] = jumps
 
-    # Still-controller spread over tracked (present, not emulated) frames.
+    # Still-controller spread over tracked (present, not emulated) frames, in the room
+    # (quest_world) and, for comparison, relative to the headset. A room-fixed pose has a
+    # small room spread and a headset spread that grows with the head motion; a pose that
+    # follows the head shows the opposite.
     tracked = [h for h, flag in zip(hand_samples, tracked_flags) if flag]
     if tracked:
-        n = len(tracked)
-        mean = [sum(h.position[i] for h in tracked) / n for i in range(3)]
-        std = [math.sqrt(sum((h.position[i] - mean[i]) ** 2 for h in tracked) / n)
-               for i in range(3)]
-        p2p = [max(h.position[i] for h in tracked) - min(h.position[i] for h in tracked)
-               for i in range(3)]
-        max_dev = max(math.dist(h.position, mean) for h in tracked)
-        q_mean = _mean_quaternion([h.orientation for h in tracked])
-        angles = [_angle_between(h.orientation, q_mean) for h in tracked]
-        report['spread'] = {
-            'tracked_frames': n,
-            'mean_position_m': mean,
-            'std_mm': [s * 1000.0 for s in std],
-            'peak_to_peak_mm': [p * 1000.0 for p in p2p],
-            'max_deviation_mm': max_dev * 1000.0,
-            'mean_orientation_xyzw': list(q_mean),
-            'max_angle_deg': max(angles),
-            'rms_angle_deg': math.sqrt(sum(a * a for a in angles) / n),
-            'pass_position': max_dev * 1000.0 < PASS_POSITION_MM,
-            'pass_angle': max(angles) < PASS_ANGLE_DEG,
-        }
+        report['spread'] = _spread([h.position for h in tracked],
+                                   [h.orientation for h in tracked])
+        report['spread']['pass_position'] = report['spread']['max_deviation_mm'] < PASS_POSITION_MM
+        report['spread']['pass_angle'] = report['spread']['max_angle_deg'] < PASS_ANGLE_DEG
+        in_viewer = [_in_viewer_frame(h, s.frame.viewer)
+                     for h, flag, s in zip(hand_samples, tracked_flags, samples)
+                     if flag and s.frame.viewer is not None]
+        report['spread_in_headset'] = (_spread([p for p, _ in in_viewer],
+                                               [q for _, q in in_viewer])
+                                       if in_viewer else None)
     else:
         report['spread'] = None
+        report['spread_in_headset'] = None
+
+    # What the headset said about each input source, and the gamepad activity per index.
+    report['sources'] = _sources(samples)
+    report['gamepad'] = _gamepad_activity(hand_samples)
+    report['bridge_not_present_frames'] = sum(
+        1 for h in hand_samples if h is not None and not is_controller(h))
 
     # Viewer motion (did the head actually turn?).
     viewers = [s.frame.viewer for s in samples if s.frame.viewer is not None]
@@ -318,9 +420,19 @@ def format_report(report: Dict[str, Any]) -> str:
     for ev in se['events']:
         lines.append(f"  new session at {ev['at']:.2f} s (seq {ev['seq']}): "
                      f"{ev['from']} -> {ev['to']}")
+    for side in ('left', 'right'):
+        for src in report['sources'][side]:
+            kind = 'controller' if src['controller'] else 'HAND-LIKE'
+            lines.append(f"source {side}: {src['frames']} frames, {src['buttons']} buttons, "
+                         f"{src['axes']} axes, profiles {src['profiles']}"
+                         f"{' (client: hand_tracked)' if src['client_hand_tracked'] else ''}"
+                         f' -> {kind}')
+    for warning in report['sources']['warnings']:
+        lines.append(f'WARNING {warning}')
     lines.append(f"present frames {report['present_frames']}  "
                  f"absent intervals {len(report['absent_intervals'])}  "
-                 f"emulated intervals {len(report['emulated_intervals'])}")
+                 f"emulated intervals {len(report['emulated_intervals'])}  "
+                 f"not present for the bridge (hand-like) {report['bridge_not_present_frames']}")
     for iv in report['absent_intervals']:
         lines.append(f"  absent   {iv['start']:.2f} .. {iv['end']:.2f} s "
                      f"({iv['duration']:.2f} s)")
@@ -343,6 +455,12 @@ def format_report(report: Dict[str, Any]) -> str:
                      f'peak-to-peak (mm): {p2p[0]:.2f} / {p2p[1]:.2f} / {p2p[2]:.2f}')
         lines.append(f"  max deviation from mean: {sp['max_deviation_mm']:.2f} mm  "
                      f"[{'PASS' if sp['pass_position'] else 'FAIL'} < {PASS_POSITION_MM:g} mm]")
+        sh = report['spread_in_headset']
+        if sh:
+            lines.append(f"  relative to the headset: max deviation {sh['max_deviation_mm']:.2f} "
+                         f"mm, std (mm) x/y/z: {sh['std_mm'][0]:.2f} / {sh['std_mm'][1]:.2f} / "
+                         f"{sh['std_mm'][2]:.2f}, max angle {sh['max_angle_deg']:.2f} deg "
+                         '(room-fixed pose: room spread small, headset spread follows the head)')
         lines.append(f"  orientation: max {sp['max_angle_deg']:.3f} deg, "
                      f"rms {sp['rms_angle_deg']:.3f} deg from mean  "
                      f"[{'PASS' if sp['pass_angle'] else 'FAIL'} < {PASS_ANGLE_DEG:g} deg]")
@@ -360,4 +478,14 @@ def format_report(report: Dict[str, Any]) -> str:
                  f"jitter above it p50 {j['p50']:.2f}  p90 {j['p90']:.2f}  p99 {j['p99']:.2f}  "
                  f"max {j['max']:.2f} ms (mean {j['mean']:.2f}); "
                  f"t_xr - t_client mean {t['xr_minus_client_ms_mean']:.2f} ms")
+    gp = report['gamepad']
+    if gp['buttons'] or gp['axes']:
+        lines.append('gamepad activity (index: pressed frames / touched frames / max value):')
+        lines.append('  buttons ' + '  '.join(
+            f"{b['index']}: {b['pressed_frames']}/{b['touched_frames']}/{b['max_value']:.2f}"
+            for b in gp['buttons']))
+        if gp['axes']:
+            lines.append('  axes    ' + '  '.join(
+                f"{a['index']}: {a['min']:.2f}..{a['max']:.2f} ({a['nonzero_frames']} nonzero)"
+                for a in gp['axes']))
     return '\n'.join(lines)

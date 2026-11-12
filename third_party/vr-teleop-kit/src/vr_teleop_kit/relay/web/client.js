@@ -1,4 +1,4 @@
-// Modified from oscardvs/vr-teleop-kit commit 80589ee for ranger_xarm_teleop. Changes: raw grip position (no wrist-pivot offset), emulated_position per pose, t_xr frame time, seq counter, reset_count, session_id drawn per XR session, hand-tracked sources not streamed, frame sent even with no controller. See third_party/vr-teleop-kit/VENDORED.md.
+// Modified from oscardvs/vr-teleop-kit commit 80589ee for ranger_xarm_teleop. Changes: raw grip position (no wrist-pivot offset), emulated_position per pose, t_xr frame time, seq counter, reset_count, session_id drawn per XR session, hand-tracking requested so hands are XRHand sources, profiles sent, only real controllers (thumbstick axes + controller profile) streamed as poses, frame sent even with no controller. See third_party/vr-teleop-kit/VENDORED.md.
 (() => {
   const $ = (id) => document.getElementById(id);
   // Live tick rate of get_action() in the teleop process. Populated from
@@ -881,7 +881,7 @@
     try {
       gl = canvas.getContext("webgl2", { xrCompatible: true });
       if (!gl) throw new Error("WebGL2 unavailable");
-      xrSession = await navigator.xr.requestSession(xrMode, { optionalFeatures: ["local-floor"] });
+      xrSession = await navigator.xr.requestSession(xrMode, { optionalFeatures: ["local-floor", "hand-tracking"] });
       xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
       xrRefSpace = await xrSession.requestReferenceSpace("local-floor")
         .catch(() => xrSession.requestReferenceSpace("local"));
@@ -1007,7 +1007,7 @@
       try {
         gl = canvas.getContext("webgl2", { xrCompatible: true });
         if (!gl) throw new Error("WebGL2 unavailable");
-        xrSession = await navigator.xr.requestSession(xrMode, { optionalFeatures: ["local-floor"] });
+        xrSession = await navigator.xr.requestSession(xrMode, { optionalFeatures: ["local-floor", "hand-tracking"] });
         xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
         xrRefSpace = await xrSession.requestReferenceSpace("local-floor")
           .catch(() => xrSession.requestReferenceSpace("local"));
@@ -1420,13 +1420,23 @@
     for (const src of xrSession.inputSources) {
       if (calibMode || calibrating) calibHandednessSeen.add(src.handedness || "(unset)");
       if (src.handedness !== "left" && src.handedness !== "right") continue;
-      // A tracked hand is not a controller; the bridge treats it as not present.
-      if (src.hand || !src.gripSpace) { controllers[src.handedness] = { hand_tracked: true }; continue; }
-      const space = src.gripSpace || src.targetRaySpace;
+      // A tracked hand is not a controller; the bridge treats it as not present. Without the
+      // "hand-tracking" feature the Quest 3 presents hands as controller-like sources (10 buttons,
+      // 0 axes, src.hand null), so a source counts as a controller only when it has thumbstick
+      // axes and a controller profile.
+      const gp = src.gamepad;
+      const profiles = Array.isArray(src.profiles) ? Array.from(src.profiles) : [];
+      const isController = !!gp && gp.axes.length >= 4 && profiles.length > 0
+        && !profiles.some((p) => /hand/i.test(p))
+        && profiles.some((p) => /^(oculus-touch|meta-quest-touch|generic-trigger)/.test(p));
+      if (src.hand || !src.gripSpace || !isController) {
+        controllers[src.handedness] = { hand_tracked: true, profiles, buttons: gp ? gp.buttons.length : 0, axes: gp ? gp.axes.length : 0 };
+        continue;
+      }
+      const space = src.gripSpace;
       const pose = frame.getPose(space, xrRefSpace);
       if (!pose) continue;
       const t = pose.transform;
-      const gp = src.gamepad;
       const orient = xyzw(t.orientation);
       const rawPos = xyz(t.position);
       // Shift the reported readout point in the controller's local frame so
@@ -1450,6 +1460,7 @@
         orientation: orient,
         buttons: gp ? gp.buttons.map((b) => ({ p: b.pressed, t: b.touched, v: b.value })) : [],
         axes:    gp ? Array.from(gp.axes) : [],
+        profiles,
       };
     }
 
