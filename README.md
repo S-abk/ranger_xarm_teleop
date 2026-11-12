@@ -242,6 +242,7 @@ the clutch is released. A refused or failed switch leaves the owner as it was an
 ### Measuring a run
 
 ```bash
+ros2 service call /teleop/disarm std_srvs/srv/Trigger           # MoveIt must own the arm, or the goal is rejected
 tools/move_arm.py [--controller xarm_xarm6_traj_controller]      # a posture with room to move (simulation only)
 tools/replay_measured.sh src/ranger_xarm_teleop_servo/test/fixtures/clutch_circle.jsonl /tmp/run.jsonl
 tools/measure_tracking.py report /tmp/run.jsonl
