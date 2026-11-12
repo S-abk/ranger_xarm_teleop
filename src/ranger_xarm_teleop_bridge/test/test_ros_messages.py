@@ -133,9 +133,34 @@ def test_inv3_headset_pose_never_on_a_controller_topic(node):
 def test_hand_tracked_source_is_not_present(node):
     frames = frames_of('malformed')
     frame = next(f for f in frames if f.left is not None and f.right is None)
+    assert frame.right_hand_tracked
     msgs = node.build_messages(frame, STAMP)
     assert 'right' not in msgs.poses
     assert msgs.status.right.pose_present is False
+    assert msgs.status.right.hand_tracked is True
+    assert msgs.status.right.emulated_position is False
+    assert msgs.status.left.pose_present is True
+    assert msgs.status.left.hand_tracked is False
+    # Joy block of a tracked hand is zeros, like an absent hand.
+    assert list(msgs.joy.axes[4:]) == [0.0] * 4 and list(msgs.joy.buttons[5:]) == [0] * 5
+
+
+def test_hand_tracked_is_false_for_controllers_and_absent_hands(node):
+    present = node.build_messages(frames_of('still_controller')[0], STAMP)
+    assert not present.status.left.hand_tracked and not present.status.right.hand_tracked
+    absent = next(f for f in frames_of('dropped_controller') if f.right is None)
+    msgs = node.build_messages(absent, STAMP)
+    assert msgs.status.right.pose_present is False
+    assert msgs.status.right.hand_tracked is False
+
+
+def test_session_id_preserved_and_change_visible(node):
+    frames = frames_of('new_session')
+    before, after = frames[179], frames[180]
+    assert node.build_messages(before, STAMP).status.session_id == before.session_id == 0x12345678
+    assert node.build_messages(after, STAMP).status.session_id == after.session_id == 0xCAFE0042
+    top = next(f for f in frames_of('malformed') if f.session_id == 2 ** 32 - 1)
+    assert node.build_messages(top, STAMP).status.session_id == 2 ** 32 - 1
 
 
 def test_emulated_pose_is_published_with_the_flag(node):

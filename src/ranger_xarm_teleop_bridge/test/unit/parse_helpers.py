@@ -54,6 +54,7 @@ def valid_frame():
         't_xr': 1000.0,
         'seq': 5,
         'reset_count': 0,
+        'session_id': 305419896,
         'controllers': {
             'left': hand(position=(-0.25, 0.95, -0.45)),
             'right': hand(),

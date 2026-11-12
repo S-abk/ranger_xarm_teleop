@@ -25,9 +25,9 @@ from ranger_xarm_teleop_bridge.jsonl_io import read_records, RecordWriter
 
 FIX = load_make_fixtures()
 FRAME_FIXTURES = ['still_controller', 'moving_controller', 'dropped_controller',
-                  'reset_event']
+                  'reset_event', 'new_session']
 DURATIONS_S = {'still_controller': 10, 'moving_controller': 6, 'dropped_controller': 8,
-               'reset_event': 5}
+               'reset_event': 5, 'new_session': 5}
 
 
 def path_of(name):
@@ -84,7 +84,14 @@ def test_every_line_parses_and_seq_increases(name):
     parsed = frames(name)
     assert len(parsed) == DURATIONS_S[name] * 72
     seqs = [f.seq for _, f in parsed]
-    assert seqs == list(range(len(seqs)))
+    if name == 'new_session':
+        # seq restarts at 0 with the new session id (page reload).
+        assert seqs == list(range(180)) + list(range(len(seqs) - 180))
+    else:
+        assert seqs == list(range(len(seqs)))
+    sessions = {f.session_id for _, f in parsed}
+    assert sessions == ({FIX.SESSION_ID, FIX.SESSION_ID_2} if name == 'new_session'
+                        else {FIX.SESSION_ID})
     t_recv = [t for t, _ in parsed]
     assert all(b > a for a, b in zip(t_recv, t_recv[1:]))
     assert t_recv[0] == pytest.approx(1700000000.0, abs=1e-3)
@@ -97,8 +104,9 @@ def test_every_line_parses_and_seq_increases(name):
 
 
 def test_no_fixture_has_an_absent_hand_except_dropped():
-    for name in ('still_controller', 'moving_controller', 'reset_event'):
+    for name in ('still_controller', 'moving_controller', 'reset_event', 'new_session'):
         assert all(f.left and f.right for _, f in frames(name))
+        assert not any(f.left_hand_tracked or f.right_hand_tracked for _, f in frames(name))
 
 
 def angle_deg(a, b):
@@ -191,6 +199,33 @@ def test_reset_event():
         assert b[2] - a[2] == pytest.approx(0.05, abs=1e-6)
     assert parsed[-1].right.position[0] == pytest.approx(0.35, abs=1e-6)
     assert len({f.right.position for f in parsed[180:]}) == 1
+
+
+def test_new_session():
+    parsed = [f for _, f in frames('new_session')]
+    for f in parsed:
+        assert f.session_id == (FIX.SESSION_ID_2 if seconds(f) >= 2.5 - 1e-9 else FIX.SESSION_ID)
+        assert f.reset_count == 0
+    before, after = parsed[179], parsed[180]
+    assert (before.session_id, after.session_id) == (FIX.SESSION_ID, FIX.SESSION_ID_2)
+    assert (before.seq, after.seq) == (179, 0)
+    for side in ('left', 'right'):
+        a, b = getattr(before, side).position, getattr(after, side).position
+        assert b[0] - a[0] == pytest.approx(-0.08, abs=1e-6)
+        assert b[1] - a[1] == pytest.approx(0.0, abs=1e-6)
+        assert b[2] - a[2] == pytest.approx(0.12, abs=1e-6)
+    assert len({f.right.position for f in parsed[180:]}) == 1
+
+
+def test_malformed_fixture_has_a_hand_tracked_frame_and_session_id_cases():
+    tracked = [f for f in (parse_text(r.text()) for r in read_records(path_of('malformed')))
+               if isinstance(f, ParsedFrame) and (f.left_hand_tracked or f.right_hand_tracked)]
+    assert len(tracked) == 2
+    assert all(f.right is None or f.left is None for f in tracked)
+    reasons = [parse_text(r.text()).reason for r in read_records(path_of('malformed'))
+               if hasattr(parse_text(r.text()), 'reason')]
+    assert any('missing session_id' in r for r in reasons)
+    assert any('session_id: expected an integer <= 4294967295' in r for r in reasons)
 
 
 def test_expected_has_one_entry_per_malformed_line():

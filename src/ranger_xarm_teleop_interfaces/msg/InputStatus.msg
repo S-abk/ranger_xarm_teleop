@@ -4,6 +4,11 @@
 # ROS time at publication; frame_id is the pose frame (quest_world).
 std_msgs/Header header
 
+# Random 32-bit number drawn by the web client each time an XR session starts.
+# Preserved exactly. A change means quest_world was redefined (new session or page
+# reload); the pair (session_id, reset_count) identifies one stable frame (G-4, G-13).
+uint32 session_id
+
 # Client sequence number, incremented by the web client for every frame it builds.
 # Preserved exactly; a gap means frames were lost between headset and ROS.
 uint64 seq

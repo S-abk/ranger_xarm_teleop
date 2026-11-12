@@ -74,16 +74,33 @@ def test_hand_tracked_is_not_present_whatever_else_it_contains():
     result = parse(frame)
     assert result.right is None
     assert result.left is not None
+    assert result.right_hand_tracked is True and result.left_hand_tracked is False
     frame['controllers']['right'] = dict(hand(), hand_tracked=True)
     assert parse(frame).right is None
+    assert parse(frame).right_hand_tracked is True
     frame['controllers']['right'] = {'hand_tracked': True, 'position': [1], 'buttons': 3}
     assert parse(frame).right is None
+    assert parse(frame).right_hand_tracked is True
+
+
+def test_hand_tracked_flag_is_false_for_controllers_and_absent_hands():
+    result = parse(valid_frame())
+    assert result.left_hand_tracked is False and result.right_hand_tracked is False
+    frame = valid_frame()
+    del frame['controllers']['left']
+    result = parse(frame)
+    assert result.left is None and result.left_hand_tracked is False
+    frame['controllers'] = {'left': {'hand_tracked': True}}
+    result = parse(frame)
+    assert result.left is None and result.left_hand_tracked is True
+    assert result.right is None and result.right_hand_tracked is False
 
 
 def test_hand_tracked_false_is_a_normal_controller():
     frame = valid_frame()
     frame['controllers']['right'] = dict(hand(), hand_tracked=False)
-    assert parse(frame).right is not None
+    result = parse(frame)
+    assert result.right is not None and result.right_hand_tracked is False
 
 
 def test_unknown_controller_keys_are_ignored():
@@ -127,9 +144,11 @@ def test_invalid_present_hand_makes_whole_frame_malformed():
 def test_times_and_sequence_preserved_exactly():
     frame = valid_frame()
     text = ('{"type":"xr_frame","t_client":123457.18900000002,"t_xr":123456.78900000001,'
-            '"seq":9007199254740993,"reset_count":3,"controllers":{},"viewer":null}')
+            '"seq":9007199254740993,"reset_count":3,"session_id":4294967295,'
+            '"controllers":{},"viewer":null}')
     result = parse_text(text)
     assert isinstance(result, ParsedFrame)
+    assert result.session_id == 4294967295
     assert result.xr_time_ms == 123456.78900000001
     assert result.xr_time_ms.hex() == float('123456.78900000001').hex()
     assert result.client_time_ms == 123457.18900000002
@@ -221,11 +240,14 @@ def test_message_level_errors(text, fragment):
 
 def test_stock_client_frame_is_reported_as_unpatched():
     frame = valid_frame()
-    for key in ('seq', 't_xr', 'reset_count'):
+    for key in ('seq', 't_xr', 'reset_count', 'session_id'):
         del frame[key]
     for h in frame['controllers'].values():
         del h['emulated_position']
-    assert_malformed(frame, 'client not patched: missing seq')
+    assert_malformed(frame, 'client not patched: missing session_id')
+    frame = valid_frame()
+    del frame['session_id']
+    assert_malformed(frame, 'client not patched: missing session_id')
     frame = valid_frame()
     del frame['reset_count']
     assert_malformed(frame, 'client not patched: missing reset_count')
@@ -243,6 +265,12 @@ def test_stock_client_frame_is_reported_as_unpatched():
     ('reset_count', -1, 'reset_count'),
     ('reset_count', False, 'reset_count'),
     ('reset_count', 0.5, 'reset_count'),
+    ('session_id', -1, 'session_id: expected an integer >= 0'),
+    ('session_id', 2 ** 32, 'session_id: expected an integer <= 4294967295'),
+    ('session_id', True, 'session_id'),
+    ('session_id', 1.0, 'session_id'),
+    ('session_id', '1', 'session_id'),
+    ('session_id', None, 'session_id'),
     ('t_xr', 'abc', 't_xr: expected a finite number'),
     ('t_xr', True, 't_xr'),
     ('t_xr', None, 't_xr'),
@@ -261,6 +289,15 @@ def test_top_level_field_strictness(field, value, fragment):
     assert fragment in parse_text(text).reason
 
 
+@pytest.mark.parametrize('value', [0, 1, 2 ** 31, 2 ** 32 - 1])
+def test_session_id_range_is_uint32(value):
+    frame = valid_frame()
+    frame['session_id'] = value
+    result = parse(frame)
+    assert isinstance(result, ParsedFrame)
+    assert result.session_id == value and type(result.session_id) is int
+
+
 def test_missing_t_client_and_viewer():
     frame = valid_frame()
     del frame['t_client']
@@ -276,7 +313,7 @@ def test_missing_t_client_and_viewer():
 @pytest.mark.parametrize('token', ['NaN', 'Infinity', '-Infinity'])
 def test_non_finite_tokens_rejected(token):
     text = ('{"type":"xr_frame","t_client":1,"t_xr":%s,"seq":0,"reset_count":0,'
-            '"controllers":{},"viewer":null}' % token)
+            '"session_id":1,"controllers":{},"viewer":null}' % token)
     result = parse_text(text)
     assert isinstance(result, Malformed)
     assert token in result.reason
@@ -426,7 +463,8 @@ def test_fuzz_mutations_never_raise():
 
 def test_every_deleted_required_key_is_malformed():
     base = valid_frame()
-    required = [('seq',), ('t_xr',), ('t_client',), ('reset_count',), ('controllers',),
+    required = [('seq',), ('t_xr',), ('t_client',), ('reset_count',), ('session_id',),
+                ('controllers',),
                 ('viewer',), ('controllers', 'right', 'position'),
                 ('controllers', 'right', 'orientation'),
                 ('controllers', 'right', 'emulated_position'),

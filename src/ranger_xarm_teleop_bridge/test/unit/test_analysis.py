@@ -29,10 +29,10 @@ def records(name):
 
 
 def frame(seq, t, pos=(0.2, 0.9, -0.4), reset=0, client_offset=0.0, hand='right',
-          emulated=False):
+          emulated=False, session=7):
     """Return a Record for one frame received at ``t``, ``client_offset`` ms after it was sent."""
     msg = {'type': 'xr_frame', 't_client': t * 1000.0 - 100.0 - client_offset,
-           't_xr': t * 1000.0 - 100.5, 'seq': seq, 'reset_count': reset,
+           't_xr': t * 1000.0 - 100.5, 'seq': seq, 'reset_count': reset, 'session_id': session,
            'controllers': {}, 'viewer': None}
     if hand:
         msg['controllers'][hand] = {'position': list(pos), 'orientation': [0.0, 0.0, 0.0, 1.0],
@@ -82,6 +82,37 @@ def test_reset_event_is_listed():
     assert not report['spread']['pass_position']
     before = analyze(records('reset_event'), hand='left', t_to=2.4)
     assert before['spread']['pass_position'] and before['resets']['count'] == 0
+
+
+def test_new_session_is_listed_like_a_reset():
+    report = analyze(records('new_session'), hand='right')
+    assert report['resets']['count'] == 0
+    assert report['sessions']['count'] == 1
+    event = report['sessions']['events'][0]
+    assert event['at'] == pytest.approx(2.5, abs=0.03)
+    assert (event['from'], event['to']) == (0x12345678, 0xCAFE0042)
+    assert event['seq'] == 0
+    assert report['sessions']['first_session_id'] == 0x12345678
+    assert report['sessions']['final_session_id'] == 0xCAFE0042
+    # seq restarted: reported as a jump, not as missing frames.
+    assert report['seq']['jumps'] == [{'from': 179, 'to': 0, 'at': pytest.approx(2.5, abs=0.03)}]
+    assert report['seq']['missing'] == 0
+    assert not report['spread']['pass_position']
+    before = analyze(records('new_session'), hand='right', t_to=2.4)
+    assert before['spread']['pass_position'] and before['sessions']['count'] == 0
+    text = format_report(report)
+    assert 'XR session changes: 1' in text and f'{0x12345678} -> {0xCAFE0042}' in text
+
+
+def test_session_changes_on_hand_made_records():
+    recs = [frame(0, 10.0), frame(1, 10.014), frame(2, 10.028, session=9),
+            frame(3, 10.042, session=9), frame(4, 10.056, session=11)]
+    report = analyze(recs, hand='right')
+    assert report['sessions']['count'] == 2
+    assert [(e['from'], e['to'], e['seq']) for e in report['sessions']['events']] == [
+        (7, 9, 2), (9, 11, 4)]
+    assert report['sessions']['final_session_id'] == 11
+    assert report['resets']['count'] == 0
 
 
 def test_moving_controller_is_not_still():

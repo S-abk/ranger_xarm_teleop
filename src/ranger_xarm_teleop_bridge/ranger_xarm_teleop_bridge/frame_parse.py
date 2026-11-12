@@ -21,8 +21,11 @@ accepted only if every present hand is valid; otherwise the whole frame is
 ``Malformed`` and nothing may be published for it.
 
 A hand that is omitted, or that is a tracked hand (``{"hand_tracked": true}``)
-is ``None``: not present. No other pose is ever substituted (INV-2).
-``seq``, ``t_xr`` and ``t_client`` are carried through unchanged (INV-4).
+is ``None``: not present; the tracked-hand case is flagged in ``left_hand_tracked``
+/ ``right_hand_tracked``. No other pose is ever substituted (INV-2).
+``session_id``, ``seq``, ``t_xr`` and ``t_client`` are carried through unchanged
+(INV-4). A frame without ``session_id`` (or any other field the patched client
+adds) is malformed.
 Positions are WebXR axes in metres and quaternions are xyzw; conversion to ROS
 axes happens elsewhere (``axes.py``).
 """
@@ -33,6 +36,8 @@ import math
 from typing import Any, Optional, Tuple, Union
 
 ORIENTATION_NORM_TOLERANCE = 1e-3
+UINT32_MAX = 2 ** 32 - 1
+PATCHED_CLIENT_KEYS = ('session_id', 'seq', 't_xr', 'reset_count')
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,7 @@ class ViewerSample:
 class ParsedFrame:
     """A valid ``xr_frame`` message."""
 
+    session_id: int
     seq: int
     xr_time_ms: float
     client_time_ms: float
@@ -75,6 +81,9 @@ class ParsedFrame:
     left: Optional[HandSample]
     right: Optional[HandSample]
     viewer: Optional[ViewerSample]
+    # True when the input source was a tracked hand; the hand itself is then None.
+    left_hand_tracked: bool = False
+    right_hand_tracked: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,10 +142,12 @@ def _number(value: Any, name: str) -> float:
     return result
 
 
-def _count(obj: dict, key: str) -> int:
+def _count(obj: dict, key: str, maximum: Optional[int] = None) -> int:
     value = obj[key]
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise _Invalid(f'{key}: expected an integer >= 0')
+    if maximum is not None and value > maximum:
+        raise _Invalid(f'{key}: expected an integer <= {maximum}')
     return int(value)
 
 
@@ -189,11 +200,12 @@ def _button(value: Any, name: str) -> Button:
     return Button(pressed=value['p'], touched=touched, value=analog)
 
 
-def _hand(value: Any, name: str) -> Optional[HandSample]:
+def _hand(value: Any, name: str) -> Tuple[Optional[HandSample], bool]:
+    """Return (sample, hand_tracked); a tracked hand gives (None, True)."""
     if not isinstance(value, dict):
         raise _Invalid(f'{name}: expected an object')
     if value.get('hand_tracked') is True:
-        return None
+        return None, True
     position = _position(value, name)
     orientation = _orientation(value, name)
     emulated = _emulated(value, name)
@@ -205,7 +217,7 @@ def _hand(value: Any, name: str) -> Optional[HandSample]:
     if not isinstance(axes, list):
         raise _Invalid(f'{name}.axes: expected a list')
     parsed_axes = tuple(_number(a, f'{name}.axes[{i}]') for i, a in enumerate(axes))
-    return HandSample(position, orientation, emulated, parsed_buttons, parsed_axes)
+    return HandSample(position, orientation, emulated, parsed_buttons, parsed_axes), False
 
 
 def _viewer(value: Any) -> Optional[ViewerSample]:
@@ -218,9 +230,10 @@ def _viewer(value: Any) -> Optional[ViewerSample]:
 
 
 def _frame(obj: dict) -> ParsedFrame:
-    for key in ('seq', 't_xr', 'reset_count'):
+    for key in PATCHED_CLIENT_KEYS:
         if key not in obj:
             raise _Invalid(f'client not patched: missing {key}')
+    session_id = _count(obj, 'session_id', UINT32_MAX)
     seq = _count(obj, 'seq')
     xr_time = _number(obj['t_xr'], 't_xr')
     if 't_client' not in obj:
@@ -233,13 +246,15 @@ def _frame(obj: dict) -> ParsedFrame:
     if 'viewer' not in obj:
         raise _Invalid('viewer: missing (expected an object or null)')
     hands = {}
+    tracked = {}
     for side in ('left', 'right'):
-        hands[side] = None
+        hands[side], tracked[side] = None, False
         if side in controllers:
-            hands[side] = _hand(controllers[side], f'controllers.{side}')
+            hands[side], tracked[side] = _hand(controllers[side], f'controllers.{side}')
     viewer = _viewer(obj['viewer'])
-    return ParsedFrame(seq, xr_time, client_time, reset_count,
-                       hands['left'], hands['right'], viewer)
+    return ParsedFrame(session_id, seq, xr_time, client_time, reset_count,
+                       hands['left'], hands['right'], viewer,
+                       left_hand_tracked=tracked['left'], right_hand_tracked=tracked['right'])
 
 
 def parse_message(obj: Any) -> ParseResult:

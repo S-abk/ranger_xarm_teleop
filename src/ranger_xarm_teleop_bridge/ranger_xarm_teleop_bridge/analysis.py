@@ -189,6 +189,15 @@ def analyze(records: Iterable[Record], hand: str = 'right',
     report['resets'] = {'count': len(resets), 'events': resets,
                         'final_reset_count': samples[-1].frame.reset_count}
 
+    # XR session changes (Start Teleop, page reload): quest_world was redefined.
+    sessions = [{'at': times[i], 'seq': samples[i].frame.seq,
+                 'from': samples[i - 1].frame.session_id, 'to': samples[i].frame.session_id}
+                for i in range(1, len(samples))
+                if samples[i].frame.session_id != samples[i - 1].frame.session_id]
+    report['sessions'] = {'count': len(sessions), 'events': sessions,
+                          'first_session_id': samples[0].frame.session_id,
+                          'final_session_id': samples[-1].frame.session_id}
+
     # Presence and emulation intervals for the hand.
     hand_samples = [getattr(s.frame, hand) for s in samples]
     absent = [h is None for h in hand_samples]
@@ -303,6 +312,12 @@ def format_report(report: Dict[str, Any]) -> str:
                  f"final reset_count {r['final_reset_count']}")
     for ev in r['events']:
         lines.append(f"  reset at {ev['at']:.2f} s (seq {ev['seq']}): {ev['from']} -> {ev['to']}")
+    se = report['sessions']
+    lines.append(f"XR session changes: {se['count']}  "
+                 f"session_id {se['first_session_id']} .. {se['final_session_id']}")
+    for ev in se['events']:
+        lines.append(f"  new session at {ev['at']:.2f} s (seq {ev['seq']}): "
+                     f"{ev['from']} -> {ev['to']}")
     lines.append(f"present frames {report['present_frames']}  "
                  f"absent intervals {len(report['absent_intervals'])}  "
                  f"emulated intervals {len(report['emulated_intervals'])}")

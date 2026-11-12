@@ -95,6 +95,7 @@ class BridgeNode(Node):
         self.ignored = 0
         self.ignored_types: Dict[str, int] = {}
         self.last_seq: Optional[int] = None
+        self.last_session_id: Optional[int] = None
         self.connected = False
         self._frames_at_last_stats = 0
         self._last_warn = 0.0
@@ -129,9 +130,13 @@ class BridgeNode(Node):
             messages = self.build_messages(result, stamp)
             self.publish_frame(messages)
             self.frames += 1
-            if self.last_seq is not None and result.seq != self.last_seq + 1:
+            if result.session_id != self.last_session_id:
+                self.get_logger().info(f'XR session id {result.session_id} '
+                                       f'(was {self.last_session_id}); quest_world redefined')
+            elif self.last_seq is not None and result.seq != self.last_seq + 1:
                 self.get_logger().warning(f'sequence jump {self.last_seq} -> {result.seq}',
                                           throttle_duration_sec=LOG_THROTTLE_S)
+            self.last_session_id = result.session_id
             self.last_seq = result.seq
         except Exception as exc:  # noqa: B902 - a frame must never take the node down
             self._count_malformed(f'unexpected {type(exc).__name__}: {exc}')
@@ -142,6 +147,7 @@ class BridgeNode(Node):
         status = InputStatus()
         status.header.stamp = stamp
         status.header.frame_id = self.frame_id
+        status.session_id = int(frame.session_id)
         status.seq = int(frame.seq)
         status.xr_time_ms = float(frame.xr_time_ms)
         status.client_time_ms = float(frame.client_time_ms)
@@ -156,7 +162,9 @@ class BridgeNode(Node):
         for hand in HANDS:
             sample = getattr(frame, hand)
             hand_status = HandStatus()
+            hand_status.hand_tracked = bool(getattr(frame, f'{hand}_hand_tracked'))
             if sample is None:
+                # Absent or a tracked hand: no pose, nothing substituted (INV-2).
                 hand_status.pose_present = False
                 hand_status.emulated_position = False
             else:

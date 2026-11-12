@@ -33,6 +33,8 @@ T_RECV_START = 1700000000.0
 T_XR_START_MS = 1000.0
 CLIENT_OFFSET_MS = 0.4
 NUM_BUTTONS = 7
+SESSION_ID = 0x12345678
+SESSION_ID_2 = 0xCAFE0042
 
 RIGHT_STILL = (0.25, 0.95, -0.45)
 LEFT_STILL = (-0.25, 0.95, -0.45)
@@ -123,7 +125,8 @@ def _viewer(position: Vec, orientation: Quat) -> Dict[str, Any]:
 
 
 def _frame(i: int, left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any]],
-           viewer: Optional[Dict[str, Any]], reset_count: int = 0) -> Dict[str, Any]:
+           viewer: Optional[Dict[str, Any]], reset_count: int = 0, seq: Optional[int] = None,
+           session_id: int = SESSION_ID) -> Dict[str, Any]:
     t_xr = round(T_XR_START_MS + i * 1000.0 / RATE_HZ, 6)
     controllers: Dict[str, Any] = {}
     if left is not None:
@@ -134,8 +137,9 @@ def _frame(i: int, left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any
         'type': 'xr_frame',
         't_client': round(t_xr + CLIENT_OFFSET_MS, 6),
         't_xr': t_xr,
-        'seq': i,
+        'seq': i if seq is None else seq,
         'reset_count': reset_count,
+        'session_id': session_id,
         'controllers': controllers,
         'viewer': viewer,
     }
@@ -217,6 +221,27 @@ def reset_event() -> List[str]:
     return lines
 
 
+def new_session() -> List[str]:
+    """
+    Both controllers still; at 2.5 s the page is reloaded.
+
+    The session id changes, seq restarts at 0, reset_count stays 0 and the positions jump
+    because local-floor was redefined.
+    """
+    lines = []
+    jump = (-0.08, 0.0, 0.12)
+    reload_at = _idx(2.5)
+    for i in range(5 * RATE_HZ):
+        after = i >= reload_at
+        shift = jump if after else (0.0, 0.0, 0.0)
+        right = _hand(tuple(RIGHT_STILL[k] + shift[k] for k in range(3)), RIGHT_QUAT)
+        left = _hand(tuple(LEFT_STILL[k] + shift[k] for k in range(3)), LEFT_QUAT)
+        frame = _frame(i, left, right, _static_viewer(), seq=i - reload_at if after else i,
+                       session_id=SESSION_ID_2 if after else SESSION_ID)
+        lines.append(_line(i, frame))
+    return lines
+
+
 def _mutated(i: int, mutate) -> Dict[str, Any]:
     """Build a valid still frame, apply ``mutate`` to it and return it."""
     frame = _frame(i, _hand(LEFT_STILL, LEFT_QUAT), _hand(RIGHT_STILL, RIGHT_QUAT),
@@ -244,7 +269,7 @@ def _delete(path: Tuple[Any, ...]):
 
 
 def _stock_client(frame: Dict[str, Any]) -> None:
-    for key in ('seq', 't_xr', 'reset_count'):
+    for key in ('seq', 't_xr', 'reset_count', 'session_id'):
         del frame[key]
     for hand in frame['controllers'].values():
         del hand['emulated_position']
@@ -312,6 +337,11 @@ def _malformed_cases() -> List[Tuple[str, Any, str]]:
         ('raw', '{"type":"xr_frame","t_client":1,"t_xr":Infinity,"seq":3,"reset_count":0,'
                 '"controllers":{},"viewer":null}', 'malformed'),
         ('frame', _set(('seq',), 7), 'frame'),
+        ('frame', _delete(('session_id',)), 'malformed'),
+        ('frame', _set(('session_id',), -1), 'malformed'),
+        ('frame', _set(('session_id',), 2 ** 32), 'malformed'),
+        ('frame', _set(('session_id',), 1.0), 'malformed'),
+        ('frame', _set(('session_id',), 2 ** 32 - 1), 'frame'),
     ]
 
 
@@ -342,6 +372,7 @@ def generate() -> Dict[str, List[str]]:
         'moving_controller': moving_controller(),
         'dropped_controller': dropped_controller(),
         'reset_event': reset_event(),
+        'new_session': new_session(),
         'malformed': malformed(),
     }
 

@@ -51,12 +51,20 @@ republishes a recording directly through the same bridge code path (no relay nee
 
 All messages built from one headset frame carry the identical `header.stamp` (ROS time at
 publication). A pose is published only for a controller whose pose the headset reported; a
-hand-tracked input source counts as not present. The headset pose is never published as a
-controller pose. An emulated position is published with `emulated_position` set in the status.
+hand-tracked input source counts as not present and is flagged `hand_tracked` in the status.
+The headset pose is never published as a controller pose. An emulated position is published
+with `emulated_position` set in the status.
+
+`InputStatus.session_id` is a random 32-bit number the web client draws each time an XR
+session starts (Start Teleop, page reload). Together with `reset_count` it identifies one
+stable `quest_world` frame: when either changes, earlier poses and the calibration no longer
+apply (safety gate G-4, G-13). Frames without `session_id`, `seq`, `t_xr` or `reset_count`
+come from an unpatched client and are rejected as malformed.
 
 ### Frames
 
-`quest_world` is the WebXR `local-floor` space converted once, in the bridge, to ROS axes:
+`quest_world` is the WebXR `local-floor` space of the current XR session (see `session_id`
+above) converted once, in the bridge, to ROS axes:
 `x_ros = -z_xr`, `y_ros = -x_xr`, `z_ros = y_xr`, applied to the position and to the rotation
 (`q_ros = (-qz, -qx, qy, qw)` for an xyzw quaternion). No other node swaps or negates axes.
 
@@ -83,4 +91,5 @@ The bridge's `record_path` parameter and `tools/record_relay.py` write the raw r
 JSON object per line: `{"t_recv": <unix s>, "msg": {...}}` (or `"raw"` for non-JSON text).
 `tools/analyze_input.py <file> --hand right [--from s --to s]` reports the still-controller spread
 (pass line 10 mm / 2°), the longest frame gap, every absent or emulated interval, re-acquisition
-jumps, reference-space resets, viewer yaw span and the transport timing (clock offset and jitter).
+jumps, reference-space resets, XR session changes, viewer yaw span and the transport timing
+(clock offset and jitter).
