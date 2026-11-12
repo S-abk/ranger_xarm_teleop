@@ -1,0 +1,20 @@
+# SIMULATION ONLY. These limit values are NOT approved for hardware.
+#
+# The safety gate leaves the real values PENDING: they have no default and must come
+# from whoever is responsible for the robot. The numbers below were chosen so the
+# simulated arm can be teleoperated (mock execution, Gazebo, Isaac Sim) and nothing else.
+#
+# `limits_are_simulation_only: true` makes the teleop node exit unless the robot
+# description shows simulator hardware only, and makes teleop_core.launch.py refuse this
+# file unless it is called with simulation:=true. Do not copy this file for a robot:
+# write a new one with values you can justify, without that flag.
+/**:
+  ros__parameters:
+    limits_are_simulation_only: true
+    max_offset_translation_m: 0.30     # from the tool pose at clutch engagement
+    max_offset_rotation_deg: 60.0
+    view_cone_half_angle_deg: 45.0     # headset forward axis to the controller
+    step_translation_limit_m: 0.030    # per 20 ms target cycle (1.5 m/s)
+    step_rotation_limit_deg: 10.0      # per 20 ms target cycle (500 deg/s)
+    linear_speed_cap_m_s: 0.25         # MoveIt Servo scale.linear
+    angular_speed_cap_rad_s: 1.0       # MoveIt Servo scale.rotational

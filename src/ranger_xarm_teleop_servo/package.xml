@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ranger_xarm_teleop_servo</name>
+  <version>0.1.0</version>
+  <description>Teleop servo node (clutch-relative mapping, safety gate, MoveIt Servo pose commands) and the command mux that gives teleop or MoveIt exclusive ownership of the arm.</description>
+  <maintainer email="solanrewaju2020@fau.edu">Shuaib Olanrewaju</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>ranger_xarm_teleop_interfaces</depend>
+  <depend>ranger_xarm_teleop_bridge</depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>action_msgs</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_msgs</depend>
+  <depend>moveit_msgs</depend>
+  <depend>controller_manager_msgs</depend>
+  <depend>python3-numpy</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
