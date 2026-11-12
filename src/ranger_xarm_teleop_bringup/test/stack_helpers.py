@@ -99,6 +99,29 @@ class Process:
         self.log.close()
 
 
+def kill_gz_partition(partition: str) -> int:
+    """
+    Kill every process whose environment carries this gz partition; return how many.
+
+    A gz server can outlive the launch that started it (it leaves the process group),
+    and a leftover server slows or breaks the next simulation.
+    """
+    killed = 0
+    needle = f'GZ_PARTITION={partition}'.encode()
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit() or int(entry) == os.getpid():
+            continue
+        try:
+            with open(f'/proc/{entry}/environ', 'rb') as handle:
+                if needle not in handle.read().split(b'\0'):
+                    continue
+            os.kill(int(entry), signal.SIGKILL)
+            killed += 1
+        except (OSError, PermissionError):
+            continue
+    return killed
+
+
 class Probe:
     """A node that watches the teleop stack and acts on it, spun in a background thread."""
 
@@ -112,6 +135,7 @@ class Probe:
         self.joints = []            # (monotonic, [q1..q6])
         self.owner = None
         self.inputs = []            # monotonic arrival of every input status
+        self.spin_errors = []
         self.moveit_controller = moveit_controller
         self.teleop_controller = teleop_controller
         self.node.create_subscription(TeleopState, '/teleop/state', self._on_state, 50)
@@ -132,10 +156,16 @@ class Probe:
         self.thread.start()
 
     def _spin(self):
-        try:
-            self.executor.spin()
-        except Exception:  # noqa: B902 - shutdown of the context ends the spin
-            pass
+        # Clients are created from the test thread while this thread spins; an
+        # exception from that race must not end the spinning, or the probe would go
+        # deaf and later checks would read stale values.
+        while self.context.ok():
+            try:
+                self.executor.spin_once(timeout_sec=0.1)
+            except Exception as err:  # noqa: B902 - keep spinning, remember what happened
+                if not self.context.ok():
+                    break
+                self.spin_errors.append(repr(err))
 
     def close(self):
         self.executor.shutdown(timeout_sec=2.0)
@@ -185,6 +215,13 @@ class Probe:
         with self.lock:
             return self.states[-1][1] if self.states else None
 
+    def assert_listening(self):
+        """Fail unless a TeleopState arrived in the last half second."""
+        with self.lock:
+            newest = self.states[-1][0] if self.states else None
+        assert newest is not None and time.monotonic() - newest < 0.5, (
+            f'the probe is not receiving /teleop/state (spin errors: {self.spin_errors})')
+
     def states_since(self, t):
         with self.lock:
             return [s for when, s in self.states if when >= t]
@@ -229,6 +266,7 @@ class Probe:
         return self.call(self.set_owner_client, SetArmOwner.Request(owner=owner))
 
     def disarm(self):
+        self.assert_listening()
         self.call(self.disarm_client, Trigger.Request())
         self.wait_for(lambda: self.owner_value() == ArmOwner.OWNER_MOVEIT, 10.0,
                       'the arm to return to MoveIt after disarming')

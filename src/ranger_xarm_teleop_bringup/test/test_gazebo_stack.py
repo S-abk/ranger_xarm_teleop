@@ -19,8 +19,8 @@ the robot underlay's Gazebo packages). Without it every test here is skipped.
 
 The stack runs on its own ROS domain and gz partition. MoveIt Servo, the mux, the teleop
 node and the controllers use simulation time; the input replay uses the system clock.
-The timeout test slows the simulation to 0.3 times real time while the clutch is held
-(100 ms of simulation time then lasts 333 ms) and requires the clutch to release 100 ms
+The timeout test runs with the simulation slowed to 0.3 times real time (100 ms of
+simulation time then lasts 333 ms) and requires the clutch to release 100 ms
 of real time after the input stops. (A paused simulation cannot be used for this: with
 no joint states the measured tool pose goes stale and the gate releases for that
 reason first.)
@@ -34,7 +34,7 @@ import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from rcl_interfaces.srv import GetParameters
 
-from stack_helpers import child_environment, Probe, Process, READY, replay
+from stack_helpers import child_environment, kill_gz_partition, Probe, Process, READY, replay
 
 pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
                                 reason='set TELEOP_TEST_GAZEBO=1 to run the Gazebo tests')
@@ -74,6 +74,7 @@ def stack(tmp_path_factory):
             teleop.stop()
             print(teleop.output()[-4000:])
         sim.stop()
+        kill_gz_partition(env['GZ_PARTITION'])     # the gz server can outlive its launch
 
 
 def set_real_time_factor(env, factor: float) -> None:
@@ -127,24 +128,24 @@ def test_input_timeout_is_100_ms_of_real_time_not_of_simulation_time(stack):
     probe, env, logs = stack
     probe.disarm()
     probe.move_to(READY, seconds=4.0)
-    start = time.monotonic()
-    process = replay(env, 'clutch_stall', str(logs / 'replay_stall.log'))
-    slowed = False
+    # Slow the simulation before the run (changing it while the clutch is held makes
+    # the joint states pause, which the gate rightly answers with TOOL_POSE_STALE).
+    set_real_time_factor(env, 0.3)              # simulation time now runs at 0.3 x real time
+    process = None
     try:
-        probe.wait_for(lambda: any(s.clutch_engaged for s in probe.states_since(start)), 40.0,
-                       'the clutch to engage')
-        time.sleep(0.2)
-        set_real_time_factor(env, 0.3)          # simulation time now runs at 0.3 x real time
-        slowed = True
+        time.sleep(2.0)
         slowed_at = time.monotonic()
+        start = slowed_at
+        process = replay(env, 'clutch_stall', str(logs / 'replay_stall.log'))
         assert process.wait(60.0) == 0, process.output()
         time.sleep(0.5)
     finally:
-        if slowed:
-            set_real_time_factor(env, 1.0)
-        process.stop()
+        set_real_time_factor(env, 1.0)
+        if process is not None:
+            process.stop()
 
     states = probe.timed_states_since(start)
+    assert any(s.clutch_engaged for _, s in states), 'the clutch did not engage'
     first_engaged = min(when for when, s in states if s.clutch_engaged)
     # The first engagement: the grip stays held through the hole in the stream.
     release_time, release = next((when, s) for when, s in states
@@ -154,7 +155,7 @@ def test_input_timeout_is_100_ms_of_real_time_not_of_simulation_time(stack):
     last_input = max(t for t in probe.inputs_since(start) if t <= release_time)
 
     # Simulation time really ran slow around the release ...
-    window = [(when, s) for when, s in states if slowed_at + 0.3 < when <= release_time]
+    window = [(when, s) for when, s in states if first_engaged <= when <= release_time]
     wall = window[-1][0] - window[0][0]
     simulated = stamp_seconds(window[-1][1]) - stamp_seconds(window[0][1])
     assert wall > 0.2 and 0.15 < simulated / wall < 0.5, (simulated, wall)
