@@ -22,10 +22,15 @@ must publish them as not present and hand tracked.
 ``clip_controller_occlusion.jsonl``: 4.4 .. 5.0 s of ``recordings/occlusion.jsonl``, the
 real right Touch controller (12 buttons, 4 axes) going from tracked to emulated at 4.62 s.
 
-``clip_controller_buttons.jsonl``: nine 0.1 s cuts (9 frames each, concatenated) of
-``recordings/button_clip.jsonl``, right Touch Plus controller, one control operated per cut in
-the order trigger, grip, thumbstick click, A, B, stick full left, right, up, down. It fixes the
-Joy layout and the stick signs against the real headset.
+``clip_controller_buttons.jsonl`` / ``clip_controller_buttons_left.jsonl``: nine 0.1 s cuts
+(9 frames each, concatenated) of ``recordings/button_clip.jsonl`` (right Touch Plus controller,
+12 buttons) and ``recordings/button_clip_left.jsonl`` (left, 13 buttons), one control operated
+per cut in the order trigger, grip, thumbstick click, A/X, B/Y, stick full left, right, back,
+forward. They fix the Joy layout against the real headset.
+
+``clip_controller_stick_up.jsonl``: 9 frames of ``recordings/stick-up.jsonl``, the right stick
+pushed fully up (forward, away from the user) and nothing else: ``axes[3]`` is -1.0 (-0.998), which
+settles the sign of stick y (negative up, as in the Gamepad API convention).
 """
 
 import os
@@ -115,68 +120,95 @@ def test_analysis_warns_on_hands_and_not_on_the_controller():
     assert 'WARNING' not in format_report(ctrl)
 
 
-# One cut per control, in the order the human operated them (the stick labels come from
-# that stated order; the y sign is provisional until a lone stick-up push is recorded).
-# For each: the Joy button that must be 1, the Joy axis that must be large and its sign,
-# and the raw XR index pressed.
+# One cut per control, in the order the human operated them, for both hands. For each: the
+# Joy button that must be 1, the Joy axis that must be large and its sign, and the raw XR index
+# pressed. The stick-y sign comes from the lone stick-up recording (see below); in the
+# button-by-button clips the back push came before the forward push.
 BUTTON_CLIP_ORDER = (
-    ('trigger', 'right_trigger', 'right_trigger', +1, 0),
-    ('grip', 'right_grip', 'right_grip', +1, 1),
-    ('thumbstick click', 'right_thumbstick', None, 0, 3),
-    ('A', 'right_primary', None, 0, 4),
-    ('B', 'right_secondary', None, 0, 5),
-    ('stick left', None, 'right_thumbstick_x', -1, None),
-    ('stick right', None, 'right_thumbstick_x', +1, None),
-    ('stick up', None, 'right_thumbstick_y', +1, None),
-    ('stick down', None, 'right_thumbstick_y', -1, None),
+    ('trigger', 'trigger', 'trigger', +1, 0),
+    ('grip', 'grip', 'grip', +1, 1),
+    ('thumbstick click', 'thumbstick', None, 0, 3),
+    ('A / X', 'primary', None, 0, 4),
+    ('B / Y', 'secondary', None, 0, 5),
+    ('stick left', None, 'thumbstick_x', -1, None),
+    ('stick right', None, 'thumbstick_x', +1, None),
+    ('stick back (down)', None, 'thumbstick_y', +1, None),
+    ('stick forward (up)', None, 'thumbstick_y', -1, None),
 )
 TOUCH_ONLY_XR_INDICES = (7, 8, 9, 10, 11)
+BUTTON_CLIPS = (('clip_controller_buttons', 'right', 12),
+                ('clip_controller_buttons_left', 'left', 13))
 
 
-def test_buttons_clip_is_the_real_right_controller():
-    parsed = frames('clip_controller_buttons')
+@pytest.mark.parametrize('name, hand, button_count', BUTTON_CLIPS)
+def test_buttons_clip_is_one_real_controller(name, hand, button_count):
+    parsed = frames(name)
     assert len(parsed) == 9 * 9
+    other = 'left' if hand == 'right' else 'right'
     for f in parsed:
-        assert f.left is None and f.right is not None and is_controller(f.right)
-        assert len(f.right.buttons) == 12 and len(f.right.axes) == 4
-        assert f.right.emulated_position is False
-        assert f.session_id == 3915310367 and f.reset_count == 4
-        assert f.right.axes[0] == 0.0 and f.right.axes[1] == 0.0   # touchpad axes unused
+        assert getattr(f, other) is None
+        sample = getattr(f, hand)
+        assert sample is not None and is_controller(sample)
+        assert len(sample.buttons) == button_count and len(sample.axes) == 4
+        assert sample.emulated_position is False
+        assert f.session_id == 3915310367
+        assert sample.axes[0] == 0.0 and sample.axes[1] == 0.0   # touchpad axes unused
 
 
-def test_buttons_clip_confirms_the_joy_layout_in_the_recorded_order():
-    parsed = frames('clip_controller_buttons')
+@pytest.mark.parametrize('name, hand, button_count', BUTTON_CLIPS)
+def test_buttons_clip_confirms_the_joy_layout_in_the_recorded_order(name, hand, button_count):
+    parsed = frames(name)
     for cut, (_, button, axis, sign, xr_index) in zip(range(9), BUTTON_CLIP_ORDER):
         for f in parsed[cut * 9:(cut + 1) * 9]:
             axes, buttons = build_joy_arrays(f)
             pressed = {BUTTON_NAMES[i] for i, v in enumerate(buttons) if v}
-            assert pressed == ({button} if button else set())
+            assert pressed == ({f'{hand}_{button}'} if button else set())
             large = {AXIS_NAMES[i]: v for i, v in enumerate(axes) if abs(v) > 0.5}
-            assert set(large) == ({axis} if axis else set())
+            assert set(large) == ({f'{hand}_{axis}'} if axis else set())
             if axis:
-                assert large[axis] * sign > 0.5
+                assert large[f'{hand}_{axis}'] * sign > 0.5
+            sample = getattr(f, hand)
             if xr_index is not None:
-                assert [i for i, b in enumerate(f.right.buttons) if b.pressed] == [xr_index]
-            assert buttons[:5] == (0,) * 5 and axes[:4] == (0.0,) * 4
+                assert [i for i, b in enumerate(sample.buttons) if b.pressed] == [xr_index]
+            # The other hand's block stays at zero; only this hand's block is used.
+            other_buttons = buttons[:5] if hand == 'right' else buttons[5:]
+            other_axes = axes[:4] if hand == 'right' else axes[4:]
+            assert other_buttons == (0,) * 5 and other_axes == (0.0,) * 4
 
 
-def test_buttons_clip_stick_signs():
-    parsed = frames('clip_controller_buttons')
-    x = [f.right.axes[2] for f in parsed]
-    y = [f.right.axes[3] for f in parsed]
+@pytest.mark.parametrize('name, hand, button_count', BUTTON_CLIPS)
+def test_buttons_clip_stick_signs(name, hand, button_count):
+    parsed = frames(name)
+    x = [getattr(f, hand).axes[2] for f in parsed]
+    y = [getattr(f, hand).axes[3] for f in parsed]
     assert min(x[45:54]) < -0.9 and max(x[54:63]) > 0.85     # left negative, right positive
-    assert min(y[63:72]) > 0.9 and max(y[72:81]) < -0.9      # up positive, down negative
+    assert min(y[63:72]) > 0.9 and max(y[72:81]) < -0.9      # back positive, forward negative
 
 
-def test_buttons_clip_indices_7_to_11_are_touch_sensors_that_never_press():
-    parsed = frames('clip_controller_buttons')
+def test_stick_up_clip_settles_the_y_sign():
+    parsed = frames('clip_controller_stick_up')
+    assert len(parsed) == 9
+    for f in parsed:
+        assert f.left is None and is_controller(f.right) and len(f.right.buttons) == 12
+        assert f.right.axes[:3] == (0.0, 0.0, 0.0) and f.right.axes[3] < -0.99
+        assert not any(b.pressed for b in f.right.buttons)
+        axes, buttons = build_joy_arrays(f)
+        assert buttons == (0,) * 10
+        assert axes[:7] == (0.0,) * 7 and axes[7] < -0.99
+        assert AXIS_NAMES[7] == 'right_thumbstick_y'
+
+
+@pytest.mark.parametrize('name, hand, button_count', BUTTON_CLIPS)
+def test_buttons_clip_indices_7_to_11_are_touch_sensors_that_never_press(name, hand, button_count):
+    parsed = frames(name)
+    samples = [getattr(f, hand) for f in parsed]
     for index in TOUCH_ONLY_XR_INDICES:
-        assert not any(f.right.buttons[index].pressed for f in parsed)
-        assert any(f.right.buttons[index].touched for f in parsed)
-    for index in (2, 6):   # touchpad placeholder and an unused slot: silent
-        assert not any(f.right.buttons[index].pressed or f.right.buttons[index].touched
-                       for f in parsed)
+        assert not any(s.buttons[index].pressed for s in samples)
+        assert any(s.buttons[index].touched for s in samples)
+    for index in (2, 6) + ((12,) if button_count == 13 else ()):   # placeholders: silent
+        assert not any(s.buttons[index].pressed or s.buttons[index].touched for s in samples)
     # Whatever the sensors say, they never reach Joy: only the five mapped indices do.
-    activity = analyze(clip('clip_controller_buttons'), hand='right')['gamepad']['buttons']
+    activity = analyze(clip(name), hand=hand)['gamepad']['buttons']
+    assert len(activity) == button_count
     assert [b['pressed_frames'] > 0 for b in activity] == [
-        i in (0, 1, 3, 4, 5) for i in range(12)]
+        i in (0, 1, 3, 4, 5) for i in range(button_count)]

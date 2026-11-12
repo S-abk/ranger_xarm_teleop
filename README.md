@@ -96,8 +96,8 @@ Values are the raw WebXR `xr-standard` gamepad values, not flipped. A missing ha
 source that is not a real controller, gives zeros for its block.
 
 **Verified on a Quest 3 Touch Plus** (`recordings/button_clip.jsonl`, right controller, each
-control operated once in the order trigger, grip, thumbstick click, A, B, stick full left, right,
-up, down; nine 0.1 s cuts of it are the fixture `test/fixtures/clip_controller_buttons.jsonl`,
+control operated once in the order trigger, grip, thumbstick click, A, B, then the four stick
+directions; nine 0.1 s cuts of it are the fixture `test/fixtures/clip_controller_buttons.jsonl`,
 checked by `test/unit/test_real_clips.py`):
 
 | Control | XR source | Joy (right block) | Measured |
@@ -108,16 +108,19 @@ checked by `test/unit/test_real_clips.py`):
 | A (X on the left) | `buttons[4]` | button 8 | pressed |
 | B (Y on the left) | `buttons[5]` | button 9 | pressed |
 | stick x | `axes[2]` | axis 6 | **left is negative** (−0.98), right positive (+0.90) |
-| stick y | `axes[3]` | axis 7 | **provisional:** the third push gave +0.98 and the fourth −0.98; with the stated order (up, then down) **down (back, toward the user) is negative** and up (forward) positive |
+| stick y | `axes[3]` | axis 7 | **up (forward, away from the user) is negative** (−1.00 in a lone stick-up recording), down (back) positive (+0.98) |
 
-`axes[0]`, `axes[1]` (touchpad) stay 0.0; `buttons[2]` and `[6]` never report anything.
+The stick signs match the Gamepad API standard-mapping convention (negative left, negative
+up); the y sign was settled by a separate recording of a single stick-up push
+(`recordings/stick-up.jsonl`, fixture `clip_controller_stick_up.jsonl`), because in the
+button-by-button clips the back push came before the forward push. `axes[0]`, `axes[1]`
+(touchpad) stay 0.0; `buttons[2]` and `[6]` never report anything.
 **`buttons[7]`..`[11]` are capacitive touch sensors** (thumb rest and proximity): they report
 `touched` (indices 7–10 on most frames, 11 on a few) and analog values up to 1.0, and never
-report `pressed`. They are not mapped. The stick-y sign above is the opposite of the Gamepad
-API's standard-mapping convention (negative up) and rests on the order the controls were
-operated in, so it stays provisional until one stick-up push is recorded on its own; the bridge
-publishes the raw value either way. The left controller has not been recorded; its block is
-expected to use the same indices but is unverified.
+report `pressed`. They are not mapped. **The left controller** (`recordings/button_clip_left.jsonl`,
+fixture `clip_controller_buttons_left.jsonl`, same procedure) uses the same XR indices for its
+Joy block (buttons 0–4, axes 0–3) with the same signs; it reports 13 buttons instead of 12, the
+extra `buttons[12]` being always silent.
 
 ## Recordings
 
@@ -135,4 +138,4 @@ printed with `[no verdict without a window]`, because over a whole recording the
 moves at some point.
 `tools/clip_recording.py <in> <out> --from s --to s` cuts a clip verbatim, e.g. to promote it
 to a test fixture (`test/fixtures/clip_*.jsonl` are such clips from real recordings;
-`clip_controller_buttons.jsonl` is nine short cuts of one recording joined together).
+`clip_controller_buttons*.jsonl` are nine short cuts of one recording joined together).

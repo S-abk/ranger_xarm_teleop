@@ -46,7 +46,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 ORIENTATION_NORM_TOLERANCE = 1e-3
 UINT32_MAX = 2 ** 32 - 1
 PATCHED_CLIENT_KEYS = ('session_id', 'seq', 't_xr', 'reset_count')
-MIN_CONTROLLER_AXES = 4   # a Touch controller reports 4 axes (and 12 buttons); hands report 0
+MIN_CONTROLLER_AXES = 4   # a Touch controller reports 4 axes (12 or 13 buttons); hands report 0
 
 
 @dataclass(frozen=True)
