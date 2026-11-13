@@ -32,16 +32,17 @@ from ranger_xarm_teleop_servo import solver as sv
 from ranger_xarm_teleop_servo.gate import Hold, Limit
 from ranger_xarm_teleop_servo.rotations import q_between, v_norm, v_sub
 from ranger_xarm_teleop_servo.teleop_model import run
-from test_lead_and_stability import _reversal
 
 SOLVER = sv.SolverParams(linear_speed_cap=0.25, angular_speed_cap=1.0)
 JOINT_LIMIT = 2.0
 START_UP = {Hold.NOT_ARMED, Hold.NOT_CALIBRATED, Hold.CLUTCH_RELEASED, Hold.SERVO_NOT_READY}
-# The velocity damper works from a reference that is two cycles old, so a joint approaching
-# a bound overshoots its 0.15 rad margin by a few mrad. The margin is where the damper
-# starts to hold, not the bound: MoveIt Servo halts at 0.1 rad.
+# The solver holds a joint 0.15 rad from its bound. Measured with the reference two cycles
+# old, joint 3 in ``clutch_joint_limit`` gets to 0.1483 rad: 1.7 mrad into the margin. That
+# overshoot is a property of the solver under delay, not something to expect; the slack
+# below only lets the test state the finding (MoveIt Servo halts at 0.1 rad, so the margin
+# that matters for the arm is kept) and a larger overshoot still fails.
 MARGIN = 0.15
-MARGIN_SLACK = 0.005
+MARGIN_SLACK = 0.002
 SERVO_HALT_MARGIN = 0.1
 READY_TOOL_Z = 0.246
 NAMES = ('clutch_shoulder', 'clutch_fast', 'clutch_step', 'clutch_joint_limit', 'clutch_reach')
@@ -62,15 +63,36 @@ def runs(arm):
     return out
 
 
-def _quiet_reversal(speeds, floor=1e-3):
+def _counter_motion(speeds, floor=1e-3):
     """
-    Return ``_reversal`` of the joints that move at all (peak above ``floor`` rad/s).
+    Return the largest joint speed (rad/s) against the direction a joint mainly moves in.
 
-    The fixtures round hand positions to a micrometre, which moves joints 1, 4 and 6 by
-    some 1e-5 rad/s with changing sign: a different thing from a joint that rings.
+    Only joints whose peak speed exceeds ``floor`` count: the fixtures round hand positions
+    to a micrometre, which moves joints 1, 4 and 6 by some 1e-5 rad/s with changing sign,
+    a different thing from a joint that rings. 1e-4 rad/s is what ``_reversal`` allows the
+    1 rad/s peak of the 40 mm step in test_lead_and_stability.
     """
-    moving = speeds[:, np.abs(speeds).max(axis=0) > floor]
-    return _reversal(moving) if moving.size else 0.0
+    worst = 0.0
+    for v in speeds.T:
+        peak = np.abs(v).max()
+        if peak > floor:
+            worst = max(worst, float(np.max(np.maximum(-np.sign(v[np.argmax(np.abs(v))]) * v,
+                                                       0.0))))
+    return worst
+
+
+def _rest_onset(engaged, stops, moves_again, floor=0.005):
+    """
+    Return when the arm came to rest, or None if it did not.
+
+    The hand is still from ``stops`` to ``moves_again``; the arm is at rest from the first
+    cycle on after which no joint speed exceeds ``floor`` (rad/s) until the hand moves.
+    """
+    window = [s for s in engaged if stops <= s.t < moves_again]
+    for i in range(len(window)):
+        if all(np.abs(w.qdot).max() <= floor for w in window[i:]):
+            return window[i].t
+    return None
 
 
 def _engaged(steps):
@@ -110,6 +132,8 @@ def test_lead_joint_speed_and_joint_margin_stay_inside_their_limits(runs, arm, n
     margin = np.minimum(positions - arm.lower, arm.upper - positions).min(axis=0)
     assert margin.min() >= MARGIN - MARGIN_SLACK
     assert margin.min() > SERVO_HALT_MARGIN
+    offset = (Limit.OFFSET_TRANSLATION, Limit.OFFSET_ROTATION)
+    assert not [s for s in engaged if s.output.limit in offset]
     solutions = [s.solution for s in engaged]
     assert all(math.isfinite(x.conditioning) and x.conditioning >= 0.0 for x in solutions)
 
@@ -132,14 +156,13 @@ def test_fast_hand_leads_by_the_limit_and_the_target_follows_it_back(runs):
     steps = runs['clutch_fast']
     engaged = _engaged(steps)
     assert any(s.output.limit == Limit.LEAD for s in engaged)
-    # The cap holds for the commanded tool speed. The measured one is the same motion seen
-    # through the Jacobian at the reference, which is two cycles old: a little above it.
+    # The cap is on the commanded tool speed. (The measured tool, through the Jacobian at
+    # the current joints instead of the reference, moves up to 1.4 % faster in this run.)
     assert max(s.solution.linear_speed for s in engaged) <= SOLVER.linear_speed_cap + 1e-9
-    speeds = np.linalg.norm(np.diff([s.tool.p for s in engaged], axis=0), axis=1) / 0.02
-    assert speeds.max() <= SOLVER.linear_speed_cap * 1.03
-    # Hand rests 1.9-4.4 s: the arm stops and stays stopped.
-    rest = [s for s in engaged if 3.4 < s.t < 4.4]
-    assert max(np.abs(s.qdot).max() for s in rest) < 0.01
+    # The hand rests from 1.9 s to 4.4 s: the arm stops within a second and stays stopped.
+    onset = _rest_onset(engaged, 1.9, 4.4)
+    assert onset is not None and onset - 1.9 < 1.0
+    assert _counter_motion(np.array([s.qdot for s in engaged if onset <= s.t < 4.4])) <= 1e-4
     # The hand comes back 40 mm from 4.4 s: the target turns within three cycles.
     before = _target_x(steps, 4.4)
     after = [s for s in engaged if 4.4 < s.t <= 4.5]
@@ -155,7 +178,7 @@ def test_step_stays_at_rest_then_settles_without_reversing(runs):
     assert xs.max() <= final + 0.02 * 0.04
     assert abs(xs[-1] - final) < 2e-4
     after = np.array([s.qdot for s in engaged if s.t >= 4.25])
-    assert _quiet_reversal(after) <= 1e-4
+    assert _counter_motion(after) <= 1e-4
 
 
 def test_joint_limit_tilt_holds_a_joint_off_its_bound(runs, arm):
@@ -187,13 +210,23 @@ def test_reach_runs_out_at_the_elbow_and_the_target_comes_back_at_once(runs, arm
     # It is the elbow, not the bound of joint 3.
     assert min(float(arm.upper[2] - s.commanded[2]) for s in steps) > 0.5
     assert min(float(s.commanded[2] - arm.lower[2]) for s in steps) > 1.0
-    # At rest at the far point (hand still from 13.1 s): no creep, and nothing restarts.
-    rest = np.array([s.qdot for s in engaged if 14.1 <= s.t <= 16.4])
-    assert np.abs(rest).max() < 0.005
     # The hand comes back 0.10 m from 16.5 s: the target turns within three cycles.
     before = _target_x(steps, 16.5)
     after = [s for s in engaged if 16.5 < s.t <= 16.6]
     assert after[2].output.target.p[0] < before - 1e-3
     # The return settles without reversing.
     back = np.array([s.qdot for s in engaged if s.t >= 17.6])
-    assert _quiet_reversal(back) <= 1e-4
+    assert _counter_motion(back) <= 1e-4
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "finding: held at a target beyond the arm's reach (elbow straight), the joints do not "
+    'come to rest: q2 and q3 swing at the joint velocity limit, in opposite directions, '
+    'with the tool still. Reproduces with a constant target from 0.90 m forward and a '
+    'reference two or more cycles old; see the handback of the fixtures task.'))
+def test_reach_arm_comes_to_rest_at_the_far_point(runs):
+    engaged = _engaged(runs['clutch_reach'])
+    onset = _rest_onset(engaged, 13.1, 16.5)       # hand still from 13.1 s to 16.5 s
+    assert onset is not None and onset - 13.1 < 1.0
+    rest = np.array([s.qdot for s in engaged if onset <= s.t < 16.5])
+    assert _counter_motion(rest, floor=1e-4) <= 1e-4

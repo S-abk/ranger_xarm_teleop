@@ -317,13 +317,14 @@ def clutch_reach() -> List[str]:
     """
     Reach out past the arm's maximum reach, hold, then bring the hand back 0.10 m.
 
-    Three engagements of 0.30, 0.30 and 0.15 m forward (the offset limit is 0.30 m per
-    engagement; the hand returns while the grip is open): grip 1.2-5.2 s, 6.0-10.0 s and
-    10.8-19.0 s. In the last, 2 s still at the far point, then 0.10 m back.
+    Three engagements of 0.28, 0.28 and 0.20 m forward (inside the 0.30 m offset limit of
+    each; the hand returns while the grip is open): grip 1.2-5.2 s, 6.0-10.0 s and
+    10.8-19.0 s. In the last, 2 s still at the far point (from 13.1 s), then 0.10 m back
+    from 16.5 s.
     """
     def motion(t: float) -> Tuple[Vec, Quat]:
-        dx = moves(t, [(1.5, 3.0, 0.30), (5.3, 0.5, -0.30), (6.3, 3.0, 0.30),
-                       (10.1, 0.5, -0.30), (11.1, 2.0, 0.15)]) + linear(t, 16.5, 0.5, -0.10)
+        dx = moves(t, [(1.5, 3.0, 0.28), (5.3, 0.5, -0.28), (6.3, 3.0, 0.28),
+                       (10.1, 0.5, -0.28), (11.1, 2.0, 0.20)]) + linear(t, 16.5, 0.5, -0.10)
         return at_offset(dx), HELD
     return record(19.6, motion,
                   lambda t: GRIP_ON <= t < 5.2 or 6.0 <= t < 10.0 or 10.8 <= t < 19.0)
