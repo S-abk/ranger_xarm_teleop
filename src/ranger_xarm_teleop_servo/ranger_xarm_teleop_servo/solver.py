@@ -97,7 +97,6 @@ class SolverParams:
                 raise ValueError(f'{name}: expected a finite positive number, got {value!r}')
         if not self.limit_zone > self.limit_margin:
             raise ValueError('limit_zone must be larger than limit_margin')
-
         if not 0.0 < self.velocity_fraction <= 1.0:
             raise ValueError('velocity_fraction: expected a value in (0, 1]')
         if self.gain * self.period > STABLE_GAIN_PERIOD:
@@ -374,11 +373,6 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
                     error_rotation=float(np.linalg.norm(dr)),
                     linear_speed=linear, angular_speed=angular,
                     scale=scale, limit=limit, fixed=fixed)
-
-
-def position_conditioning(arm: Arm, q: Sequence[float], params: SolverParams) -> float:
-    """Return the smallest singular value of the normalised position rows at ``q``."""
-    return _smallest_rank(_normalised(arm, tool_jacobian(arm, q), params)[:3], 3)
 
 
 def twist_between(previous: np.ndarray, current: np.ndarray, period: float) -> np.ndarray:

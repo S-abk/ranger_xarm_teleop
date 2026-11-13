@@ -263,17 +263,12 @@ def _clean_run(probe, env, logs, fixture, engaged_s, posture=READY):
     return timed, start
 
 
-def _holds(probe, start, still_for=0.8, tolerance=1e-6):
-    """
-    Return ``(t0, t1)`` of each span of at least ``still_for`` s with a still target.
-
-    ``tolerance`` (m per cycle) allows for a target that the lead limit drags along with a
-    slowly moving arm.
-    """
+def _holds(probe, start, still_for=0.8):
+    """Return ``(t0, t1)`` of each span of at least ``still_for`` s with a constant target."""
     targets = probe.targets_since(start)
     spans, first = [], None
     for (t_a, a), (t_b, b) in zip(targets, targets[1:]):
-        if v_norm(v_sub(a, b)) < tolerance:
+        if v_norm(v_sub(a, b)) < 1e-6:
             first = t_a if first is None else first
         else:
             if first is not None and t_a - first >= still_for:
@@ -376,6 +371,19 @@ def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
     spread = np.ptp(q, axis=0).max()
     print(f'joint spread over the last second before the turn: {spread:.5f} rad')
     assert spread < 1e-3
+    steps = np.diff(q, axis=0)
+    for j in range(6):
+        big = steps[np.abs(steps[:, j]) > 1e-5, j]
+        assert np.all(big >= 0) or np.all(big <= 0), f'joint {j + 1} reverses at the far point'
+    # The arm stays on the hand's path while it can: ahead of it, never above or below.
+    # (The lead clamp would hide a tool that wanders off by dragging the target along.)
+    engaged_z = [(s.measured_tool_pose.position.z, s) for _, s in timed if s.clutch_engaged]
+    targets_z = {round(when, 2): p[2] for when, p in probe.targets_since(start)}
+    assert engaged_z and targets_z
+    z_target = np.median(list(targets_z.values()))
+    off_path = max(abs(z - z_target) for z, _ in engaged_z)
+    print(f'largest height of the tool off the path of the hand: {off_path * 1000.0:.1f} mm')
+    assert off_path < 0.005
     # The arm itself turns back soon after the target has come back past it (the target
     # is up to the lead limit ahead at the far point and first covers that) ...
     at_turn = _tool_between(timed, t1 - 0.2, t1)[-1]
