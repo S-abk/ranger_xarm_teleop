@@ -16,5 +16,10 @@
     view_cone_half_angle_deg: 65.0     # cone axis (headset forward, see view_cone_tilt_deg) to the controller
     step_translation_limit_m: 0.030    # per 20 ms target cycle (1.5 m/s)
     step_rotation_limit_deg: 10.0      # per 20 ms target cycle (500 deg/s)
-    linear_speed_cap_m_s: 0.25         # MoveIt Servo scale.linear
-    angular_speed_cap_rad_s: 1.0       # MoveIt Servo scale.rotational
+    linear_speed_cap_m_s: 0.25         # tool speed, enforced on the joint command by the teleop node
+    angular_speed_cap_rad_s: 1.0
+    # G-14: lead of the target over the measured tool pose. At least cap x lag, or the
+    # clamp would hold the arm below the caps: Gazebo lag 0.17 s gives 43 mm and 9.7 deg
+    # at the caps above; 20 % added.
+    max_lead_translation_m: 0.050
+    max_lead_rotation_deg: 12.0

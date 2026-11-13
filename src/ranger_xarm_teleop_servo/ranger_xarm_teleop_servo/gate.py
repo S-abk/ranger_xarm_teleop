@@ -38,6 +38,11 @@ Rules, by ID:
 * G-6  offset limit and keep-out planes are applied after the filter and re-checked on
   the final pose; a pose that fails the re-check is replaced by the last accepted one.
 * G-10 filter and limiter state restart from the measured tool pose at every engagement.
+* G-14 the target may not lead the measured tool pose by more than the lead limits. The
+  excess is clamped away and absorbed: the mapping's anchor and the filter state move by
+  the same amount, so the hand's lead is not stored and the arm never catches up later.
+  Order: map, filter, G-6 bounds, G-5 step check (a jump is rejected, never clipped),
+  G-14 lead clamp, G-6 re-check. The speed caps (G-8) act on the joint command (solver).
 * While engaged, MoveIt Servo no longer running, or reporting a halt, releases the
   clutch: a target must not move on while the arm stands still.
 * G-13 a calibration made under another (session id, reset count) is not used.
@@ -54,8 +59,8 @@ from typing import Optional, Tuple
 from .calibration import calibrate, Calibration
 from .mapping import apply_pivot, clutch_relative
 from .params import GateParams
-from .rotations import (Pose, q_between, q_rotate, q_slerp, v_add, v_dot, v_norm, v_scale,
-                        v_sub)
+from .rotations import (IDENTITY_Q, Pose, q_between, q_conj, q_mul, q_normalize, q_rotate,
+                        q_slerp, q_to_rotvec, Quat, v_add, v_dot, v_norm, v_scale, v_sub)
 
 
 class Hold(IntEnum):
@@ -81,6 +86,7 @@ class Hold(IntEnum):
     TOOL_POSE_STALE = 17
     SERVO_NOT_READY = 18
     SERVO_HALTED = 19
+    SOLVER = 20
 
 
 class Limit(IntEnum):
@@ -91,6 +97,10 @@ class Limit(IntEnum):
     OFFSET_ROTATION = 2
     KEEP_OUT = 3
     SERVO = 4
+    LEAD = 5
+    TOOL_SPEED = 6
+    JOINT_VELOCITY = 7
+    JOINT_POSITION = 8
 
 
 # Slack for the re-check of a pose that was just clamped onto a bound.
@@ -144,7 +154,8 @@ class GateState:
     engaged: bool = False
     waiting_since: Optional[float] = None
     clutch: Optional[Pose] = None     # controller pose (pivot applied) at engagement
-    tool0: Optional[Pose] = None      # measured tool pose at engagement
+    tool0: Optional[Pose] = None      # measured tool pose at engagement (G-6 offset limit)
+    anchor: Optional[Pose] = None     # origin of the mapping: tool0 plus the absorbed lead
     heading: float = 0.0              # calibration heading captured at engagement
     filtered: Optional[Pose] = None
     last_target: Optional[Pose] = None
@@ -163,6 +174,10 @@ class Output:
     input_age: float
     input_seq: int
     events: Tuple[str, ...]
+    # Twist of the target before the lead clamp, (vx, vy, vz, wx, wy, wz) in m/s and rad/s
+    # in the arm base frame: the hand's motion after filter and bounds, without any
+    # measured motion in it. None when no target is published.
+    feedforward: Optional[Tuple[float, ...]] = None
 
 
 def controller_valid(frame: Frame) -> bool:
@@ -332,21 +347,70 @@ def low_pass(previous: Pose, raw: Pose, params: GateParams) -> Pose:
     return Pose(position, q_slerp(previous.q, raw.q, alpha))
 
 
+def clamp_around(pose: Pose, centre: Pose, max_translation: float,
+                 max_rotation: float) -> Tuple[Pose, bool, bool]:
+    """
+    Clamp ``pose`` to within a distance and an angle of ``centre``.
+
+    Return the pose and whether the translation and the rotation were clamped. Position
+    and orientation are clamped independently, each along its own straight path.
+    """
+    position, orientation = pose.p, pose.q
+    offset = v_sub(position, centre.p)
+    distance = v_norm(offset)
+    moved = distance > max_translation
+    if moved:
+        position = v_add(centre.p, v_scale(offset, max_translation / distance))
+    angle = q_between(centre.q, orientation)
+    turned = angle > max_rotation
+    if turned:
+        orientation = q_slerp(centre.q, orientation, max_rotation / angle)
+    return Pose(position, orientation), moved, turned
+
+
 def clamp_offset(pose: Pose, tool0: Pose, params: GateParams) -> Tuple[Pose, Limit]:
     """Clamp ``pose`` onto the per-clutch offset limit around ``tool0`` (G-6, layer 2)."""
-    limit = Limit.NONE
-    position, orientation = pose.p, pose.q
-    offset = v_sub(position, tool0.p)
-    distance = v_norm(offset)
-    if distance > params.max_offset_translation:
-        position = v_add(tool0.p, v_scale(offset, params.max_offset_translation / distance))
-        limit = Limit.OFFSET_TRANSLATION
-    angle = q_between(tool0.q, orientation)
-    if angle > params.max_offset_rotation:
-        orientation = q_slerp(tool0.q, orientation, params.max_offset_rotation / angle)
-        if limit == Limit.NONE:
-            limit = Limit.OFFSET_ROTATION
-    return Pose(position, orientation), limit
+    clamped, moved, turned = clamp_around(pose, tool0, params.max_offset_translation,
+                                          params.max_offset_rotation)
+    limit = (Limit.OFFSET_TRANSLATION if moved else
+             Limit.OFFSET_ROTATION if turned else Limit.NONE)
+    return clamped, limit
+
+
+def clamp_lead(pose: Pose, measured: Pose, params: GateParams) -> Tuple[Pose, bool]:
+    """Clamp ``pose`` to within the lead limits of the measured tool pose (G-14)."""
+    clamped, moved, turned = clamp_around(pose, measured, params.max_lead_translation,
+                                          params.max_lead_rotation)
+    return clamped, moved or turned
+
+
+def absorb(anchor: Pose, filtered: Pose, mapped_turn: Quat, before: Pose,
+           after: Pose) -> Tuple[Pose, Pose]:
+    """
+    Move the mapping anchor and the filter state by the clamped-away lead (G-14).
+
+    Afterwards the mapping yields ``after`` for the controller pose that yielded
+    ``before``: the lead is absorbed, not stored.
+
+    The mapping gives ``(anchor.p + dp, dq * anchor.q)``, where ``dq`` (``mapped_turn``) is
+    the controller's rotation since engagement in the base frame. For the world-frame
+    correction ``turn = after.q * before.q^-1`` the anchor rotation becomes
+    ``dq^-1 * turn * dq * anchor.q``; the filter state is a world pose and takes ``turn``
+    directly. Positions shift by ``after.p - before.p``.
+    """
+    shift = v_sub(after.p, before.p)
+    turn = q_mul(after.q, q_conj(before.q))
+    anchor_q = q_normalize(q_mul(q_mul(q_mul(q_conj(mapped_turn), turn), mapped_turn),
+                                 anchor.q))
+    return (Pose(v_add(anchor.p, shift), anchor_q),
+            Pose(v_add(filtered.p, shift), q_normalize(q_mul(turn, filtered.q))))
+
+
+def twist(previous: Pose, current: Pose, period: float) -> Tuple[float, ...]:
+    """Return the twist taking ``previous`` to ``current`` in ``period`` (base frame)."""
+    v = v_scale(v_sub(current.p, previous.p), 1.0 / period)
+    w = v_scale(q_to_rotvec(q_mul(current.q, q_conj(previous.q))), 1.0 / period)
+    return v + w
 
 
 def _plane_depth(pose: Pose, plane, params: GateParams) -> float:
@@ -401,7 +465,7 @@ def bound(pose: Pose, tool0: Pose, fallback: Pose,
 def _released(state: GateState, latched: Hold) -> GateState:
     """Return the state with the clutch disengaged and its per-engagement data cleared."""
     return replace(state, engaged=False, waiting_since=None, clutch=None, tool0=None,
-                   filtered=None, last_target=None, trip=Hold.NONE, latched=latched,
+                   anchor=None, filtered=None, last_target=None, trip=Hold.NONE, latched=latched,
                    events=())
 
 
@@ -419,9 +483,9 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
         latched = Hold.NONE
 
     def out(new_state: GateState, target: Optional[Pose], hold: Hold, limit: Limit,
-            want_servo: bool) -> Tuple[GateState, Output]:
+            want_servo: bool, feedforward=None) -> Tuple[GateState, Output]:
         return new_state, Output(target, new_state.engaged, hold, limit, want_servo, age, seq,
-                                 tuple(events))
+                                 tuple(events), feedforward)
 
     reason = _condition(state, env, params, age)
     if reason == Hold.CLUTCH_RELEASED:
@@ -454,12 +518,13 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
         # Engagement: every per-engagement quantity restarts here (G-10).
         state = replace(state, engaged=True, waiting_since=None,
                         clutch=apply_pivot(frame.controller, params.pivot_offset),
-                        tool0=env.tool_pose, heading=state.calibration.heading,
+                        tool0=env.tool_pose, anchor=env.tool_pose,
+                        heading=state.calibration.heading,
                         filtered=env.tool_pose, last_target=env.tool_pose)
         events.append(f'clutch engaged at seq {frame.seq}')
 
-    raw = clutch_relative(apply_pivot(frame.controller, params.pivot_offset), state.clutch,
-                          state.heading, state.tool0)
+    controller = apply_pivot(frame.controller, params.pivot_offset)
+    raw = clutch_relative(controller, state.clutch, state.heading, state.anchor)
     filtered = low_pass(state.filtered, raw, params)
     target, limit = bound(filtered, state.tool0, state.last_target, params)
     step = v_norm(v_sub(target.p, state.last_target.p))
@@ -469,5 +534,17 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
                       f'{math.degrees(turn):.1f} deg beyond the per-cycle limit')
         return out(_released(state, Hold.STEP_REJECTED), None, Hold.STEP_REJECTED,
                    Limit.NONE, False)
-    state = replace(state, filtered=filtered, last_target=target, latched=Hold.NONE, events=())
-    return out(state, target, Hold.NONE, limit, True)
+    feedforward = twist(state.last_target, target, params.target_period)
+    final, leading = clamp_lead(target, env.tool_pose, params)
+    if leading:
+        limit = Limit.LEAD
+        if not within_bounds(final, state.tool0, params):
+            final, limit = state.last_target, Limit.KEEP_OUT      # G-6 outranks
+    anchor, filtered = state.anchor, filtered
+    if final != target:
+        mapped_turn = clutch_relative(controller, state.clutch, state.heading,
+                                      Pose(state.anchor.p, IDENTITY_Q)).q
+        anchor, filtered = absorb(state.anchor, filtered, mapped_turn, target, final)
+    state = replace(state, anchor=anchor, filtered=filtered, last_target=final,
+                    latched=Hold.NONE, events=())
+    return out(state, final, Hold.NONE, limit, True, feedforward)

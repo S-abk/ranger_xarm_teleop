@@ -23,7 +23,8 @@ import pytest
 PKG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 BRIDGE_DIR = os.path.join(os.path.dirname(PKG_DIR), 'ranger_xarm_teleop_bridge')
 MODULES = ['rotations', 'mapping', 'calibration', 'params', 'gate', 'ownership', 'frames',
-           'static_frames', 'simcheck', 'kinematics', 'halts', 'workspace', 'session']
+           'static_frames', 'simcheck', 'kinematics', 'halts', 'workspace', 'session', 'solver',
+           'teleop_model']
 FORBIDDEN = ['rclpy', 'geometry_msgs', 'sensor_msgs', 'std_msgs', 'std_srvs', 'tf2_ros',
              'moveit_msgs', 'control_msgs', 'controller_manager_msgs', 'action_msgs',
              'trajectory_msgs', 'ranger_xarm_teleop_interfaces', 'scipy']

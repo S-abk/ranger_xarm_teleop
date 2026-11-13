@@ -35,6 +35,8 @@ REQUIRED = (
     'step_rotation_limit_deg',
     'linear_speed_cap_m_s',
     'angular_speed_cap_rad_s',
+    'max_lead_translation_m',       # G-14
+    'max_lead_rotation_deg',
 )
 
 # Set in the gate document.
@@ -83,6 +85,8 @@ class GateParams:
     step_rotation_limit: float
     linear_speed_cap: float
     angular_speed_cap: float
+    max_lead_translation: float
+    max_lead_rotation: float
     filter_cutoff_hz: float
     keep_out_planes: Tuple[Plane, ...]
     wrist_offset: Vec3
@@ -182,6 +186,10 @@ def build_params(values: Mapping[str, Any]) -> GateParams:
         linear_speed_cap=_positive('linear_speed_cap_m_s', values['linear_speed_cap_m_s']),
         angular_speed_cap=_positive('angular_speed_cap_rad_s',
                                     values['angular_speed_cap_rad_s']),
+        max_lead_translation=_positive('max_lead_translation_m',
+                                       values['max_lead_translation_m']),
+        max_lead_rotation=math.radians(_positive('max_lead_rotation_deg',
+                                                 values['max_lead_rotation_deg'])),
         filter_cutoff_hz=cutoff,
         keep_out_planes=parse_planes(opt('keep_out_planes')),
         wrist_offset=_vec3('wrist_offset', opt('wrist_offset')),
