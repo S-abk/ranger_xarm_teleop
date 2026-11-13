@@ -38,7 +38,7 @@ SHARE = get_package_share_directory('ranger_xarm_teleop_bringup')
 SIM_LIMITS = os.path.join(SHARE, 'config', 'SIMULATION_ONLY_limits.yaml')
 REQUIRED = ['max_offset_translation_m', 'max_offset_rotation_deg', 'view_cone_half_angle_deg',
             'step_translation_limit_m', 'step_rotation_limit_deg', 'linear_speed_cap_m_s',
-            'angular_speed_cap_rad_s']
+            'angular_speed_cap_rad_s', 'max_lead_translation_m', 'max_lead_rotation_deg']
 
 
 def teleop_node(env, log, *ros_args):
@@ -79,7 +79,8 @@ def test_node_exits_without_the_pending_values(env, tmp_path):
         node.stop()
 
 
-@pytest.mark.parametrize('missing', ['view_cone_half_angle_deg', 'linear_speed_cap_m_s'])
+@pytest.mark.parametrize('missing', ['view_cone_half_angle_deg', 'linear_speed_cap_m_s',
+                                     'max_lead_translation_m', 'max_lead_rotation_deg'])
 def test_node_exits_when_one_pending_value_is_missing(env, tmp_path, missing):
     values = {k: v for k, v in load_limits(SIM_LIMITS).items() if k != missing}
     path = tmp_path / 'limits.yaml'

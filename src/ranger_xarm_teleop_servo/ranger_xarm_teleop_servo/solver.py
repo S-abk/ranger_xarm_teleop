@@ -238,11 +238,6 @@ def _priority(jn: np.ndarray, yn: np.ndarray, params: SolverParams):
     """Return ``(z, levels)`` of the two-level damped solution for normalised ``jn``, ``yn``."""
     cols = jn.shape[1]
     jp, jo = jn[:3], jn[3:]
-    yn = yn.copy()
-    for level in (slice(0, 3), slice(3, 6)):
-        size = float(np.linalg.norm(yn[level]))
-        if size > 1.0:
-            yn[level] /= size
     sp = _smallest_rank(jp, 3)
     lam_p = damping_for(sp, params)
     jp_inv, _ = _damped_pinv(jp, lam_p)
@@ -319,13 +314,25 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
     twist ``(vx, vy, vz, wx, wy, wz)`` in m/s and rad/s, base frame (zero by default).
     """
     q = np.asarray(q, dtype=float)
+    target = np.asarray(target, dtype=float)
+    ff = np.zeros(6) if feedforward is None else np.asarray(feedforward, dtype=float)
+    if not (np.all(np.isfinite(q)) and np.all(np.isfinite(target)) and np.all(np.isfinite(ff))):
+        raise ValueError('reference, target or feedforward is not finite')
     current = tool_pose(arm, q)
     dp, dr = pose_error(target, current)
-    ff = np.zeros(6) if feedforward is None else np.asarray(feedforward, dtype=float)
     y = ff + params.gain * np.concatenate([dp, dr])
     jac = tool_jacobian(arm, q)
     jn = _normalised(arm, jac, params)
     yn = y / np.array([params.linear_speed_cap] * 3 + [params.angular_speed_cap] * 3)
+    # Each level's command is limited to its speed cap (normalised length 1). The tool's
+    # direction can change by this (linear and angular shrink by different factors); it is
+    # reported as the speed cap having limited the command.
+    capped = False
+    for level in (slice(0, 3), slice(3, 6)):
+        size = float(np.linalg.norm(yn[level]))
+        if size > 1.0:
+            yn[level] /= size
+            capped = True
     low, high = position_bounds(arm, q, params)
     low_n, high_n = low / arm.velocity, high / arm.velocity
 
@@ -346,7 +353,7 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
         free &= ~over
     z = np.clip(z, low_n, high_n)        # only reached if every pass fixed a joint
     fixed = tuple(name for name, f in zip(arm.joint_names, free) if not f)
-    limit = LIMIT_JOINT_POSITION if fixed else LIMIT_NONE
+    limit = LIMIT_JOINT_POSITION if fixed else (LIMIT_TOOL_SPEED if capped else LIMIT_NONE)
 
     qdot = _keep_off_the_boundary(arm, q, z * arm.velocity, params)
     qdot = np.clip(qdot, low, high)

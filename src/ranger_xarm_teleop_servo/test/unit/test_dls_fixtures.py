@@ -15,7 +15,7 @@
 The solver fixtures through the whole driving path: gate, solver, delayed model arm.
 
 Each fixture starts at the ready posture and runs with the realistic delay (150 ms) and
-reference age (3 cycles). Common to all: no gate hold but a plain clutch release (and the
+the reference the node uses (MoveIt Servo's state, ``stale_ticks`` 1). Common to all: no gate hold but a plain clutch release (and the
 start-up holds before the first target), the lead inside its limit, every joint speed
 inside 95 % of its limit, and no joint nearer than the solver's margin to a position bound.
 Then, per fixture, that the region or bound it was made for is reached.
@@ -220,9 +220,14 @@ def test_reach_runs_out_at_the_elbow_and_the_target_comes_back_at_once(runs, arm
     # it was kept off the stretched singularity, where the way back is the direction it
     # lacks and it used to stay put for half a second.
     at_turn = [s.tool.p[0] for s in engaged if s.t <= 16.5][-1]
-    crossed = next(s.t for s in engaged if s.t > 16.5 and s.output.target.p[0] < at_turn)
+    crossed = next((s.t for s in engaged if s.t > 16.5 and s.output.target.p[0] < at_turn),
+                   None)
     moved = [s.t for s in engaged if s.t > 16.5 and s.tool.p[0] < at_turn - 0.002]
-    assert moved and moved[0] - crossed < 0.3
+    assert crossed is not None and moved
+    assert moved[0] - crossed < 0.3
+    # From the hand's turn: the lead (here 0.26 s at the hand's speed) plus the 0.15 s
+    # measurement delay; it used to be 0.8 s.
+    assert moved[0] - 16.5 < 0.5
     # The return settles without reversing.
     back = np.array([s.qdot for s in engaged if s.t >= 17.6])
     assert _counter_motion(back) <= 1e-4

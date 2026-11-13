@@ -146,10 +146,8 @@ def test_scaling_keeps_the_direction_of_motion(arm, seed):
     q = np.array(READY) + rng.uniform(-0.15, 0.15, 6)
     ff = rng.uniform(-1, 1, 6) * [1, 1, 1, 4, 4, 4]      # beyond the caps
     fast = sv.solve(arm, q, sv.tool_pose(arm, q), PARAMS, ff)
-    # Scaled, unless limiting each level's command to its cap already brought it within.
-    assert fast.scale < 1.0 or fast.limit == sv.LIMIT_NONE
-    if fast.scale < 1.0:
-        assert fast.limit in (sv.LIMIT_JOINT_VELOCITY, sv.LIMIT_TOOL_SPEED)
+    # Limited, and reported: scaled, or already capped per level before the solve.
+    assert fast.limit in (sv.LIMIT_JOINT_VELOCITY, sv.LIMIT_TOOL_SPEED)
     # The same solve with every limit 100 times wider: the normalised Jacobian, and so the
     # damping, is identical, and nothing limits, so this is the unscaled direction. Each
     # level's command is limited to its cap before the solve (the solver does that too).
@@ -348,3 +346,13 @@ def test_an_oversized_orientation_error_does_not_make_the_joints_chatter(arm, x)
     _, qdots = _out_of_reach(arm, x, 12.0, rotation_lead=False)
     flips = sum(1 for a, b in zip(qdots[-100:], qdots[-99:]) if a @ b < 0)
     assert flips == 0 and np.abs(qdots[-100:]).max() < 1e-2
+
+
+def test_non_finite_inputs_are_refused(arm):
+    good = sv.tool_pose(arm, READY)
+    bad = good.copy()
+    bad[0, 3] = np.nan
+    for q, target, ff in ((READY, bad, None), (READY, good, [np.inf, 0, 0, 0, 0, 0]),
+                          ([np.nan] * 6, good, None)):
+        with pytest.raises(ValueError, match='not finite'):
+            sv.solve(arm, q, target, PARAMS, ff)

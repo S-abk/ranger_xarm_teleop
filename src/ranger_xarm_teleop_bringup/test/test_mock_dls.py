@@ -37,7 +37,7 @@ from ranger_xarm_teleop_servo.rotations import (pose_from_matrix, q_between, v_n
 import rclpy
 
 from stack_helpers import (child_environment, Probe, Process, READY,
-                           replay_with_clean_input)
+                           replay_with_clean_input, STALE_DATA)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -51,8 +51,10 @@ ELSEWHERE = [0.4, -0.3, -1.0, 0.5, 0.9, -0.4]
 JOINT_LIMIT_START = [0.0, -0.6, -0.7, 0.0, -1.2, 0.0]
 HALTS = (ServoStatus.HALT_FOR_SINGULARITY, ServoStatus.HALT_FOR_COLLISION, ServoStatus.JOINT_BOUND)
 LEAD = 0.05             # the simulation-only lead limit (m)
-# How an engagement of these replays may end: the grip opens, or the recording ends.
-EXPECTED_RELEASES = (TeleopState.HOLD_CLUTCH_RELEASED, TeleopState.HOLD_INPUT_STALE)
+# How an engagement of these replays may end: the grip opens, the recording ends, or input
+# data arrives late on a busy machine (the gate releasing as it must; see STALE_DATA).
+# Never a halt, MoveIt Servo or the solver.
+EXPECTED_RELEASES = (TeleopState.HOLD_CLUTCH_RELEASED,) + STALE_DATA
 
 
 @pytest.fixture(scope='module')
@@ -368,10 +370,16 @@ def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
     # The arm itself turns back soon after the target has come back past it (the target
     # is up to the lead limit ahead at the far point and first covers that).
     at_hold = _tool_between(timed, t1 - 0.2, t1)[-1]
-    crossed = next(when for when, p in probe.targets_since(t1) if p[0] < at_hold[0])
+    crossed = next((when for when, p in probe.targets_since(t1) if p[0] < at_hold[0]), None)
+    assert crossed is not None, 'the target never came back past the tool'
     after = _tool_between(timed, crossed, crossed + 0.4)
-    print(f'target back past the tool {crossed - t1:.2f} s after it turned')
     assert after.size and after[:, 0].min() < at_hold[0] - 2e-3
+    # Also from the turn of the target itself (the lead to cover, then the arm).
+    back = [when for when, s in timed
+            if when > t1 and s.measured_tool_pose.position.x < at_hold[0] - 2e-3]
+    print(f'target back past the tool {crossed - t1:.2f} s after it turned; '
+          f'tool 2 mm back {back[0] - t1 if back else float("nan"):.2f} s after it turned')
+    assert back and back[0] - t1 < 0.6
     probe.disarm()
 
 
