@@ -23,6 +23,7 @@ from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from controller_manager_msgs.srv import ListControllers
+from geometry_msgs.msg import PoseStamped
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, InputStatus, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
 import rclpy
@@ -139,6 +140,7 @@ class Probe:
         self.owner = None
         self.inputs = []            # monotonic arrival of every input status
         self.stamped_joints = []    # (monotonic, header stamp, [q1..q6])
+        self.targets = []           # (monotonic, (x, y, z)) of /teleop/target_pose
         self.description = None     # /robot_description text
         self.spin_errors = []
         self.moveit_controller = moveit_controller
@@ -150,6 +152,7 @@ class Probe:
         self.node.create_subscription(
             String, '/robot_description', self._on_description,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.node.create_subscription(PoseStamped, '/teleop/target_pose', self._on_target, 50)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.node)
         self.trajectory_pub = self.node.create_publisher(
@@ -195,6 +198,11 @@ class Probe:
             with self.lock:
                 self.joints.append((now, q))
                 self.stamped_joints.append((now, msg.header.stamp, q))
+
+    def _on_target(self, msg):
+        p = msg.pose.position
+        with self.lock:
+            self.targets.append((time.monotonic(), (p.x, p.y, p.z)))
 
     def _on_description(self, msg):
         with self.lock:
@@ -257,6 +265,14 @@ class Probe:
     def joints_since(self, t):
         with self.lock:
             return [q for when, q in self.joints if when >= t]
+
+    def targets_since(self, t):
+        with self.lock:
+            return [(when, p) for when, p in self.targets if when >= t]
+
+    def timed_joints_since(self, t):
+        with self.lock:
+            return [(when, q) for when, q in self.joints if when >= t]
 
     def stamped_joints_since(self, t):
         with self.lock:

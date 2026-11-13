@@ -45,6 +45,11 @@ TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
 # its hard stop; with pose commands every engagement halted at once (servo_diag).
 BEYOND_HARD_STOP = [0.0, -0.6, -0.7, 0.0, 0.05, 0.0]
 ELSEWHERE = [0.4, -0.3, -1.0, 0.5, 0.9, -0.4]
+# Wrist bent the other way: the fixture's tilt then drives joint 5 to its lower bound with
+# nothing in the way. (From the ready posture the same tilt brings the tool against the
+# arm first, and MoveIt Servo halts for collision before joint 3 reaches its bound.)
+JOINT_LIMIT_START = [0.0, -0.6, -0.7, 0.0, -1.2, 0.0]
+HALTS = (ServoStatus.HALT_FOR_SINGULARITY, ServoStatus.HALT_FOR_COLLISION, ServoStatus.JOINT_BOUND)
 LEAD = 0.05             # the simulation-only lead limit (m)
 # How an engagement of these replays may end: the grip opens, or the recording ends.
 EXPECTED_RELEASES = (TeleopState.HOLD_CLUTCH_RELEASED, TeleopState.HOLD_INPUT_STALE)
@@ -230,6 +235,136 @@ def test_line_replay_reports_speeds_within_the_caps(stack):
               for i in range(len(points) - 5)]
     assert max(window) <= 0.25 * 1.05, max(window)
     assert math.isfinite(float(speeds.max()))
+    probe.disarm()
+
+
+def _clean_run(probe, env, logs, fixture, engaged_s, posture=READY):
+    """Replay ``fixture`` from ``posture``; return the timed states and the start."""
+    def ready():
+        probe.move_to(posture)
+    start, _ = replay_with_clean_input(probe, env, str(logs / f'replay_{fixture}.log'), fixture,
+                                       expected_engaged_s=engaged_s, before=ready)
+    time.sleep(1.0)
+    timed = probe.timed_states_since(start)
+    states = [s for _, s in timed]
+    engaged = [s for s in states if s.clutch_engaged]
+    assert len(engaged) > 50, f'{fixture}: the clutch did not stay engaged'
+    ended = releases(states)
+    assert ended and all(r in EXPECTED_RELEASES for r in ended), (fixture, ended)
+    # The status shown while engaged is the current one (one left from before the
+    # engagement does not count, see the node's status handling).
+    assert not any(s.servo_status in HALTS for s in engaged), fixture
+    assert all(s.lead_translation <= LEAD + 1e-9 for s in engaged)
+    assert all(s.commanded_linear_speed <= 0.25 + 1e-9 for s in engaged)
+    assert probe.joint_speeds_since(start) <= 2.0 + 0.05
+    return timed, start
+
+
+def _holds(probe, start, still_for=0.8):
+    """Return ``(t0, t1)`` of each span of at least ``still_for`` s with a constant target."""
+    targets = probe.targets_since(start)
+    spans, first = [], None
+    for (t_a, a), (t_b, b) in zip(targets, targets[1:]):
+        if v_norm(v_sub(a, b)) < 1e-6:
+            first = t_a if first is None else first
+        else:
+            if first is not None and t_a - first >= still_for:
+                spans.append((first, t_a))
+            first = None
+    if first is not None and targets[-1][0] - first >= still_for:
+        spans.append((first, targets[-1][0]))
+    return spans
+
+
+def _tool_between(timed, t0, t1):
+    return np.array([[s.measured_tool_pose.position.x, s.measured_tool_pose.position.y,
+                      s.measured_tool_pose.position.z] for when, s in timed if t0 <= when <= t1])
+
+
+def test_shoulder_region_is_crossed_without_a_halt(stack):
+    """INV-5 (shoulder): pulled back over joint 1's axis, damped, never halted."""
+    probe, env, logs, _ = stack
+    timed, _ = _clean_run(probe, env, logs, 'clutch_shoulder', 1.0)
+    engaged = [s for _, s in timed if s.clutch_engaged]
+    assert min(s.conditioning for s in engaged) < 0.2
+    assert any(s.damped for s in engaged)
+    # MoveIt Servo may slow the arm near its own body here (reported); it never halts.
+    slowed = sum(1 for s in engaged if s.servo_status == ServoStatus.DECELERATE_FOR_COLLISION)
+    print(f'shoulder: collision deceleration in {slowed} of {len(engaged)} engaged cycles')
+    assert max(s.solver_error_translation for s in engaged) < 0.03
+    probe.disarm()
+
+
+def test_joint_driven_to_its_limit_stops_outside_servo_margin(stack):
+    """INV-3: the solver holds joint 5 at 0.15 rad; MoveIt Servo's 0.1 rad halt never comes."""
+    probe, env, logs, _ = stack
+    timed, start = _clean_run(probe, env, logs, 'clutch_joint_limit', 2.0,
+                              posture=JOINT_LIMIT_START)
+    engaged = [s for _, s in timed if s.clutch_engaged]
+    assert any(s.active_limit == TeleopState.LIMIT_JOINT_POSITION for s in engaged)
+    lower = -1.69297
+    q5 = [q[4] for q in probe.joints_since(start)]
+    print(f'joint 5 margin to its lower bound: {min(q5) - lower:.4f} rad')
+    assert min(q5) - lower >= 0.15 - 0.002
+    assert min(q5) - lower < 0.16                   # it got there
+    probe.disarm()
+
+
+def test_hand_faster_than_the_caps_leads_by_at_most_the_limit_and_no_catch_up(stack):
+    """INV-6: the lead is clamped, the arm stops within it when the hand stops."""
+    probe, env, logs, _ = stack
+    timed, start = _clean_run(probe, env, logs, 'clutch_fast', 1.0)
+    engaged = [s for _, s in timed if s.clutch_engaged]
+    assert any(s.active_limit == TeleopState.LIMIT_LEAD for s in engaged)
+    holds = _holds(probe, start)
+    assert holds, 'the hand never held still'
+    t0, t1 = holds[0]
+    tool = _tool_between(timed, t0, t1)
+    filter_lag = 0.6 / (2.0 * math.pi * 8.0)
+    travel = v_norm(v_sub(tool[-1], tool[0]))
+    print(f'stop distance after the hand stopped: {travel * 1000.0:.1f} mm')
+    assert travel <= LEAD + filter_lag + 0.005
+    late = _tool_between(timed, t1 - 0.5, t1)
+    assert np.ptp(late, axis=0).max() < 5e-4          # stopped, and does not creep on
+    probe.disarm()
+
+
+def test_step_settles_without_overshoot_or_ringing(stack):
+    """INV-7 in mock execution: a 40 mm step of the hand, held."""
+    probe, env, logs, _ = stack
+    timed, start = _clean_run(probe, env, logs, 'clutch_step', 4.0)
+    holds = _holds(probe, start)
+    t0, t1 = holds[-1]
+    target = probe.targets_since(t0)[0][1]
+    tool = _tool_between(timed, t0, t1)
+    first = _tool_between(timed, start, t0)[0]
+    direction = np.subtract(target, first)
+    size = np.linalg.norm(direction)
+    assert size == pytest.approx(0.04, abs=0.005)
+    along = (tool - first) @ (direction / size)
+    print(f'step: overshoot {(along.max() - size) * 1000.0:.2f} mm')
+    assert along.max() <= size + 0.02 * 0.04
+    assert abs(along[-1] - size) < 5e-4
+    # No ringing: once past 90 % the progress never falls back by more than 0.2 mm.
+    past = along[np.argmax(along > 0.9 * size):]
+    assert np.max(np.maximum.accumulate(past) - past) < 2e-4
+    probe.disarm()
+
+
+def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
+    """A2: past the reach the arm stops smoothly, no halt, and follows the hand back."""
+    probe, env, logs, _ = stack
+    timed, start = _clean_run(probe, env, logs, 'clutch_reach', 3.0)
+    holds = _holds(probe, start, still_for=1.5)
+    assert holds, 'no hold past the reach'
+    t0, t1 = max(holds, key=lambda h: h[1] - h[0])
+    joints = [q for when, q in probe.timed_joints_since(t0) if t0 + 1.0 <= when <= t1]
+    assert joints
+    spread = np.ptp(np.array(joints), axis=0).max()
+    print(f'joint spread over the last {t1 - t0 - 1.0:.1f} s of the far hold: {spread:.5f} rad')
+    assert spread < 1e-3                              # at rest, not chattering
+    back = [p for when, p in probe.targets_since(t1) if when <= t1 + 0.2]
+    assert back and back[-1][0] < probe.targets_since(t0)[0][1][0] - 1e-3
     probe.disarm()
 
 
