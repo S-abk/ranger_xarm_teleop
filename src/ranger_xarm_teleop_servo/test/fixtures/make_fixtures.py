@@ -243,6 +243,93 @@ def clutch_singularity() -> List[str]:
     return record(9.2, motion, lambda t: GRIP_ON <= t < 5.0 or 5.6 <= t < 8.8)
 
 
+# ---- Fixtures for the joint-space solver: poor regions of the arm and hard inputs ----
+#
+# Hand offsets are in the tool's own axes, which the calibrated forward direction maps to the
+# arm base: ``dx`` forward, ``dy`` to the left, ``dz`` up. The motions are meant for an arm
+# that starts at the ready posture (joints 0 -0.6 -0.7 0 1.3 0, tool pointing down).
+
+LOOK_DOWN = (math.sin(math.radians(-25.0) / 2.0), 0.0, 0.0, math.cos(math.radians(-25.0) / 2.0))
+LEFT = (-math.cos(math.radians(CAL_YAW_DEG)), 0.0, math.sin(math.radians(CAL_YAW_DEG)))
+
+Leg = Tuple[float, float, float]        # start, duration, change of one hand offset
+
+
+def at_offset(dx: float, dy: float = 0.0, dz: float = 0.0) -> Vec:
+    """Return START moved ``dx`` forward, ``dy`` to the left and ``dz`` up (tool axes)."""
+    return tuple(START[k] + dx * FORWARD[k] + dy * LEFT[k] + (dz if k == 1 else 0.0)
+                 for k in range(3))
+
+
+def moves(t: float, legs: List[Leg]) -> float:
+    """Return a hand offset at ``t``: the sum of minimum-jerk legs (start, duration, change)."""
+    return sum(change * smooth(t, start, duration) for start, duration, change in legs)
+
+
+def linear(t: float, start: float, duration: float, change: float) -> float:
+    """Return a hand offset that changes by ``change`` at constant speed from ``start``."""
+    return change * min(max((t - start) / duration, 0.0), 1.0)
+
+
+def looking_down(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+    """Replace a frame by one whose headset looks 25 deg down, at the hand."""
+    return line(i, right, viewer(LOOK_DOWN))
+
+
+def clutch_shoulder() -> List[str]:
+    """
+    Pull the tool back until the wrist is over the axis of joint 1, rising to clear the body.
+
+    Grip 1.2-6.4 s: the tool rises 0.20 m, then comes back 0.12 m. The hand returns while the
+    grip is open. Grip 7.2-11.8 s: back another 0.17 m (0.29 m in all; each engagement is
+    inside the 0.30 m offset limit), hold, release.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        dz = moves(t, [(1.5, 2.0, 0.20), (6.6, 0.5, -0.20)])
+        dx = moves(t, [(3.8, 2.0, -0.12), (6.6, 0.5, 0.12), (7.7, 2.5, -0.17)])
+        return at_offset(dx, 0.0, dz), HELD
+    return record(12.4, motion, lambda t: GRIP_ON <= t < 6.4 or 7.2 <= t < 11.8, looking_down)
+
+
+def clutch_fast() -> List[str]:
+    """Grip 1.2-8.0 s; 0.24 m at 0.6 m/s (2.4 x the speed cap), still for 2 s, then 40 mm back."""
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        dx = linear(t, 1.5, 0.4, 0.24) + linear(t, 4.4, 0.5, -0.04)
+        return at_offset(dx), HELD
+    return record(8.4, motion, held_until(8.0))
+
+
+def clutch_step() -> List[str]:
+    """Grip 1.2-7.6 s; 3 s still, then the hand jumps 40 mm in 0.1 s and holds for 3 s."""
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        return at_offset(linear(t, 4.2, 0.1, 0.04)), HELD
+    return record(8.0, motion, held_until(7.6))
+
+
+def clutch_joint_limit() -> List[str]:
+    """Grip 1.2-6.0 s; tilt the pointing end up by 55 deg (inside the 60 deg offset limit)."""
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        return START, qmul(pitch_up(55.0 * smooth(t, 1.5, 3.0)), HELD)
+    return record(6.4, motion, held_until(6.0))
+
+
+def clutch_reach() -> List[str]:
+    """
+    Reach out past the arm's maximum reach, hold, then bring the hand back 0.10 m.
+
+    Three engagements of 0.28, 0.28 and 0.20 m forward (inside the 0.30 m offset limit of
+    each; the hand returns while the grip is open): grip 1.2-5.2 s, 6.0-10.0 s and
+    10.8-19.0 s. In the last, 2 s still at the far point (from 13.1 s), then 0.10 m back
+    from 16.5 s.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        dx = moves(t, [(1.5, 3.0, 0.28), (5.3, 0.5, -0.28), (6.3, 3.0, 0.28),
+                       (10.1, 0.5, -0.28), (11.1, 2.0, 0.20)]) + linear(t, 16.5, 0.5, -0.10)
+        return at_offset(dx), HELD
+    return record(19.6, motion,
+                  lambda t: GRIP_ON <= t < 5.2 or 6.0 <= t < 10.0 or 10.8 <= t < 19.0)
+
+
 def gate_absent() -> List[str]:
     """Grip held; the controller is absent from 2.5 s to 3.0 s."""
     def change(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
@@ -300,6 +387,7 @@ def generate() -> Dict[str, List[str]]:
     """Return fixture name -> exact file lines (without newlines)."""
     makers = [clutch_line, clutch_circle, clutch_rotation, clutch_reengage, clutch_jump,
               clutch_stall, clutch_release_moving, clutch_into_body, clutch_singularity,
+              clutch_shoulder, clutch_fast, clutch_step, clutch_joint_limit, clutch_reach,
               gate_absent,
               gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
               gate_seq_backwards]

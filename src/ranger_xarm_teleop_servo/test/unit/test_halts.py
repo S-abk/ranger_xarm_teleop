@@ -172,3 +172,22 @@ def test_report_names_everything_the_table_must_show():
                    'commanded motion:', 'halts: 1', '1  HALT_FOR_SINGULARITY / wrist',
                    'condition number over engaged time', 'share of engaged time at or above'):
         assert wanted in text, wanted
+
+
+def test_solver_summary_lines_appear_only_when_the_rows_carry_the_solver_fields():
+    rows = wrist_session()
+    assert 'share_damped' not in halts.analyze(rows)['summary']
+    assert 'solver: damped' not in halts.format_report(halts.analyze(rows))
+    engaged = [r for r in rows if r['k'] == 'state' and r['engaged']]
+    for i, row in enumerate(engaged):
+        row['conditioning'] = 0.8 - 0.002 * i
+        row['damped'] = i % 4 == 0
+    summary = halts.analyze(rows)['summary']
+    assert summary['share_damped'] == pytest.approx(0.25, abs=0.01)
+    assert summary['conditioning_min'] == pytest.approx(0.8 - 0.002 * (len(engaged) - 1))
+    text = halts.format_report(halts.analyze(rows))
+    assert 'solver: damped 25.' in text and 'minimum conditioning 0.' in text
+
+
+def test_hold_reason_20_is_named():
+    assert halts.HOLD_REASON[20] == 'SOLVER'
