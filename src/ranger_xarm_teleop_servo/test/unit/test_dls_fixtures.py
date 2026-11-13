@@ -36,13 +36,12 @@ from ranger_xarm_teleop_servo.teleop_model import run
 SOLVER = sv.SolverParams(linear_speed_cap=0.25, angular_speed_cap=1.0)
 JOINT_LIMIT = 2.0
 START_UP = {Hold.NOT_ARMED, Hold.NOT_CALIBRATED, Hold.CLUTCH_RELEASED, Hold.SERVO_NOT_READY}
-# The solver holds a joint 0.15 rad from its bound. Measured with the reference two cycles
-# old, joint 3 in ``clutch_joint_limit`` gets to 0.1483 rad: 1.7 mrad into the margin. That
-# overshoot is a property of the solver under delay, not something to expect; the slack
-# below only lets the test state the finding (MoveIt Servo halts at 0.1 rad, so the margin
-# that matters for the arm is kept) and a larger overshoot still fails.
+# The solver holds a joint 0.15 rad from its bound. With the reference the node uses
+# (Servo's state, ``stale_ticks`` 1) it is exact; with the reference one cycle older the
+# commanded state can go up to 2 mrad into the margin (``test_joint_margin_with_an_older_
+# reference``), still 48 mrad outside MoveIt Servo's.
 MARGIN = 0.15
-MARGIN_SLACK = 0.002
+MARGIN_SLACK = 0.0
 SERVO_HALT_MARGIN = 0.1
 READY_TOOL_Z = 0.246
 NAMES = ('clutch_shoulder', 'clutch_fast', 'clutch_step', 'clutch_joint_limit', 'clutch_reach')
@@ -59,7 +58,7 @@ def runs(arm):
     out = {}
     for name in NAMES:
         out[name] = run(fixture(name), params(), arm, SOLVER, READY, delay=0.15,
-                        stale_ticks=3, tail=0.0)
+                        stale_ticks=1, tail=0.0)
     return out
 
 
@@ -152,13 +151,15 @@ def test_shoulder_pull_takes_the_wrist_over_the_axis_of_joint_1(runs, arm):
     assert max(s.solution.error_translation for s in _engaged(steps)) < 0.03
 
 
-def test_fast_hand_leads_by_the_limit_and_the_target_follows_it_back(runs):
+def test_fast_hand_leads_by_the_limit_and_the_target_follows_it_back(runs, arm):
     steps = runs['clutch_fast']
     engaged = _engaged(steps)
     assert any(s.output.limit == Limit.LEAD for s in engaged)
-    # The cap is on the commanded tool speed. (The measured tool, through the Jacobian at
-    # the current joints instead of the reference, moves up to 1.4 % faster in this run.)
+    # The cap holds for each commanded step, and so for the commanded state's tool path.
     assert max(s.solution.linear_speed for s in engaged) <= SOLVER.linear_speed_cap + 1e-9
+    path = np.array([sv.tool_pose(arm, s.commanded)[:3, 3] for s in steps])
+    speed = np.linalg.norm(np.diff(path, axis=0), axis=1) / params().target_period
+    assert speed.max() <= SOLVER.linear_speed_cap + 1e-6
     # The hand rests from 1.9 s to 4.4 s: the arm stops within a second and stays stopped.
     onset = _rest_onset(engaged, 1.9, 4.4)
     assert onset is not None and onset - 1.9 < 1.0
@@ -187,7 +188,7 @@ def test_joint_limit_tilt_holds_a_joint_off_its_bound(runs, arm):
     assert held == {'xarm_joint3'}
     assert any(s.solution.limit == sv.LIMIT_JOINT_POSITION for s in _engaged(steps))
     margin = min(float(arm.upper[2] - s.commanded[2]) for s in steps)
-    assert margin < MARGIN + MARGIN_SLACK            # the bound of joint 3 was reached
+    assert margin <= MARGIN + 1e-9                   # the bound of joint 3 was reached
     # Position first: the tool point stays where it was; the lost accuracy is the tilt.
     last = _engaged(steps)[-1]
     assert v_norm(v_sub(last.tool.p, _engaged(steps)[0].tool.p)) < 2e-3
@@ -219,14 +220,32 @@ def test_reach_runs_out_at_the_elbow_and_the_target_comes_back_at_once(runs, arm
     assert _counter_motion(back) <= 1e-4
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "finding: with a target beyond the arm's reach (elbow straight) the joints do not come "
-    'to rest: q2 and q3 swing against each other at the joint velocity limit while the tool '
-    'stays put. Reproduces without any delay: a constant target 0.93 m forward of the ready '
-    'posture (tool pointing down), reference = the arm, gives 1.9 rad/s after 8 s.'))
 def test_reach_arm_comes_to_rest_at_the_far_point(runs):
+    """
+    Past the reach the arm comes to rest and stays still (A2).
+
+    Before the orientation term faded out with the position level's damping, q2 and q3
+    chattered here from cycle to cycle at up to the joint velocity limit.
+    """
     engaged = _engaged(runs['clutch_reach'])
     onset = _rest_onset(engaged, 13.1, 16.5)       # hand still from 13.1 s to 16.5 s
     assert onset is not None and onset - 13.1 < 1.0
     rest = np.array([s.qdot for s in engaged if onset <= s.t < 16.5])
     assert _counter_motion(rest, floor=1e-4) <= 1e-4
+
+
+@pytest.mark.parametrize('stale', [2, 3])
+def test_reach_rest_and_joint_margin_with_an_older_reference(arm, stale):
+    """Robustness: with Servo's state one or two cycles older than the node predicts."""
+    steps = run(fixture('clutch_reach'), params(), arm, SOLVER, READY, delay=0.15,
+                stale_ticks=stale, tail=0.0)
+    engaged = _engaged(steps)
+    onset = _rest_onset(engaged, 13.1, 16.5)
+    assert onset is not None and onset - 13.1 < 1.0
+    rest = np.array([s.qdot for s in engaged if onset <= s.t < 16.5])
+    assert _counter_motion(rest, floor=1e-4) <= 1e-4
+    limited = run(fixture('clutch_joint_limit'), params(), arm, SOLVER, READY, delay=0.15,
+                  stale_ticks=stale, tail=0.0)
+    positions = np.array([s.commanded for s in limited])
+    margin = np.minimum(positions - arm.lower, arm.upper - positions).min()
+    assert margin >= MARGIN - 0.002 and margin > SERVO_HALT_MARGIN

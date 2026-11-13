@@ -123,6 +123,10 @@ def test_random_postures_and_targets_keep_every_limit(arm, seed):
     twist = sv.tool_jacobian(arm, q) @ s.qdot
     assert np.linalg.norm(twist[:3]) <= PARAMS.linear_speed_cap + 1e-9
     assert np.linalg.norm(twist[3:]) <= PARAMS.angular_speed_cap + 1e-9
+    # ... and so is the actual step of one cycle (the arm's path is curved).
+    dp, dr = sv.pose_error(sv.tool_pose(arm, q + s.qdot * PARAMS.period), sv.tool_pose(arm, q))
+    assert np.linalg.norm(dp) / PARAMS.period <= PARAMS.linear_speed_cap + 1e-9
+    assert np.linalg.norm(dr) / PARAMS.period <= PARAMS.angular_speed_cap + 1e-9
     # INV-3: one step never crosses the hard margin from outside it.
     after = q + s.qdot * PARAMS.period
     for i in range(6):

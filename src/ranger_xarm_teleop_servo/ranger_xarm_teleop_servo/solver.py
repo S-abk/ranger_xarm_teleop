@@ -30,7 +30,11 @@ One call of ``solve`` turns the tool target of a cycle into the joint velocity c
 
    ``#`` is the damped pseudo-inverse of its level. For this arm the tool position stays
    well conditioned through the wrist and shoulder regions, so near those the accuracy
-   that is lost is orientation.
+   that is lost is orientation. Where the position level itself is near singular (the arm
+   stretched out to its reach) the space it leaves free turns quickly from one posture to
+   the next, and correcting orientation in it makes the joints chatter from cycle to
+   cycle; there the orientation term fades out with the position level's damping,
+   ``(1 - (lambda_p / max_damping)^2)``.
 4. **Damping law,** per level, from that level's smallest singular value ``s``:
    ``lambda^2 = max_damping^2 (1 - (s / threshold)^2)`` for ``s < threshold``, else 0.
    With ``max_damping = 0.5`` a command of one speed cap along the weakest direction asks
@@ -41,7 +45,8 @@ One call of ``solve`` turns the tool target of a cycle into the joint velocity c
    bound is fixed at it and the rest is solved again without it.
 6. **One scale factor** for the whole vector, so the direction of motion is kept: every
    joint within ``velocity_fraction`` of its velocity limit, and the tool's linear and
-   angular speed (``J qdot`` at the reference) within the caps.
+   angular speed within the caps, for the twist ``J qdot`` at the reference and for the
+   actual step of one cycle (forward kinematics), which on a curved path can be longer.
 """
 
 from dataclasses import dataclass
@@ -221,7 +226,8 @@ def _priority(jn: np.ndarray, yn: np.ndarray, params: SolverParams):
     so = _smallest_rank(jop, 3)
     lam_o = damping_for(so, params)
     jop_inv, _ = _damped_pinv(jop, lam_o)
-    z = zp + projector @ (jop_inv @ (yn[3:] - jo @ zp))
+    fade = 1.0 - (lam_p / params.max_damping) ** 2
+    z = zp + fade * (projector @ (jop_inv @ (yn[3:] - jo @ zp)))
     return z, Levels(sp, so, lam_p, lam_o)
 
 
@@ -265,7 +271,7 @@ class Solution:
     damping: float                      # normalised lambda, the larger of the two levels
     error_translation: float            # m: target vs the tool at the reference state
     error_rotation: float               # rad
-    linear_speed: float                 # m/s: tool speed of ``qdot`` at the reference
+    linear_speed: float                 # m/s: tool speed of one cycle's step of ``qdot``
     angular_speed: float                # rad/s
     scale: float                        # the one factor applied to the whole vector
     limit: str                          # LIMIT_*: what limited the command, '' if nothing
@@ -329,11 +335,22 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
     elif tool_scale < 1.0:
         scale, limit = tool_scale, LIMIT_TOOL_SPEED
     qdot = qdot * scale
+    # The caps hold for the twist J qdot; the step of one cycle follows the arm's curved
+    # path, which can be slightly longer. Check the step itself and scale once more.
+    after = tool_pose(arm, q + qdot * params.period)
+    step_p, step_r = pose_error(after, current)
+    linear = float(np.linalg.norm(step_p)) / params.period
+    angular = float(np.linalg.norm(step_r)) / params.period
+    over = max(linear / params.linear_speed_cap, angular / params.angular_speed_cap)
+    if over > 1.0:
+        qdot = qdot / over
+        scale, limit = scale / over, LIMIT_TOOL_SPEED
+        linear, angular = linear / over, angular / over
     return Solution(qdot=qdot, conditioning=first_levels.conditioning,
                     damping=first_levels.damping,
                     error_translation=float(np.linalg.norm(dp)),
                     error_rotation=float(np.linalg.norm(dr)),
-                    linear_speed=linear * scale, angular_speed=angular * scale,
+                    linear_speed=linear, angular_speed=angular,
                     scale=scale, limit=limit, fixed=fixed)
 
 
