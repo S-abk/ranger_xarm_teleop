@@ -146,9 +146,19 @@ def test_scaling_keeps_the_direction_of_motion(arm, seed):
     q = np.array(READY) + rng.uniform(-0.15, 0.15, 6)
     ff = rng.uniform(-1, 1, 6) * [1, 1, 1, 4, 4, 4]      # beyond the caps
     fast = sv.solve(arm, q, sv.tool_pose(arm, q), PARAMS, ff)
-    assert fast.scale < 1.0 and fast.limit in (sv.LIMIT_JOINT_VELOCITY, sv.LIMIT_TOOL_SPEED)
+    # Scaled, unless limiting each level's command to its cap already brought it within.
+    assert fast.scale < 1.0 or fast.limit == sv.LIMIT_NONE
+    if fast.scale < 1.0:
+        assert fast.limit in (sv.LIMIT_JOINT_VELOCITY, sv.LIMIT_TOOL_SPEED)
     # The same solve with every limit 100 times wider: the normalised Jacobian, and so the
-    # damping, is identical, and nothing limits, so this is the unscaled direction.
+    # damping, is identical, and nothing limits, so this is the unscaled direction. Each
+    # level's command is limited to its cap before the solve (the solver does that too).
+    ff = np.array(ff, dtype=float)
+    for level, cap in ((slice(0, 3), PARAMS.linear_speed_cap),
+                       (slice(3, 6), PARAMS.angular_speed_cap)):
+        size = np.linalg.norm(ff[level]) / cap
+        if size > 1.0:
+            ff[level] /= size
     wide = sv.SolverParams(25.0, 100.0)
     big = sv.make_arm(arm.chain, velocity_limits={n: 200.0 for n in arm.joint_names})
     big = sv.Arm(big.chain, big.tip_to_tool, big.lower, big.upper, arm.velocity * 100.0)
@@ -291,3 +301,50 @@ def test_a_narrow_damper_zone_still_never_steps_into_the_margin(arm):
     target = sv.tool_pose(arm, [0.0, -0.3, 0.6, 0.0, 0.5, 0.0])
     path, _ = _simulate(arm, q0, lambda t: target, 4.0, params=params)
     assert np.max(path[:, 2]) <= arm.upper[2] - params.limit_margin + 1e-9
+
+
+def _out_of_reach(arm, x, seconds, params=PARAMS, rotation_lead=True):
+    """Drive toward a target out of reach, the target kept within the lead limits."""
+    from ranger_xarm_teleop_servo.gate import clamp_around
+    from ranger_xarm_teleop_servo.rotations import pose_from_matrix, pose_to_matrix
+    q = np.array(READY, dtype=float)
+    goal = sv.tool_pose(arm, q)
+    goal[0, 3] = x
+    qdots = []
+    for _ in range(int(seconds / params.period)):
+        current = pose_from_matrix(sv.tool_pose(arm, q))
+        target, _, _ = clamp_around(pose_from_matrix(goal), current, 0.05,
+                                    math.radians(12.0) if rotation_lead else math.pi)
+        s = sv.solve(arm, q, pose_to_matrix(target), params)
+        q = q + s.qdot * params.period
+        qdots.append(s.qdot)
+    return q, np.array(qdots)
+
+
+@pytest.mark.parametrize('x', [0.93, 0.98, 1.2])
+def test_out_of_reach_the_arm_stops_short_of_the_stretched_singularity(arm, x):
+    """Past the reach the position level is held at its floor and the arm comes to rest."""
+    q, qdots = _out_of_reach(arm, x, 12.0)
+    assert sv.position_conditioning(arm, q, PARAMS) >= PARAMS.boundary_floor - 5e-3
+    assert np.abs(qdots[-100:]).max() < 1e-3
+    flips = sum(1 for a, b in zip(qdots[-100:], qdots[-99:]) if a @ b < 0)
+    assert flips == 0
+    # From there, a target 20 mm back is followed at once: the way back is not lost. (At
+    # the stretched singularity itself the arm took 0.5 s to start moving back.)
+    start = sv.tool_pose(arm, q)[0, 3]
+    back = sv.tool_pose(arm, q)
+    back[0, 3] -= 0.02
+    travel = []
+    for _ in range(25):
+        s = sv.solve(arm, q, back, PARAMS)
+        q = q + s.qdot * PARAMS.period
+        travel.append(start - sv.tool_pose(arm, q)[0, 3])
+    assert travel[4] > 1.0e-3 and travel[24] > 0.010     # after 0.1 s and 0.5 s
+
+
+@pytest.mark.parametrize('x', [0.93, 0.98, 1.2])
+def test_an_oversized_orientation_error_does_not_make_the_joints_chatter(arm, x):
+    """Without the rotation lead (an error of 60 deg) each level's command is still capped."""
+    _, qdots = _out_of_reach(arm, x, 12.0, rotation_lead=False)
+    flips = sum(1 for a, b in zip(qdots[-100:], qdots[-99:]) if a @ b < 0)
+    assert flips == 0 and np.abs(qdots[-100:]).max() < 1e-2

@@ -211,10 +211,18 @@ def test_reach_runs_out_at_the_elbow_and_the_target_comes_back_at_once(runs, arm
     # It is the elbow, not the bound of joint 3.
     assert min(float(arm.upper[2] - s.commanded[2]) for s in steps) > 0.5
     assert min(float(s.commanded[2] - arm.lower[2]) for s in steps) > 1.0
-    # The hand comes back 0.10 m from 16.5 s: the target turns within three cycles.
+    # The hand comes back 0.10 m from 16.5 s: the target turns within three cycles ...
     before = _target_x(steps, 16.5)
     after = [s for s in engaged if 16.5 < s.t <= 16.6]
     assert after[2].output.target.p[0] < before - 1e-3
+    # ... and the measured arm (0.15 s late in this model) soon after the target has come
+    # back past it (up to the lead limit ahead of it, the target first has to cover that):
+    # it was kept off the stretched singularity, where the way back is the direction it
+    # lacks and it used to stay put for half a second.
+    at_turn = [s.tool.p[0] for s in engaged if s.t <= 16.5][-1]
+    crossed = next(s.t for s in engaged if s.t > 16.5 and s.output.target.p[0] < at_turn)
+    moved = [s.t for s in engaged if s.t > 16.5 and s.tool.p[0] < at_turn - 0.002]
+    assert moved and moved[0] - crossed < 0.3
     # The return settles without reversing.
     back = np.array([s.qdot for s in engaged if s.t >= 17.6])
     assert _counter_motion(back) <= 1e-4

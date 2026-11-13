@@ -365,9 +365,12 @@ def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
     assert spread < 1e-3                              # at rest, not chattering
     back = [p for when, p in probe.targets_since(t1) if when <= t1 + 0.2]
     assert back and back[-1][0] < probe.targets_since(t0)[0][1][0] - 1e-3
-    # The arm itself turns back at once, not only the target.
+    # The arm itself turns back soon after the target has come back past it (the target
+    # is up to the lead limit ahead at the far point and first covers that).
     at_hold = _tool_between(timed, t1 - 0.2, t1)[-1]
-    after = _tool_between(timed, t1, t1 + 0.4)
+    crossed = next(when for when, p in probe.targets_since(t1) if p[0] < at_hold[0])
+    after = _tool_between(timed, crossed, crossed + 0.4)
+    print(f'target back past the tool {crossed - t1:.2f} s after it turned')
     assert after.size and after[:, 0].min() < at_hold[0] - 2e-3
     probe.disarm()
 
