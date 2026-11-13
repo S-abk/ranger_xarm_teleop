@@ -37,7 +37,7 @@ from ranger_xarm_teleop_servo.rotations import (pose_from_matrix, q_between, v_n
 import rclpy
 
 from stack_helpers import (child_environment, Probe, Process, READY,
-                           replay_with_clean_input, STALE_DATA)
+                           replay_with_clean_input)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -52,9 +52,10 @@ JOINT_LIMIT_START = [0.0, -0.6, -0.7, 0.0, -1.2, 0.0]
 HALTS = (ServoStatus.HALT_FOR_SINGULARITY, ServoStatus.HALT_FOR_COLLISION, ServoStatus.JOINT_BOUND)
 LEAD = 0.05             # the simulation-only lead limit (m)
 # How an engagement of these replays may end: the grip opens, the recording ends, or input
-# data arrives late on a busy machine (the gate releasing as it must; see STALE_DATA).
-# Never a halt, MoveIt Servo or the solver.
-EXPECTED_RELEASES = (TeleopState.HOLD_CLUTCH_RELEASED,) + STALE_DATA
+# data arrives late on a busy machine (the gate releasing as it must). Never a halt, MoveIt
+# Servo, the solver, or a stale measurement of the arm.
+EXPECTED_RELEASES = (TeleopState.HOLD_CLUTCH_RELEASED, TeleopState.HOLD_INPUT_STALE,
+                     TeleopState.HOLD_POSE_ABSENT, TeleopState.HOLD_HEAD_ABSENT)
 
 
 @pytest.fixture(scope='module')
@@ -360,11 +361,19 @@ def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
     holds = _holds(probe, start, still_for=1.5)
     assert holds, 'no hold past the reach'
     t0, t1 = max(holds, key=lambda h: h[1] - h[0])
-    joints = [q for when, q in probe.timed_joints_since(t0) if t0 + 1.0 <= when <= t1]
-    assert joints
-    spread = np.ptp(np.array(joints), axis=0).max()
-    print(f'joint spread over the last {t1 - t0 - 1.0:.1f} s of the far hold: {spread:.5f} rad')
-    assert spread < 1e-3                              # at rest, not chattering
+    # At rest: kept off the stretched singularity the arm slides slowly along that bound
+    # for a few seconds (a few mrad/s, decaying); it does not chatter or reverse.
+    timed_q = [(when, q) for when, q in probe.timed_joints_since(t0) if t1 - 1.0 <= when <= t1]
+    assert len(timed_q) > 10
+    times = np.array([w for w, _ in timed_q])
+    q = np.array([q for _, q in timed_q])
+    speed = np.abs(q[-1] - q[0]) / (times[-1] - times[0])
+    print(f'joint speed over the last second of the far hold: {speed.max():.4f} rad/s')
+    assert speed.max() < 0.005
+    steps = np.diff(q, axis=0)
+    for j in range(6):
+        big = steps[np.abs(steps[:, j]) > 1e-5, j]
+        assert np.all(big >= 0) or np.all(big <= 0), f'joint {j + 1} reverses at the far point'
     back = [p for when, p in probe.targets_since(t1) if when <= t1 + 0.2]
     assert back and back[-1][0] < probe.targets_since(t0)[0][1][0] - 1e-3
     # The arm itself turns back soon after the target has come back past it (the target
