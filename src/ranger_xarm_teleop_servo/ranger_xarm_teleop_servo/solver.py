@@ -66,9 +66,10 @@ class SolverParams:
     linear_speed_cap: float             # m/s (limits file)
     angular_speed_cap: float            # rad/s (limits file)
     period: float = 0.02                # s, the target cycle
-    # 1/s, error feedback. The loop runs on Servo's commanded state, which reaches this
-    # node 2-3 cycles late; z^(d+1) - z^d + gain*period has only real roots (no ringing)
-    # for gain*period <= 4/27 at d = 2 and 27/256 at d = 3: 5 /s stays below both.
+    # 1/s, error feedback. The loop runs on Servo's commanded state, predicted one step past
+    # its newest output; when the two loops slip it is a cycle or two older. With d cycles
+    # of staleness z^(d+1) - z^d + gain*period has only real roots (no ringing) for
+    # gain*period <= 1/4 (d = 1), 4/27 (d = 2), 27/256 (d = 3): 5 /s stays below all three.
     gain: float = 5.0
     damping_threshold: float = 0.5      # normalised singular value below which damping starts
     max_damping: float = 0.5            # normalised damping at a singularity

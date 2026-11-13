@@ -144,9 +144,10 @@ def test_no_oscillation_at_rest_or_after_a_step(arm, delay, stale):
     """
     INV-7: 40 mm hand step in 0.1 s, held; delay 150 ms and twice that, stale reference.
 
-    ``stale`` 1 is Servo's state including the last command. The realistic case is 3:
-    Servo's output arrives a cycle late and lags its own base by one step. Margin: up to
-    3 no joint ever reverses; at 4 a decaying reversal under 5 % of the peak speed.
+    ``stale`` 1 is Servo's state including the last command: what the node uses (Servo's
+    newest output plus one step of the last command, the window point Servo does not
+    publish). 2 happens when Servo's and the node's cycles slip. Margin: up to 3 no joint
+    ever reverses; at 4 a decaying reversal under 5 % of the peak speed.
     """
     steps = _run(arm, [(0.0, 0.0), (1.0, 0.0), (1.1, 0.04)], 4.0, delay=delay, stale=stale)
     engaged = _engaged(steps)

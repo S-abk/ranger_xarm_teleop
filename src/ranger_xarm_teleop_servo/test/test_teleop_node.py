@@ -16,8 +16,9 @@ Teleop node in process: INV-2, INV-10, INV-12, pairing by stamp, joint-jog comma
 
 The node is fed real bridge messages built from the fixtures (same parser and message
 builder as the live bridge). The robot side is replaced by an ideal arm: MoveIt Servo
-integrates each joint-jog command, its output reaches the node one cycle later, and the
-measured joints are that commanded state; MoveIt Servo becomes active as soon as it is
+integrates each joint-jog command, its output (every window point but the newest, so the
+state before the latest step) reaches the node one cycle later, and the measured joints are
+that commanded state; MoveIt Servo becomes active as soon as it is
 asked to, and the mux grants ownership as soon as arming is requested. Time is a fake
 monotonic clock, so the test is deterministic.
 """
@@ -172,8 +173,9 @@ class Harness:
         self.node._on_timer()
         for command in self.commands[before:]:
             assert list(command.joint_names) == JOINTS
-            self.q = self.q + np.array(command.velocities) * 0.02
+            # Servo publishes every window point but the newest: the state before this step.
             self.pending_output = self.q.copy()
+            self.q = self.q + np.array(command.velocities) * 0.02
         if self.arm_follows:
             self.measured_q = self.q.copy()
         if self.node.arm is not None and self.node.tool_to_tip is not None:

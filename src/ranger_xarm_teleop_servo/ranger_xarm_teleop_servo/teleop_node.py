@@ -544,12 +544,21 @@ class TeleopNode(Node):
             return None
 
     def reference(self, now: float) -> Optional[np.ndarray]:
-        """Return the solver's reference: Servo's output, or within the grace our own."""
+        """
+        Return the solver's reference: Servo's commanded state, or within the grace our own.
+
+        MoveIt Servo integrates each step from the last point of its rolling window and
+        publishes every point but that last one, re-applying the newest joint command each
+        cycle. The state the next command is added to is therefore the newest published
+        point plus one step of the last command sent.
+        """
         servo = self.servo_reference(now)
         if servo is not None:
             if not self.output_confirmed:
                 self.output_confirmed = True
                 self.confirmed_at = self.servo_output[0]
+            if self.solution is not None:
+                servo = servo + self.solution.qdot * self.params.target_period
             return servo
         if (not self.output_confirmed and self.first_command_at is not None
                 and now - self.first_command_at <= SERVO_OUTPUT_TIMEOUT_S):
