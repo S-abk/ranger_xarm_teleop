@@ -217,3 +217,29 @@ def test_singularity_replay_passes_through_without_a_halt_and_one_command_recove
     time.sleep(1.0)
     assert probe.joint_positions() == pytest.approx(READY, abs=0.02)
     assert probe.owner_value() == ArmOwner.OWNER_MOVEIT and not probe.state().armed
+
+
+def test_shoulder_region_is_crossed_without_a_halt(stack):
+    """INV-5 (shoulder) in Gazebo: pulled back over joint 1's axis, damped, never halted."""
+    probe, env, logs = stack
+
+    def ready():
+        probe.move_to(READY, seconds=4.0)
+        time.sleep(1.0)
+    start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_shoulder.log'),
+                                       'clutch_shoulder', expected_engaged_s=1.0, before=ready)
+    time.sleep(1.0)
+    states = probe.states_since(start)
+    engaged = [s for s in states if s.clutch_engaged]
+    assert len(engaged) > 150
+    ended = [b.hold_reason for a, b in zip(states, states[1:])
+             if a.clutch_engaged and not b.clutch_engaged]
+    assert ended and all(r in (TeleopState.HOLD_CLUTCH_RELEASED, TeleopState.HOLD_INPUT_STALE)
+                         for r in ended), ended
+    assert not any(s.servo_status in (ServoStatus.HALT_FOR_SINGULARITY,
+                                      ServoStatus.HALT_FOR_COLLISION, ServoStatus.JOINT_BOUND)
+                   for s in engaged)
+    assert min(s.conditioning for s in engaged) < 0.2 and any(s.damped for s in engaged)
+    assert all(s.lead_translation <= 0.05 + 1e-9 for s in engaged)
+    assert probe.joint_speeds_since(start) <= 2.0 + 0.1
+    probe.disarm()
