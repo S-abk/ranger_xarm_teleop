@@ -154,8 +154,11 @@ def main() -> int:
              'a solver session never ends. The old model counts a joint limit within 0.1 rad '
              "of a bound; the solver's damper acts from 0.35 rad and holds a joint 0.15 rad "
              'from its bound, so its "damper active" rows are not the same event',
-             '- "still moving" and "above 0.5 rad/s in both directions" flag joints that '
-             "swing instead of settling (the solver's reach-boundary limit cycle)"]
+             '- "still moving" flags a joint still above 0.05 rad/s at the end of a 1 s hold: '
+             'damped convergence of the orientation where it is poorly conditioned (with a 4 s '
+             'hold every cube position settles, and none alternates in sign); "above 0.5 rad/s '
+             'in both directions" also counts a joint that turns back after passing a '
+             'singularity']
     lines.extend(notes)
     report = '\n'.join(lines)
     if args.out:
