@@ -81,10 +81,11 @@ def set_state(rows, **fields):
             index += 1
 
 
-def test_peak_joint_speed_from_the_reported_velocities_or_from_the_positions():
-    reported = recording(joint_v=lambda t: [0.0, 0.0, 0.7 if abs(t - 1.5) < 0.005 else 0.2,
-                                            0, 0, 0])
-    assert only(reported)['peak_joint_speed'] == pytest.approx(0.7)
+def test_peak_joint_speed_from_the_positions_whatever_velocity_is_reported():
+    # Mock hardware with a position interface reports zero velocity while it moves.
+    reported = recording(joint_q=lambda t: [0.0, 0.4 * t, 0, 0, 0, 0],
+                         joint_v=lambda t: [0.0] * 6)
+    assert only(reported)['peak_joint_speed'] == pytest.approx(0.4, rel=1e-6)
     # No velocities: the positions' difference over the stamps; joint 2 at 0.4 rad/s.
     differenced = recording(joint_q=lambda t: [0.0, 0.4 * t, 0, 0, 0, 0])
     assert only(differenced)['peak_joint_speed'] == pytest.approx(0.4, rel=1e-6)

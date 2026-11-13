@@ -289,14 +289,15 @@ def _peak_joint_speed(rows: List[Dict[str, Any]]) -> float:
     """
     Return the largest joint speed (rad/s) over the rows.
 
-    From the reported velocities if every row has them, else from the differences of the
-    joint positions over the row times.
+    From the differences of the joint positions over the row times: a joint state's own
+    velocity field is not a measurement everywhere (mock hardware with a position
+    interface reports zero). The reported velocities are used only without two positions.
     """
     if not rows:
         return math.nan
-    if all(r.get('v') is not None for r in rows):
-        return float(np.abs(np.array([r['v'] for r in rows])).max())
     if len(rows) < 2:
+        if all(r.get('v') is not None for r in rows):
+            return float(np.abs(np.array([r['v'] for r in rows])).max())
         return math.nan
     times = _seconds(rows)
     q = np.array([r['q'] for r in rows])
