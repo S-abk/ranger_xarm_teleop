@@ -28,8 +28,11 @@ from ranger_xarm_teleop_interfaces.srv import SetArmOwner
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import JointState
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
+import tf2_ros
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ARM_JOINTS = [f'xarm_joint{i}' for i in range(1, 7)]
@@ -135,6 +138,8 @@ class Probe:
         self.joints = []            # (monotonic, [q1..q6])
         self.owner = None
         self.inputs = []            # monotonic arrival of every input status
+        self.stamped_joints = []    # (monotonic, header stamp, [q1..q6])
+        self.description = None     # /robot_description text
         self.spin_errors = []
         self.moveit_controller = moveit_controller
         self.teleop_controller = teleop_controller
@@ -142,6 +147,11 @@ class Probe:
         self.node.create_subscription(JointState, '/joint_states', self._on_joints, 50)
         self.node.create_subscription(ArmOwner, '/teleop/mux/owner', self._on_owner, 10)
         self.node.create_subscription(InputStatus, '/teleop/input/status', self._on_input, 50)
+        self.node.create_subscription(
+            String, '/robot_description', self._on_description,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.node)
         self.trajectory_pub = self.node.create_publisher(
             JointTrajectory, f'/{teleop_controller}/joint_trajectory', 10)
         self.action = ActionClient(self.node, FollowJointTrajectory,
@@ -180,9 +190,15 @@ class Probe:
     def _on_joints(self, msg):
         index = {name: i for i, name in enumerate(msg.name)}
         if all(j in index for j in ARM_JOINTS):
+            q = [msg.position[index[j]] for j in ARM_JOINTS]
+            now = time.monotonic()
             with self.lock:
-                self.joints.append((time.monotonic(), [msg.position[index[j]]
-                                                       for j in ARM_JOINTS]))
+                self.joints.append((now, q))
+                self.stamped_joints.append((now, msg.header.stamp, q))
+
+    def _on_description(self, msg):
+        with self.lock:
+            self.description = msg.data
 
     def _on_input(self, msg):
         with self.lock:
@@ -241,6 +257,20 @@ class Probe:
     def joints_since(self, t):
         with self.lock:
             return [q for when, q in self.joints if when >= t]
+
+    def stamped_joints_since(self, t):
+        with self.lock:
+            return [(stamp, q) for when, stamp, q in self.stamped_joints if when >= t]
+
+    def joint_speeds_since(self, t):
+        """Return the largest joint speed between consecutive joint states (rad/s, stamps)."""
+        samples = self.stamped_joints_since(t)
+        best = 0.0
+        for (s0, q0), (s1, q1) in zip(samples, samples[1:]):
+            dt = (s1.sec - s0.sec) + (s1.nanosec - s0.nanosec) * 1e-9
+            if dt > 1e-4:
+                best = max(best, max(abs(a - b) for a, b in zip(q1, q0)) / dt)
+        return best
 
     def max_joint_change(self, since, reference):
         return max((max(abs(a - b) for a, b in zip(q, reference))

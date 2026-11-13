@@ -36,7 +36,7 @@ from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from rcl_interfaces.srv import GetParameters
 
 from stack_helpers import (child_environment, kill_gz_partition, Probe, Process, READY,
-                           replay, replay_with_clean_input)
+                           replay_with_clean_input)
 
 pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
                                 reason='set TELEOP_TEST_GAZEBO=1 to run the Gazebo tests')
@@ -172,30 +172,41 @@ def test_input_timeout_is_100_ms_of_real_time_not_of_simulation_time(stack):
     probe.disarm()
 
 
-def test_singularity_halt_cannot_be_left_by_re_engaging_and_one_command_recovers(stack):
+def test_singularity_replay_passes_through_without_a_halt_and_one_command_recovers(stack):
+    """
+    INV-5 in Gazebo: the replay that halted MoveIt Servo at once now moves through.
+
+    Replaces the pose-mode test (halt, re-engaging cannot move). Recovery to the ready
+    posture from where the replay ends is still one command.
+    """
     probe, env, logs = stack
     tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools',
                         'recover_arm.py')
     if not os.path.exists(tool):
         pytest.skip('tools/ is not next to the source tree')
-    probe.disarm()
     # Wrist 0.05 rad from aligned: MoveIt Servo's measure is 34.6, beyond its hard stop.
     posture = [0.0, -0.6, -0.7, 0.0, 0.05, 0.0]
-    probe.move_to(posture, seconds=4.0)
-    time.sleep(1.0)
-    before = probe.joint_positions()
-    start = time.monotonic()
-    # Two engagements: tilt further in, then tilt back out.
-    player = replay(env, 'clutch_singularity', str(logs / 'replay_singularity.log'))
-    try:
-        assert player.wait(60.0) == 0, player.output()
-    finally:
-        player.stop()
+
+    def at_the_singularity():
+        probe.move_to(posture, seconds=4.0)
+        time.sleep(1.0)
+    start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_singularity.log'),
+                                       'clutch_singularity', expected_engaged_s=2.0,
+                                       before=at_the_singularity)
     time.sleep(1.0)
     states = probe.states_since(start)
-    halted = [s for s in states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
-    assert halted and all(s.servo_status == ServoStatus.HALT_FOR_SINGULARITY for s in halted)
-    assert probe.max_joint_change(start, before) < 5e-3
+    engaged = [s for s in states if s.clutch_engaged]
+    assert len(engaged) > 150
+    ended = [b.hold_reason for a, b in zip(states, states[1:])
+             if a.clutch_engaged and not b.clutch_engaged]
+    assert ended and all(r in (TeleopState.HOLD_CLUTCH_RELEASED, TeleopState.HOLD_INPUT_STALE)
+                         for r in ended), ended
+    assert not any(s.servo_status in (ServoStatus.HALT_FOR_SINGULARITY,
+                                      ServoStatus.HALT_FOR_COLLISION, ServoStatus.JOINT_BOUND)
+                   for s in states)
+    assert probe.max_joint_change(start, posture) > 0.2
+    assert any(s.damped for s in engaged) and min(s.conditioning for s in engaged) < 0.25
+    assert all(s.lead_translation <= 0.05 + 1e-9 for s in engaged)
     assert probe.owner_value() == ArmOwner.OWNER_TELEOP
     process = Process(['python3', tool], env, str(logs / 'recover.log'))
     try:
