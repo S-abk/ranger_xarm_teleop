@@ -319,7 +319,7 @@ def format_report(result: Dict[str, Any]) -> str:
         lines.append(f"  nearest joint limit: {limit['joint']}, margin "
                      f"{limit['margin_rad']:.3f} rad")
         lines.append(
-            f"  resembles: {halt['resembles'] or 'no singularity (measure below the lower threshold)'}  "
+            f"  resembles: {halt['resembles'] or 'none (measure below the lower threshold)'}  "
             f"(axes 4-6 {halt['wrist_deg']:.1f} deg apart, elbow {halt['elbow_deg']:.1f} deg "
             f"from straight, wrist {halt['shoulder_m'] * 1000:.0f} mm from axis 1)")
         weak = halt['weak_direction']
