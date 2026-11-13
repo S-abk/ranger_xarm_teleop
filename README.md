@@ -13,7 +13,7 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 | `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, MoveIt Servo pose commands), command mux node, and the pure modules behind them with their tests |
 | `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator, simulation-only limit values |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
-| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS) |
+| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py` |
 | `recordings/` | Local headset recordings (git-ignored) |
 
 ## Build and test
@@ -252,6 +252,38 @@ reports, per engagement, the distance of the measured tip from the commanded pat
 following error and lag, the delay from controller motion to joint motion, and how far the tip
 travels after the last target. The fixtures `clutch_*.jsonl` and `gate_*.jsonl` are synthetic
 (`test/fixtures/make_fixtures.py`); `clip_*.jsonl` are cuts of real headset recordings.
+
+### Diagnosing MoveIt Servo halts
+
+MoveIt Servo slows the arm and stops it by the condition number of the arm Jacobian
+(`lower_singularity_threshold`, `hard_stop_singularity_threshold` in `config/servo.yaml`). It
+does not publish that number, so the tools compute it from joint angles with the same
+definition (`ranger_xarm_teleop_servo/kinematics.py`, numpy only).
+
+```bash
+tools/record_session.py record NAME          # start BEFORE arming; Ctrl-C AFTER releasing the grip
+tools/record_session.py halts recordings/NAME.jsonl     # no ROS needed
+tools/workspace_map.py recordings/NAME.jsonl            # or a URDF file; no ROS needed
+```
+
+`record` writes `recordings/NAME.jsonl` (git-ignored): teleop state, tool target, controller
+pose, joint states, MoveIt Servo's status, the arm owner and the robot description. It only
+listens. It refuses to start while the clutch is engaged, and after Ctrl-C it keeps recording
+until the clutch is released (see the timing note below). `halts` prints, per halt, MoveIt
+Servo's status, the hold reason, the joint angles, the condition number and its trend over the
+second before, the nearest joint limit, the singularity the posture resembles (wrist, elbow,
+shoulder) and what was being commanded; then counts by reason and the distribution of the
+condition number over the engaged time. `workspace_map.py` reports the condition number along
+tool motions from a posture: how far the tool gets in each direction before each threshold.
+
+At or beyond the hard stop MoveIt Servo refuses motion in every direction, and after a collision
+halt as well: the arm has to be moved out by MoveIt.
+
+```bash
+tools/recover_arm.py          # disarm, wait until MoveIt owns the arm, plan to the ready posture
+```
+
+(simulation only, like `tools/move_arm.py`, which now prints why a goal was rejected).
 
 Timing note: when a new ROS participant joins the graph (a command-line tool, a node being
 started), DDS endpoint matching can delay messages or block a publish call for 0.1 to 0.3 s.

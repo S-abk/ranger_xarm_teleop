@@ -21,7 +21,8 @@ Angles in radians. Used to put the arm in a posture with room to move before a t
 run. Needs a sourced workspace. **Simulation only:** it reads ``/robot_description`` and
 sends nothing unless every ros2_control hardware plugin in it is a simulator (exit
 status 3 otherwise). On a robot, move the arm through MoveIt. The goal is rejected while teleop owns the arm (the
-MoveIt controller is then inactive); that rejection is what the command mux relies on.
+MoveIt controller is then inactive); that rejection is what the command mux relies on. A
+rejection is printed with its reason; ``tools/recover_arm.py`` disarms and then moves.
 Exit status 0 only when the goal was accepted and succeeded.
 """
 
@@ -39,9 +40,10 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 'src', 'ranger_xarm_teleop_servo'))
+from ranger_xarm_teleop_servo.session import READY_POSTURE, rejection_reason  # noqa: E402
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
 
-READY = [0.0, -0.6, -0.7, 0.0, 1.3, 0.0]
+READY = list(READY_POSTURE)
 
 
 def main() -> int:
@@ -64,6 +66,14 @@ def main() -> int:
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         node.create_subscription(String, '/robot_description',
                                  lambda msg: description.append(msg.data), latched)
+        # Who owns the arm, to explain a rejected goal (listening only; nothing is requested).
+        owner = []
+        try:
+            from ranger_xarm_teleop_interfaces.msg import ArmOwner
+            node.create_subscription(ArmOwner, '/teleop/mux/owner',
+                                     lambda msg: owner.append(msg.owner), 10)
+        except ImportError:
+            pass
         for _ in range(100):
             if description:
                 break
@@ -87,7 +97,11 @@ def main() -> int:
         rclpy.spin_until_future_complete(node, sent, timeout_sec=10.0)
         handle = sent.result()
         if handle is None or not handle.accepted:
-            print('goal REJECTED')
+            for _ in range(20):         # the mux reports its owner several times a second
+                if owner:
+                    break
+                rclpy.spin_once(node, timeout_sec=0.1)
+            print(f'goal REJECTED: {rejection_reason(owner[-1] if owner else None)}')
             return 1
         result = handle.get_result_async()
         rclpy.spin_until_future_complete(node, result, timeout_sec=args.seconds + 30.0)
