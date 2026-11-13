@@ -15,8 +15,9 @@
 The solver fixtures through the whole driving path: gate, solver, delayed model arm.
 
 Each fixture starts at the ready posture and runs with the realistic delay (150 ms) and
-the reference the node uses (MoveIt Servo's state, ``stale_ticks`` 1). Common to all: no gate hold but a plain clutch release (and the
-start-up holds before the first target), the lead inside its limit, every joint speed
+the reference the node uses (MoveIt Servo's state, ``stale_ticks`` 1). Common to all: no
+gate hold but a plain clutch release (and the start-up holds before the first target),
+the lead inside its limit, every joint speed
 inside 95 % of its limit, and no joint nearer than the solver's margin to a position bound.
 Then, per fixture, that the region or bound it was made for is reached.
 """
