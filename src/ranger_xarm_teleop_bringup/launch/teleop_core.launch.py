@@ -125,9 +125,13 @@ def launch_setup(context, *args, **kwargs):
                               'joint_velocity_limit_names': velocity_names,
                               'joint_velocity_limits': velocity_values})
     teleop_parameters.append(sim_time)
+    # Single-threaded linear algebra: the solver works on 6 x 6 matrices every 20 ms, and
+    # BLAS worker threads competing with a simulator stretch a cycle past the time a
+    # headset frame waits for its parts.
     teleop = Node(
         package='ranger_xarm_teleop_servo', executable='teleop_node', name='teleop_servo',
-        output='screen', parameters=teleop_parameters)
+        output='screen', parameters=teleop_parameters,
+        additional_env={'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'})
 
     return [spawner, servo_node, mux, teleop]
 

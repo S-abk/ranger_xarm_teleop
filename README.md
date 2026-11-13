@@ -220,13 +220,13 @@ Each cycle the solver turns the target into joint velocities:
 - **Damping**, per level, grows as that level's smallest singular value falls below 0.5
   (`damping_threshold`, `max_damping` 0.5). The arm never halts for a singularity; `damped`
   says when accuracy is reduced and `solver_error_*` by how much.
-- **Workspace boundary.** Where the tool position itself is poorly conditioned (arm
-  stretched out to its reach, or fully folded) the command may not drive that conditioning
-  below 0.2 (`boundary_floor`, slowed from `boundary_zone` 0.4): at the singularity itself
-  the way back is the direction the arm has lost, and it would stay put after the hand
-  turns back. It costs about 10 mm of reach straight ahead (0.910 instead of 0.920 m).
-  Each of the two levels' commands is first limited to its own speed cap, which can change
-  the tool's direction of motion a little when both are beyond it (`active_limit` 6).
+- **Speed caps per level.** Each of the two levels' commands is first limited to its own
+  speed cap, which can change the tool's direction of motion a little when both are beyond
+  it (`active_limit` 6).
+- **Full reach.** Past the reach the arm stretches into the position singularity and comes
+  to rest there. When the hand turns back, the arm follows after about 0.8 s: the target
+  first comes back through its lead, and at the singularity the way back is the direction
+  the arm has lost.
 - **Limits.** A joint slows toward a position limit from 0.35 rad and stops 0.15 rad short
   (`joint_limit_zone`, `joint_limit_margin`); the rest of the motion is solved again without
   it. One factor then scales the whole command, so its direction is kept, to stay within the

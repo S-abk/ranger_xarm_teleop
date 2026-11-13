@@ -104,6 +104,7 @@ TF_STATIC_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                            durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 PAIR_WAIT_S = 0.02          # how long a status waits for the pose and joy of its frame
+SLOW_CYCLE_S = 0.01         # a cycle longer than this is reported
 OWNER_TIMEOUT_S = 0.5       # mux state older than this counts as "no owner"
 SERVICE_TIMEOUT_S = 1.0     # a Servo or mux call without an answer is abandoned
 VERIFY_PERIOD_S = 1.0       # how often MoveIt Servo's caps and collision checking are re-read
@@ -677,7 +678,7 @@ class TeleopNode(Node):
         else:
             self.stop_command(stamp)
             self.solver_fault = ''
-        marks.append(('publish target', self.mono()))
+        marks.append(('target and joint command', self.mono()))
         self.publish_calibration(stamp)
         self.manage_servo(now, output.want_servo_active)
         marks.append(('servo calls', self.mono()))
@@ -688,6 +689,12 @@ class TeleopNode(Node):
         steps = [(b[1] - a[1], b[0]) for a, b in zip(marks, marks[1:])]
         self._cycle_took = marks[-1][1] - now
         self._cycle_slowest = '%s %.0f ms' % (max(steps)[1], max(steps)[0] * 1000.0)
+        if self._cycle_took > SLOW_CYCLE_S:
+            # Input of a headset frame waits at most PAIR_WAIT_S for its parts; a cycle this
+            # long can make a frame count as having no pose.
+            self.get_logger().warning(
+                f'slow cycle: {self._cycle_took * 1000.0:.0f} ms (longest step: '
+                f'{self._cycle_slowest})', throttle_duration_sec=1.0)
 
     def publish_target(self, target: Pose, stamp) -> None:
         """Publish the tool-frame target (the recorded action)."""

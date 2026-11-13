@@ -320,27 +320,6 @@ def _out_of_reach(arm, x, seconds, params=PARAMS, rotation_lead=True):
 
 
 @pytest.mark.parametrize('x', [0.93, 0.98, 1.2])
-def test_out_of_reach_the_arm_stops_short_of_the_stretched_singularity(arm, x):
-    """Past the reach the position level is held at its floor and the arm comes to rest."""
-    q, qdots = _out_of_reach(arm, x, 12.0)
-    assert sv.position_conditioning(arm, q, PARAMS) >= PARAMS.boundary_floor - 5e-3
-    assert np.abs(qdots[-100:]).max() < 1e-3
-    flips = sum(1 for a, b in zip(qdots[-100:], qdots[-99:]) if a @ b < 0)
-    assert flips == 0
-    # From there, a target 20 mm back is followed at once: the way back is not lost. (At
-    # the stretched singularity itself the arm took 0.5 s to start moving back.)
-    start = sv.tool_pose(arm, q)[0, 3]
-    back = sv.tool_pose(arm, q)
-    back[0, 3] -= 0.02
-    travel = []
-    for _ in range(25):
-        s = sv.solve(arm, q, back, PARAMS)
-        q = q + s.qdot * PARAMS.period
-        travel.append(start - sv.tool_pose(arm, q)[0, 3])
-    assert travel[4] > 1.0e-3 and travel[24] > 0.010     # after 0.1 s and 0.5 s
-
-
-@pytest.mark.parametrize('x', [0.93, 0.98, 1.2])
 def test_an_oversized_orientation_error_does_not_make_the_joints_chatter(arm, x):
     """Without the rotation lead (an error of 60 deg) each level's command is still capped."""
     _, qdots = _out_of_reach(arm, x, 12.0, rotation_lead=False)

@@ -43,17 +43,11 @@ One call of ``solve`` turns the tool target of a cycle into the joint velocity c
    for at most ``1 / damping_threshold`` = 2 joint velocity limits (at the threshold, where
    damping starts; below it ``s / (s^2 + lambda^2)`` is smaller), before the one scale
    factor below.
-5. **Workspace boundary.** Where the position level's smallest singular value ``s_p`` is
-   below ``boundary_zone`` the command may lower it at most at ``(s_p - boundary_floor) /
-   boundary_tau`` (the smallest change of the joint velocities that keeps that rate). The
-   arm then never stretches (or folds) all the way into the singularity, where the
-   direction back is the one it has lost and it would stay put for a while after the hand
-   turns back.
-6. **Joint position limits.** A joint may move toward a limit at most
+5. **Joint position limits.** A joint may move toward a limit at most
    ``(distance - margin) / tau`` (a velocity damper), ``tau`` chosen so the bound reaches
    the joint velocity limit at ``limit_zone`` from the limit. A joint that would exceed its
    bound is fixed at it and the rest is solved again without it.
-7. **One scale factor** for the whole vector, so the direction of motion is kept: every
+6. **One scale factor** for the whole vector, so the direction of motion is kept: every
    joint within ``velocity_fraction`` of its velocity limit, and the tool's linear and
    angular speed within the caps, for the twist ``J qdot`` at the reference and for the
    actual step of one cycle (forward kinematics), which on a curved path can be longer.
@@ -94,9 +88,6 @@ class SolverParams:
     limit_margin: float = 0.15          # rad: no motion toward a position limit closer than this
     limit_zone: float = 0.35            # rad: the damper starts slowing a joint from here
     velocity_fraction: float = 0.95     # share of each joint velocity limit that is used
-    boundary_floor: float = 0.2         # position level never pushed below this conditioning
-    boundary_zone: float = 0.4          # ... and slowed toward it from here
-    boundary_tau: float = 0.1           # s
 
     def __post_init__(self) -> None:
         for name in ('linear_speed_cap', 'angular_speed_cap', 'period', 'gain',
@@ -106,10 +97,7 @@ class SolverParams:
                 raise ValueError(f'{name}: expected a finite positive number, got {value!r}')
         if not self.limit_zone > self.limit_margin:
             raise ValueError('limit_zone must be larger than limit_margin')
-        if not 0.0 <= self.boundary_floor < self.boundary_zone:
-            raise ValueError('boundary_zone must be larger than boundary_floor (>= 0)')
-        if not self.boundary_tau >= self.period:
-            raise ValueError('boundary_tau must be at least one period')
+
         if not 0.0 < self.velocity_fraction <= 1.0:
             raise ValueError('velocity_fraction: expected a value in (0, 1]')
         if self.gain * self.period > STABLE_GAIN_PERIOD:
@@ -355,8 +343,7 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
     fixed = tuple(name for name, f in zip(arm.joint_names, free) if not f)
     limit = LIMIT_JOINT_POSITION if fixed else (LIMIT_TOOL_SPEED if capped else LIMIT_NONE)
 
-    qdot = _keep_off_the_boundary(arm, q, z * arm.velocity, params)
-    qdot = np.clip(qdot, low, high)
+    qdot = z * arm.velocity
     scale = 1.0
     joint_scale = float(np.min(np.where(np.abs(qdot) > 1e-12,
                                         arm.velocity * params.velocity_fraction
@@ -392,27 +379,6 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
 def position_conditioning(arm: Arm, q: Sequence[float], params: SolverParams) -> float:
     """Return the smallest singular value of the normalised position rows at ``q``."""
     return _smallest_rank(_normalised(arm, tool_jacobian(arm, q), params)[:3], 3)
-
-
-def _keep_off_the_boundary(arm: Arm, q: np.ndarray, qdot: np.ndarray,
-                           params: SolverParams) -> np.ndarray:
-    """Return ``qdot`` changed as little as possible so the position level stays off 0."""
-    sp = position_conditioning(arm, q, params)
-    if sp >= params.boundary_zone:
-        return qdot
-    step = 1e-5
-    gradient = np.zeros(len(q))
-    for i in range(len(q)):
-        d = np.zeros(len(q))
-        d[i] = step
-        gradient[i] = (position_conditioning(arm, q + d, params)
-                       - position_conditioning(arm, q - d, params)) / (2 * step)
-    bound = -max(0.0, sp - params.boundary_floor) / params.boundary_tau
-    rate = float(gradient @ qdot)
-    size = float(gradient @ gradient)
-    if rate >= bound or size < 1e-12:
-        return qdot
-    return qdot + (bound - rate) / size * gradient
 
 
 def twist_between(previous: np.ndarray, current: np.ndarray, period: float) -> np.ndarray:
