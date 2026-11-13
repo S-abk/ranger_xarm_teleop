@@ -149,10 +149,15 @@ def _measure(chain: kinematics.Chain, row: Optional[Dict[str, Any]]) -> Optional
 
 def _describe(event, chain, states, targets, joints, servo) -> Dict[str, Any]:
     t = event['t']
+    message = event['msg']
+    if not message:         # a halt at once on re-engaging: the status did not change
+        latest = servo.at(t + MERGE_S, 5.0)
+        if latest is not None and latest['code'] == event['code']:
+            message = latest.get('msg', '')
     out: Dict[str, Any] = {
         't': t, 'servo_code': event['code'],
         'servo_status': SERVO_STATUS.get(event['code'], 'not recorded'),
-        'servo_message': event['msg']}
+        'servo_message': message}
     holds = [row['hold'] for row in states.after(t - 0.1, MERGE_S + 0.1) if row['hold'] != 0]
     hold = HOLD_SERVO_HALTED if HOLD_SERVO_HALTED in holds else (holds[0] if holds else None)
     out['hold_reason'] = None if hold is None else HOLD_REASON.get(hold, str(hold))
@@ -275,7 +280,9 @@ def analyze(records: Sequence[Dict[str, Any]], urdf: Optional[str] = None,
         summary['share_decelerating'] = float(
             weights[np.isin(codes, DECELERATE_CODES)].sum()) / total
         summary['share_above_lower'] = float(weights[values > lower].sum()) / total
-        summary['share_above_hard_stop'] = float(weights[values >= hard_stop].sum()) / total
+        # Servo's scale reaches zero at the hard stop, so an arm driven steadily into a
+        # singularity comes to rest just below it without any halt being reported.
+        summary['stalled_s'] = float(weights[values >= 0.97 * hard_stop].sum())
     return {'halts': halts, 'summary': summary, 'joint_names': chain.joint_names}
 
 
@@ -346,4 +353,6 @@ def format_report(result: Dict[str, Any]) -> str:
             f'{level}: {share * 100:.1f} %' for level, share in summary['share_above'].items()))
         lines.append('share of engaged time Servo reported decelerating: '
                      f"{summary['share_decelerating'] * 100:.1f} %")
+        lines.append('engaged time within 3 % of the hard stop or beyond (arm held back to '
+                     f"a standstill): {summary['stalled_s']:.1f} s")
     return '\n'.join(lines)

@@ -89,3 +89,74 @@ def test_evaluation_text_has_the_figures():
     for wanted in ('condition number 9.3', 'move -x', 'turn +z', 'grid of 27 tool positions',
                    'nearest limit xarm_joint3'):
         assert wanted in text, wanted
+
+
+def test_singularity_rule_scale_and_status():
+    step = np.array([0.0, 0.001, 0, 0, 0, 0])
+    assert workspace.servo_scale(CHAIN, READY, step, 17.0, 30.0) == (1.0, workspace.NO_WARNING)
+    near = READY[:4] + [0.2, 0.0]                   # condition number 24.0
+    measure = kin.condition_number(CHAIN, near)
+    scale, status = workspace.servo_scale(CHAIN, near, step, 17.0, 30.0)
+    toward = 1.0 - (measure - 17.0) / 13.0
+    away = 1.0 - (measure - 17.0) / 26.0
+    assert (status, scale) in ((workspace.APPROACHING, pytest.approx(toward)),
+                               (workspace.LEAVING, pytest.approx(away)))
+    beyond = READY[:4] + [0.05, 0.0]                # 34.6
+    for direction in (step, -step):
+        assert workspace.servo_scale(CHAIN, beyond, direction, 17.0, 30.0) == \
+            (0.0, workspace.HALT)
+    assert workspace.servo_scale(CHAIN, beyond, step, 40.0, 80.0) == (1.0, workspace.NO_WARNING)
+
+
+def test_probe_step_cannot_tell_approaching_from_leaving_near_the_wrist_singularity():
+    # The rule probes along the weakest task direction; here that step leaves the
+    # condition number where it was, so the judgement has nothing to go on.
+    q = np.array(READY[:4] + [0.15, 0.0])
+    left, values, right = np.linalg.svd(kin.jacobian(CHAIN, q))
+    step = right.T @ np.diag(1.0 / values) @ left.T @ (left[:, -1] * 0.01)
+    here = kin.condition_number(CHAIN, q)
+    assert abs(kin.condition_number(CHAIN, q + step) - here) < 0.002 * here
+    assert abs(kin.condition_number(CHAIN, q - step) - here) < 0.002 * here
+    # While the tilt that does change it is a direction the arm moves well in.
+    assert kin.condition_number(CHAIN, READY[:4] + [0.10, 0.0]) > here + 3.0
+
+
+def test_drive_free_slowed_and_halted():
+    sideways = workspace.drive(CHAIN, READY, [0, 0.2, 0, 0, 0, 0], 1.0, 17.0, 30.0)
+    assert sideways.outcome == 'free' and sideways.progress == pytest.approx(1.0)
+    tip, _, _ = kin.forward(CHAIN, sideways.q)
+    start, _, _ = kin.forward(CHAIN, READY)
+    assert np.allclose(tip[:3, 3] - start[:3, 3], [0, 0.2, 0], atol=2e-3)
+    tilt = [0, 0, 0, 0, -0.5, 0]            # toward the wrist singularity
+    held = workspace.drive(CHAIN, READY[:4] + [0.5, 0.0], tilt, 2.0, 17.0, 30.0)
+    assert held.outcome in ('stalled', 'halted', 'slowed') and held.progress < 0.7
+    assert held.peak_condition < 31.0 and held.slowed_share > 0.3
+    # Looser thresholds let the same motion through, past where 17 / 30 held it ...
+    loose = workspace.drive(CHAIN, READY[:4] + [0.5, 0.0], tilt, 0.7, 100.0, 200.0)
+    assert loose.outcome == 'free' and 40.0 < loose.peak_condition < 100.0
+    # ... and hold it in turn at the singularity itself.
+    further = workspace.drive(CHAIN, READY[:4] + [0.5, 0.0], tilt, 1.2, 100.0, 200.0)
+    assert further.outcome == 'slowed' and 190.0 < further.peak_condition <= 200.5
+    at_once = workspace.drive(CHAIN, READY[:4] + [0.05, 0.0], tilt, 1.0, 17.0, 30.0)
+    assert at_once.outcome == 'halted' and at_once.progress == 0.0
+
+
+def test_drive_respects_the_joint_speed_limit():
+    fast = workspace.drive(CHAIN, READY, [0.25, 0, 0, 0, 0, 0], 0.2, 1e9, 2e9,
+                           joint_speed_limit=0.5)
+    assert fast.peak_joint_speed == pytest.approx(0.5) and fast.progress < 1.0
+
+
+def test_survey_and_wander_are_reproducible_and_looser_thresholds_do_not_add_trouble():
+    twists = workspace.sample_twists(5, seed=3)
+    assert all(np.allclose(a, b) for a, b in zip(twists, workspace.sample_twists(5, seed=3)))
+    assert all(np.linalg.norm(t[:3]) <= 0.25 + 1e-9 and np.linalg.norm(t[3:]) <= 1.0 + 1e-9
+               for t in twists)
+    tight = workspace.survey(CHAIN, READY, 17.0, 30.0, count=12)
+    assert tight == workspace.survey(CHAIN, READY, 17.0, 30.0, count=12)
+    assert sum(tight['outcomes'].values()) == pytest.approx(1.0)
+    session = workspace.wander(CHAIN, READY, 17.0, 30.0, sessions=3, segments=6)
+    loose = workspace.wander(CHAIN, READY, 100.0, 200.0, sessions=3, segments=6)
+    assert sum(session['outcomes'].values()) == pytest.approx(1.0)
+    assert loose['outcomes'].get('free', 0.0) >= session['outcomes'].get('free', 0.0)
+    assert 0.0 <= session['sessions_halted'] <= 1.0

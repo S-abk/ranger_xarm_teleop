@@ -53,6 +53,7 @@ def main() -> int:
     parser.add_argument('--group', default='xarm6')
     parser.add_argument('--wait', type=float, default=10.0,
                         help='seconds to wait for MoveIt to own the arm')
+    parser.add_argument('--disarm-service', default='/teleop/disarm')
     parser.add_argument('--speed', type=float, default=0.1,
                         help='velocity and acceleration scaling of the planned motion')
     args = parser.parse_args()
@@ -101,7 +102,7 @@ def main() -> int:
                                  lambda msg: seen.update(description=msg.data), latched)
         node.create_subscription(ArmOwner, '/teleop/mux/owner', on_owner, 10)
         node.create_subscription(TeleopState, '/teleop/state', on_state, 10)
-        disarm = node.create_client(Trigger, '/teleop/disarm')
+        disarm = node.create_client(Trigger, args.disarm_service)
         move = ActionClient(node, MoveGroup, '/move_action')
         spin(10.0, lambda: seen['description'] is not None)
         try:
@@ -117,7 +118,7 @@ def main() -> int:
             answer = call.result() if call.done() else None
             print('disarm: ' + (answer.message if answer is not None else 'no answer'))
         else:
-            print('disarm: no /teleop/disarm service (teleop node not running)')
+            print(f'disarm: no {args.disarm_service} service (teleop node not running?)')
 
         # 2. MoveIt must own the arm and teleop must be disarmed, by fresh reports.
         def handed_back() -> bool:

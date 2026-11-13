@@ -221,6 +221,28 @@ def clutch_into_body() -> List[str]:
     return record(6.4, motion, held_until(6.0), change)
 
 
+def pitch_up(deg: float) -> Quat:
+    """Rotation about the calibrated right-hand axis: positive raises the pointing end."""
+    half = math.radians(deg) / 2.0
+    c = math.radians(CAL_YAW_DEG)
+    return (math.cos(c) * math.sin(half), 0.0, -math.sin(c) * math.sin(half), math.cos(half))
+
+
+def clutch_singularity() -> List[str]:
+    """
+    Tilt into a wrist singularity, let go, grip again and tilt back; no translation.
+
+    Grip 1.2-5.0 s while the hand pitches up 25 deg (1.5-4.5 s); grip again 5.6-8.8 s
+    while it pitches back down by 20 deg (5.9-8.4 s). For an arm that starts with its
+    wrist 0.5 rad from aligned (joints 0 -0.6 -0.7 0 0.5 0), where 15 deg of pitch brings
+    MoveIt Servo's singularity measure to its default hard stop.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        angle = 25.0 * smooth(t, 1.5, 3.0) - 20.0 * smooth(t, 5.9, 2.5)
+        return START, qmul(pitch_up(angle), HELD)
+    return record(9.2, motion, lambda t: GRIP_ON <= t < 5.0 or 5.6 <= t < 8.8)
+
+
 def gate_absent() -> List[str]:
     """Grip held; the controller is absent from 2.5 s to 3.0 s."""
     def change(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
@@ -277,7 +299,8 @@ def gate_seq_backwards() -> List[str]:
 def generate() -> Dict[str, List[str]]:
     """Return fixture name -> exact file lines (without newlines)."""
     makers = [clutch_line, clutch_circle, clutch_rotation, clutch_reengage, clutch_jump,
-              clutch_stall, clutch_release_moving, clutch_into_body, gate_absent,
+              clutch_stall, clutch_release_moving, clutch_into_body, clutch_singularity,
+              gate_absent,
               gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
               gate_seq_backwards]
     return {maker.__name__: maker() for maker in makers}

@@ -30,12 +30,13 @@ import os
 import subprocess
 import time
 
+from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from rcl_interfaces.srv import GetParameters
 
 from stack_helpers import (child_environment, kill_gz_partition, Probe, Process, READY,
-                           replay_with_clean_input)
+                           replay, replay_with_clean_input)
 
 pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
                                 reason='set TELEOP_TEST_GAZEBO=1 to run the Gazebo tests')
@@ -169,3 +170,39 @@ def test_input_timeout_is_100_ms_of_real_time_not_of_simulation_time(stack):
     assert 0.1 < release_time - last_input < 0.17
     assert last_engaged - last_input <= 0.1 + 0.02
     probe.disarm()
+
+
+def test_singularity_halt_cannot_be_left_by_re_engaging_and_one_command_recovers(stack):
+    probe, env, logs = stack
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools',
+                        'recover_arm.py')
+    if not os.path.exists(tool):
+        pytest.skip('tools/ is not next to the source tree')
+    probe.disarm()
+    # Wrist 0.05 rad from aligned: MoveIt Servo's measure is 34.6, beyond its hard stop.
+    posture = [0.0, -0.6, -0.7, 0.0, 0.05, 0.0]
+    probe.move_to(posture, seconds=4.0)
+    time.sleep(1.0)
+    before = probe.joint_positions()
+    start = time.monotonic()
+    # Two engagements: tilt further in, then tilt back out.
+    player = replay(env, 'clutch_singularity', str(logs / 'replay_singularity.log'))
+    try:
+        assert player.wait(60.0) == 0, player.output()
+    finally:
+        player.stop()
+    time.sleep(1.0)
+    states = probe.states_since(start)
+    halted = [s for s in states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
+    assert halted and all(s.servo_status == ServoStatus.HALT_FOR_SINGULARITY for s in halted)
+    assert probe.max_joint_change(start, before) < 5e-3
+    assert probe.owner_value() == ArmOwner.OWNER_TELEOP
+    process = Process(['python3', tool], env, str(logs / 'recover.log'))
+    try:
+        assert process.wait(180.0) == 0, process.output()
+    finally:
+        process.stop()
+    assert 'recovered: the arm is at' in process.output()
+    time.sleep(1.0)
+    assert probe.joint_positions() == pytest.approx(READY, abs=0.02)
+    assert probe.owner_value() == ArmOwner.OWNER_MOVEIT and not probe.state().armed

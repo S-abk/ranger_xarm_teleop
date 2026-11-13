@@ -110,6 +110,8 @@ def test_summary_counts_and_distribution_over_engaged_time():
     assert summary['share_above']['17.0'] == pytest.approx(0.25, abs=0.03)
     assert summary['share_above']['40.0'] == 0.0
     assert summary['share_decelerating'] == pytest.approx(0.25, abs=0.04)
+    # From 29.1 (3 % below the hard stop) to the halt: joint 5 from about 0.115 to 0.1 rad.
+    assert 0.01 < summary['stalled_s'] < 0.06
 
 
 def test_status_halt_and_the_hold_it_causes_are_one_event_and_two_halts_are_two():

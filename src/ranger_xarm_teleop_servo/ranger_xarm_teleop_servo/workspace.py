@@ -268,3 +268,192 @@ def format_evaluation(result: Dict[str, Any]) -> str:
     lines.append('share reached with the condition number staying below: ' + '  '.join(
         f'{level}: {share * 100:.0f} %' for level, share in summary['reached_below'].items()))
     return '\n'.join(lines)
+
+
+# ---- A model of MoveIt Servo's singularity rule, to compare threshold values ----
+
+NO_WARNING, APPROACHING, HALT, LEAVING = 0, 1, 2, 3     # moveit_msgs/ServoStatus codes
+
+
+def servo_scale(chain: kinematics.Chain, q: Sequence[float], delta_x: np.ndarray,
+                lower: float, hard_stop: float, leaving_multiplier: float = 2.0,
+                step_scale: float = 0.01) -> Tuple[float, int]:
+    """
+    Return the velocity scale and status MoveIt Servo would apply at posture ``q``.
+
+    The rule of ``velocityScalingFactorForSingularity`` (moveit_servo 2.12,
+    ``utils/common.cpp``): whether the commanded Cartesian step ``delta_x`` leads toward
+    the singularity is judged from its component along the weakest task direction; the
+    scale falls linearly from 1 at ``lower`` to 0 at ``hard_stop`` when approaching, and
+    to 0 at ``lower + multiplier * (hard_stop - lower)`` when leaving; at or beyond
+    ``hard_stop`` it is 0 in every direction.
+
+    The approaching/leaving judgement compares the condition number before and after a
+    probe step along the weakest task direction. Where that step hardly changes the
+    condition number (near this arm's wrist singularity it changes it by less than
+    0.1 %), the outcome rests on rounding and on the sign the SVD happens to return, so
+    this model and MoveIt Servo can disagree there on approaching versus leaving.
+    """
+    left, values, right = np.linalg.svd(kinematics.jacobian(chain, q))
+    condition = values[0] / values[-1]
+    if condition <= lower:
+        return 1.0, NO_WARNING
+    if condition >= hard_stop:
+        return 0.0, HALT
+    toward = left[:, -1]
+    inverse = right.T @ np.diag(1.0 / values) @ left.T
+    probe = np.array(q, dtype=float) + inverse @ (toward * step_scale)
+    if kinematics.condition_number(chain, probe) <= condition:
+        toward = -toward
+    approaching = float(np.dot(toward, delta_x)) > 0.0
+    upper = hard_stop if approaching else lower + (hard_stop - lower) * leaving_multiplier
+    return (1.0 - (condition - lower) / (upper - lower),
+            APPROACHING if approaching else LEAVING)
+
+
+@dataclass(frozen=True)
+class Drive:
+    """Result of driving the tool with a constant twist under the singularity rule."""
+
+    outcome: str                # 'free', 'slowed', 'stalled', 'halted', 'joint_limit'
+    progress: float             # share of the asked motion that was made
+    peak_joint_speed: float     # rad/s, after the rule and the joint speed limit
+    peak_condition: float
+    slowed_share: float         # share of the cycles in which the rule scaled the motion
+    q: Tuple[float, ...]
+
+
+def drive(chain: kinematics.Chain, start: Sequence[float], twist: Sequence[float],
+          seconds: float, lower: float, hard_stop: float, period: float = 0.02,
+          joint_speed_limit: float = 2.0, leaving_multiplier: float = 2.0) -> Drive:
+    """
+    Step the arm as a servo loop would for a constant tool twist (m/s and rad/s, base frame).
+
+    Each cycle: joint step from the pseudo-inverse, scaled by ``servo_scale`` and then
+    down to ``joint_speed_limit``. A halt ends the run; so does a joint within the limit
+    margin. ``stalled`` means the rule held the arm to under half of the asked motion
+    without ever reporting a halt.
+    """
+    twist = np.array(twist, dtype=float)
+    q = np.array(start, dtype=float)
+    cycles = int(round(seconds / period))
+    made = 0.0
+    peak_speed = 0.0
+    peak_condition = kinematics.condition_number(chain, q)
+    slowed = 0
+    outcome = ''
+    for _ in range(cycles):
+        delta_x = twist * period
+        scale, status = servo_scale(chain, q, delta_x, lower, hard_stop, leaving_multiplier)
+        if status == HALT:
+            outcome = 'halted'
+            break
+        step = np.linalg.pinv(kinematics.jacobian(chain, q)) @ delta_x * scale
+        speed = float(np.max(np.abs(step))) / period
+        if speed > joint_speed_limit:
+            scale *= joint_speed_limit / speed
+            step *= joint_speed_limit / speed
+            speed = joint_speed_limit
+        slowed += scale < 0.999
+        q = q + step
+        made += scale
+        peak_speed = max(peak_speed, speed)
+        peak_condition = max(peak_condition, kinematics.condition_number(chain, q))
+        if kinematics.limit_margin(chain, q)[1] < LIMIT_MARGIN_RAD:
+            outcome = 'joint_limit'
+            break
+    progress = made / cycles if cycles else 1.0
+    if not outcome:
+        outcome = 'free' if slowed == 0 else ('stalled' if progress < 0.5 else 'slowed')
+    return Drive(outcome, progress, peak_speed, peak_condition,
+                 slowed / cycles if cycles else 0.0, tuple(float(v) for v in q))
+
+
+def sample_twists(count: int, linear_speed: float = 0.25, angular_speed: float = 1.0,
+                  seed: int = 0) -> List[np.ndarray]:
+    """Return ``count`` reproducible tool twists: random directions, speeds up to the caps."""
+    random = np.random.default_rng(seed)
+    twists = []
+    for _ in range(count):
+        linear = random.normal(size=3)
+        angular = random.normal(size=3)
+        twists.append(np.concatenate([
+            linear / np.linalg.norm(linear) * linear_speed * random.uniform(0.3, 1.0),
+            angular / np.linalg.norm(angular) * angular_speed * random.uniform(0.0, 1.0)]))
+    return twists
+
+
+def survey(chain: kinematics.Chain, start: Sequence[float], lower: float, hard_stop: float,
+           count: int = 200, seconds: float = 1.0, seed: int = 0,
+           joint_speed_limit: float = 2.0) -> Dict[str, Any]:
+    """
+    Drive ``count`` sampled twists from the start posture; return how the runs ended.
+
+    With the default caps and one second a run covers up to 0.25 m and 57 deg, inside
+    the offset limits of the simulation values.
+    """
+    runs = [drive(chain, start, twist, seconds, lower, hard_stop,
+                  joint_speed_limit=joint_speed_limit)
+            for twist in sample_twists(count, seed=seed)]
+    outcomes: Dict[str, float] = {}
+    for run in runs:
+        outcomes[run.outcome] = outcomes.get(run.outcome, 0.0) + 1.0 / count
+    return {
+        'lower': lower, 'hard_stop': hard_stop, 'runs': count, 'outcomes': outcomes,
+        'mean_progress': float(np.mean([run.progress for run in runs])),
+        'peak_joint_speed': float(max(run.peak_joint_speed for run in runs)),
+        'runs_at_joint_speed_limit': sum(
+            1 for run in runs if run.peak_joint_speed >= joint_speed_limit - 1e-9) / count,
+        'peak_condition': float(max(run.peak_condition for run in runs))}
+
+
+def wander(chain: kinematics.Chain, start: Sequence[float], lower: float, hard_stop: float,
+           sessions: int = 40, segments: int = 20, seconds: float = 1.0, seed: int = 0,
+           box: float = 0.30, max_turn: float = math.radians(60.0),
+           joint_speed_limit: float = 2.0) -> Dict[str, Any]:
+    """
+    Model teleoperation sessions: a chain of sampled one-second motions from the start.
+
+    Each motion continues from where the last one ended, as successive clutch
+    engagements do. The tool stays within ``box`` metres and ``max_turn`` of where it
+    started: a sampled motion that would leave is turned back toward the start. A halt
+    ends the session (the arm then needs MoveIt to get out). Returns how many sessions
+    halted, after how many motions, and what share of the motions were slowed or held.
+    """
+    origin, _, _ = kinematics.forward(chain, start)
+    first_halt: List[int] = []
+    outcomes: Dict[str, int] = {}
+    peak_speed = 0.0
+    total = 0
+    for session in range(sessions):
+        q = tuple(start)
+        twists = sample_twists(segments, seed=seed * 100003 + session)
+        for index, twist in enumerate(twists):
+            tip, _, _ = kinematics.forward(chain, q)
+            ahead = tip[:3, 3] + twist[:3] * seconds - origin[:3, 3]
+            for axis in range(3):
+                if abs(ahead[axis]) > box:
+                    twist[axis] = -abs(twist[axis]) * np.sign(ahead[axis])
+            turned = _axis_angle(tip[:3, :3] @ origin[:3, :3].T)
+            if float(np.linalg.norm(turned + twist[3:] * seconds)) > max_turn:
+                speed = float(np.linalg.norm(twist[3:]))
+                size = float(np.linalg.norm(turned))
+                twist[3:] = -turned / size * speed if size > 1e-9 else 0.0
+            run = drive(chain, q, twist, seconds, lower, hard_stop,
+                        joint_speed_limit=joint_speed_limit)
+            outcomes[run.outcome] = outcomes.get(run.outcome, 0) + 1
+            peak_speed = max(peak_speed, run.peak_joint_speed)
+            total += 1
+            q = run.q
+            if run.outcome == 'halted':
+                first_halt.append(index + 1)
+                break
+            if run.outcome == 'joint_limit':
+                break               # needs MoveIt as well; counted, not a singularity halt
+    return {
+        'lower': lower, 'hard_stop': hard_stop, 'sessions': sessions, 'segments': segments,
+        'sessions_halted': len(first_halt) / sessions,
+        'median_motions_before_halt': float(np.median(first_halt)) if first_halt else None,
+        'motions': total,
+        'outcomes': {name: count / total for name, count in sorted(outcomes.items())},
+        'peak_joint_speed': peak_speed}
