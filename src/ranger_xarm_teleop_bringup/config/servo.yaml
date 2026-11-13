@@ -1,15 +1,15 @@
-# MoveIt Servo (moveit_servo 2.12) for the arm, pose commands from the teleop node.
-# Loaded under the `moveit_servo` namespace of servo_node by teleop_core.launch.py, which
-# also sets scale.linear and scale.rotational from the limit values (the speed caps have
-# no default here on purpose) and the command output topic.
+# MoveIt Servo (moveit_servo 2.12) for the arm: joint-jog commands (joint velocities) from
+# the teleop node, which solves the tool target itself (damped least squares). Servo keeps
+# the collision monitor, the joint velocity scaling and the joint-bound halt. Loaded under
+# the `moveit_servo` namespace of servo_node by teleop_core.launch.py, which also sets the
+# command output topic. The teleop node reads back check_collisions, command_in_type,
+# joint_limit_margins and incoming_command_timeout and refuses to drive when they differ
+# from what it needs.
 move_group_name: xarm6
 publish_period: 0.02                # 50 Hz, the target rate
 max_expected_latency: 0.06          # length of the trajectory window sent to the controller
-command_in_type: speed_units        # scale.* are m/s and rad/s
-incoming_command_timeout: 0.06      # three target cycles without a pose command: halt
-pose_tracking:
-  linear_tolerance: 0.0005
-  angular_tolerance: 0.005
+command_in_type: speed_units        # joint-jog velocities in rad/s (scale.* do not apply)
+incoming_command_timeout: 0.06      # three target cycles without a command: halt
 command_out_type: trajectory_msgs/JointTrajectory
 publish_joint_positions: true
 publish_joint_velocities: false     # positions only: the controller's command interface
@@ -22,6 +22,10 @@ check_collisions: true              # G-6 layer 1; the teleop node refuses to ru
 collision_check_rate: 25.0
 self_collision_proximity_threshold: 0.01
 scene_collision_proximity_threshold: 0.02
+# Not applied to joint-jog commands; the teleop node's solver handles singularities.
 lower_singularity_threshold: 17.0
 hard_stop_singularity_threshold: 30.0
+# A backstop: the solver keeps every joint 0.15 rad from its limits (joint_limit_margin of
+# the teleop node, which must be wider than these).
 joint_limit_margins: [0.1]
+halt_all_joints_in_joint_mode: true

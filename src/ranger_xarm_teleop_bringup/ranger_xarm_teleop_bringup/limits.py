@@ -47,7 +47,8 @@ def load_limits(path: str) -> dict:
 RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translation_m',
             'max_offset_rotation_deg', 'view_cone_half_angle_deg', 'step_translation_limit_m',
             'step_rotation_limit_deg', 'linear_speed_cap_m_s', 'angular_speed_cap_rad_s',
-            'max_lead_translation_m', 'max_lead_rotation_deg', 'tool_pose_timeout_s')
+            'max_lead_translation_m', 'max_lead_rotation_deg', 'tool_pose_timeout_s',
+            'joint_velocity_limit_names', 'joint_velocity_limits')
 
 
 def check_extra_params_file(path: str) -> None:

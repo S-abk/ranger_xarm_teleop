@@ -43,8 +43,9 @@ Rules, by ID:
   the same amount, so the hand's lead is not stored and the arm never catches up later.
   Order: map, filter, G-6 bounds, G-5 step check (a jump is rejected, never clipped),
   G-14 lead clamp, G-6 re-check. The speed caps (G-8) act on the joint command (solver).
-* While engaged, MoveIt Servo no longer running, or reporting a halt, releases the
-  clutch: a target must not move on while the arm stands still.
+* While engaged, MoveIt Servo no longer running (or no longer following), or reporting a
+  halt, releases the clutch: a target must not move on while the arm stands still. So
+  does a solver that cannot run (no chain or joint state, commanded and measured apart).
 * G-13 a calibration made under another (session id, reset count) is not used.
 
 A release caused by anything but the grip latches: the clutch engages again only
@@ -135,8 +136,11 @@ class Env:
     owner_is_teleop: bool
     tool_pose: Optional[Pose]         # measured tool pose in the arm base frame
     tool_pose_age: float              # seconds; inf when unknown
-    servo_active: bool                # MoveIt Servo confirmed running in pose mode
-    servo_halted: bool = False        # MoveIt Servo reports a halt (collision, singularity)
+    servo_active: bool                # MoveIt Servo verified, running in joint-jog mode
+    servo_halted: bool = False        # MoveIt Servo reports a halt (collision, joint bound)
+    # The solver can run: kinematic chain and joint state known, and the commanded state
+    # agrees with the measured one.
+    solver_ready: bool = True
 
 
 @dataclass(frozen=True)
@@ -331,6 +335,8 @@ def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Ho
         return Hold.NOT_CALIBRATED
     if env.tool_pose is None or not env.tool_pose_age <= params.tool_pose_timeout:
         return Hold.TOOL_POSE_STALE
+    if not env.solver_ready:
+        return Hold.SOLVER
     if state.engaged and not env.servo_active:
         return Hold.SERVO_NOT_READY         # MoveIt Servo stopped running under the clutch
     if state.engaged and env.servo_halted:

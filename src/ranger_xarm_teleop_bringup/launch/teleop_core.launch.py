@@ -52,16 +52,15 @@ def launch_setup(context, *args, **kwargs):
     simulation = _true(arg('simulation'))
     use_sim_time = _true(arg('use_sim_time'))
     limits_file = arg('limits_file')
-    limits = check_limits_file(limits_file, simulation)      # raises: the launch stops here
+    check_limits_file(limits_file, simulation)               # raises: the launch stops here
 
     share = get_package_share_directory('ranger_xarm_teleop_bringup')
     moveit_share = get_package_share_directory('ranger_xarm_moveit_config')
     description_share = get_package_share_directory('ranger_xarm_description')
 
     servo = _load(os.path.join(share, 'config', 'servo.yaml'))
-    servo['scale'] = {'linear': float(limits['linear_speed_cap_m_s']),
-                      'rotational': float(limits['angular_speed_cap_rad_s']),
-                      'joint': 0.5}
+    # Joint-jog commands in speed units: Servo's scale.* do not apply. The tool speed caps
+    # of the limits file are enforced by the teleop node's solver.
     teleop_controller = arg('teleop_controller')
     servo['command_out_topic'] = f'/{teleop_controller}/joint_trajectory'
 
@@ -75,6 +74,14 @@ def launch_setup(context, *args, **kwargs):
     joint_limits = {'robot_description_planning':
                     _load(os.path.join(moveit_share, 'config', 'joint_limits.yaml')).get(
                         'robot_description_planning', {})}
+    # The same velocity limits for the teleop node's solver (it also reads the URDF's and
+    # uses the smaller), so MoveIt Servo's own velocity scaling is never what limits.
+    velocity_names, velocity_values = [], []
+    for name, entry in sorted(joint_limits['robot_description_planning'].get(
+            'joint_limits', {}).items()):
+        if isinstance(entry, dict) and entry.get('has_velocity_limits'):
+            velocity_names.append(name)
+            velocity_values.append(float(entry['max_velocity']))
     sim_time = {'use_sim_time': use_sim_time}
 
     # The controller's parameter file, with its clock setting for this backend.
@@ -113,7 +120,10 @@ def launch_setup(context, *args, **kwargs):
     teleop_parameters.append({'motion_enabled': _true(arg('motion_enabled')),
                               'tool_frame': arg('tool_frame'),
                               'servo_tip_frame': arg('servo_tip_frame'),
-                              'servo_node': '/servo_node'})
+                              'servo_node': '/servo_node',
+                              'servo_output_topic': servo['command_out_topic'],
+                              'joint_velocity_limit_names': velocity_names,
+                              'joint_velocity_limits': velocity_values})
     teleop_parameters.append(sim_time)
     teleop = Node(
         package='ranger_xarm_teleop_servo', executable='teleop_node', name='teleop_servo',
