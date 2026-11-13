@@ -77,17 +77,32 @@ def test_rows():
     state = NS(header=header(), motion_enabled=True, armed=True, clutch_engaged=True, owner=2,
                mux_status=0, hold_reason=0, active_limit=4, servo_status=1, calibrated=True,
                input_age=0.01, input_seq=42, measured_tool_pose_valid=True,
-               measured_tool_pose=pose())
+               measured_tool_pose=pose(), conditioning=0.25, damped=True, damping=0.3,
+               solver_error_translation=0.004, solver_error_rotation=0.02,
+               lead_translation=0.03, lead_rotation=0.1, commanded_linear_speed=0.2,
+               commanded_angular_speed=0.5)
     row = session.state_row(state)
     assert row == {'k': 'state', 'stamp': 5_000_000_007, 'motion': True, 'armed': True,
                    'engaged': True, 'owner': 2, 'mux': 0, 'hold': 0, 'limit': 4, 'servo': 1,
                    'calibrated': True, 'age': 0.01, 'seq': 42,
-                   'tool': [[1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0]]}
+                   'tool': [[1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0]],
+                   'conditioning': 0.25, 'damped': True, 'damping': 0.3,
+                   'solver_error_translation': 0.004, 'solver_error_rotation': 0.02,
+                   'lead_translation': 0.03, 'lead_rotation': 0.1,
+                   'commanded_linear_speed': 0.2, 'commanded_angular_speed': 0.5}
     state.measured_tool_pose_valid = False
     assert session.state_row(state)['tool'] is None
     assert session.pose_row('target', NS(header=header(), pose=pose(4.0))) == {
         'k': 'target', 'stamp': 5_000_000_007, 'frame': 'base', 'p': [4.0, 2.0, 3.0],
         'q': [0.0, 0.0, 0.0, 1.0]}
+    assert session.pose_row('head', NS(header=header(), pose=pose(0.5))) == {
+        'k': 'head', 'stamp': 5_000_000_007, 'frame': 'base', 'p': [0.5, 2.0, 3.0],
+        'q': [0.0, 0.0, 0.0, 1.0]}
+    assert session.command_row(NS(header=header(), joint_names=['a', 'b'],
+                                  velocities=[0.5, -1.0], duration=0.0)) == {
+        'k': 'command', 'stamp': 5_000_000_007, 'names': ['a', 'b'], 'v': [0.5, -1.0]}
+    assert session.command_row(NS(header=header(), joint_names=[], velocities=[])) == {
+        'k': 'command', 'stamp': 5_000_000_007, 'names': [], 'v': []}
     assert session.servo_row(NS(code=2, message='stop')) == {'k': 'servo', 'code': 2,
                                                              'msg': 'stop'}
     assert session.owner_row(NS(owner=2, status=0, detail='')) == {

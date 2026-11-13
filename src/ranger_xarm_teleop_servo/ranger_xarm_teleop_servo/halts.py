@@ -18,7 +18,8 @@ Input: the rows written by ``tools/record_session.py`` (one dict per line, ``t``
 recorder's monotonic clock, ``k`` the kind):
 
     description  urdf
-    state        engaged, armed, hold, limit, owner, servo, tool ([p, q] or None), ...
+    state        engaged, armed, hold, limit, owner, servo, tool ([p, q] or None), and from
+                 the joint-space solver on: conditioning, damped, ...
     target       p, q            the tool target of /teleop/target_pose
     joints       q, v            the six arm joints
     servo        code, msg       moveit_msgs/ServoStatus
@@ -50,7 +51,7 @@ HOLD_REASON = {
     5: 'CLUTCH_RELEASED', 6: 'INPUT_STALE', 7: 'POSE_ABSENT', 8: 'POSE_EMULATED',
     9: 'OUT_OF_VIEW', 10: 'HEAD_ABSENT', 11: 'HEAD_EMULATED', 12: 'RESET_CHANGED',
     13: 'SESSION_CHANGED', 14: 'SEQ_BACKWARDS', 15: 'INPUT_JUMP', 16: 'STEP_REJECTED',
-    17: 'TOOL_POSE_STALE', 18: 'SERVO_NOT_READY', 19: 'SERVO_HALTED'}
+    17: 'TOOL_POSE_STALE', 18: 'SERVO_NOT_READY', 19: 'SERVO_HALTED', 20: 'SOLVER'}
 HOLD_SERVO_HALTED = 19
 MERGE_S = 0.5               # a status halt and the hold it causes are one event
 TREND_S = 1.0               # how far back the trend of the measure is reported
@@ -241,6 +242,29 @@ def _engaged_measure(chain, states: _Series, joints: _Series, servo: _Series):
     return np.array(values), np.array(weights), np.array(codes)
 
 
+def _solver_summary(states: _Series) -> Dict[str, Any]:
+    """
+    Return the share of engaged time the solver damped and its minimum conditioning.
+
+    Each engaged state row counts for the time to the next row (at most 0.2 s). Empty when
+    the rows carry no solver fields (a recording from before the solver).
+    """
+    damped = lowest = None
+    total = damped_time = 0.0
+    for row, following in zip(states.rows, states.rows[1:] + [None]):
+        if not row.get('engaged') or row.get('conditioning') is None:
+            continue
+        step = 0.02 if following is None else min(max(following['t'] - row['t'], 0.0), 0.2)
+        total += step
+        if row.get('damped'):
+            damped_time += step
+        lowest = row['conditioning'] if lowest is None else min(lowest, row['conditioning'])
+    if total <= 0.0:
+        return {}
+    damped = damped_time / total
+    return {'share_damped': damped, 'conditioning_min': lowest}
+
+
 def _percentile(values: np.ndarray, weights: np.ndarray, fraction: float) -> float:
     order = np.argsort(values)
     cumulative = np.cumsum(weights[order])
@@ -270,7 +294,7 @@ def analyze(records: Sequence[Dict[str, Any]], urdf: Optional[str] = None,
     total = float(weights.sum()) if len(weights) else 0.0
     summary: Dict[str, Any] = {
         'halts': len(halts), 'by_reason': counts, 'engaged_s': total,
-        'thresholds': {'lower': lower, 'hard_stop': hard_stop}}
+        'thresholds': {'lower': lower, 'hard_stop': hard_stop}, **_solver_summary(states)}
     if total > 0.0:
         summary['condition_number'] = {
             'min': float(values.min()), 'max': float(values.max()),
@@ -344,6 +368,10 @@ def format_report(result: Dict[str, Any]) -> str:
     lines.append(f"halts: {summary['halts']}   engaged time: {summary['engaged_s']:.1f} s")
     for reason, count in sorted(summary['by_reason'].items()):
         lines.append(f'  {count:3d}  {reason}')
+    if 'share_damped' in summary:
+        lines.append(f"solver: damped {summary['share_damped'] * 100:.1f} % of the engaged time, "
+                     f"minimum conditioning {summary['conditioning_min']:.3f} "
+                     '(normalised: 1 and above unrestricted, 0 singular)')
     measure = summary.get('condition_number')
     if measure:
         lines.append(

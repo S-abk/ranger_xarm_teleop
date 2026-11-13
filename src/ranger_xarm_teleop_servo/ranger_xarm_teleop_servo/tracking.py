@@ -19,11 +19,18 @@ received message, each with ``t`` (monotonic seconds at reception in the recorde
 ``k``:
 
 * ``input``   right controller pose: ``p``
+* ``head``    headset pose: ``p``, ``q`` (recorded, not analysed)
 * ``target``  ``/teleop/target_pose``: ``stamp`` (ns), ``p``, ``q``
-* ``state``   ``/teleop/state``: ``stamp``, ``engaged``, ``hold``, ``tool`` (p, q) or None
-* ``joints``  arm joint positions: ``q``
+* ``state``   ``/teleop/state``: ``stamp``, ``engaged``, ``hold``, ``servo`` (MoveIt Servo
+  status code), ``tool`` (p, q) or None; and, from the joint-space solver on, ``conditioning``,
+  ``damped``, ``damping``, ``lead_translation`` (m), ``lead_rotation`` (rad)
+* ``joints``  arm joint positions: ``stamp`` (ns), ``q``, ``v`` (joint velocities or None)
+* ``command`` the joint command of the node (``/servo_node/delta_joint_cmds``): ``stamp``,
+  ``names``, ``v`` (rad/s)
 
-All times compared here come from the recorder's one monotonic clock.
+All times compared here come from the recorder's one monotonic clock; speeds and
+accelerations are computed over header stamps where the rows carry them. A figure whose
+rows are missing (a recording from before the solver) is NaN, and the report says n/a.
 """
 
 import math
@@ -35,6 +42,8 @@ from .rotations import q_between
 
 STOPPED_RAD_S = 0.005        # joint speed below this counts as stopped
 MIN_MOTION = 1e-4            # a curve that moves less than this has no measurable lag
+HALT_CODES = (2, 5, 6)       # moveit_msgs/ServoStatus: singularity, collision, joint bound
+SMOOTHING_SAMPLES = 3        # moving average for the smoothed acceleration
 
 
 def _rms(values: Sequence[float]) -> float:
@@ -55,6 +64,102 @@ def _polyline_distance(point: np.ndarray, line: np.ndarray) -> float:
     s = np.clip(np.einsum('ij,ij->i', point - a, ab) / np.where(length > 0, length, 1.0), 0, 1)
     nearest = a + s[:, None] * ab
     return float(np.min(np.linalg.norm(point - nearest, axis=1)))
+
+
+def _seconds(rows: List[Dict[str, Any]]) -> np.ndarray:
+    """Return the time of each row: its header stamp in seconds when all have one, else ``t``."""
+    if rows and all(isinstance(r.get('stamp'), int) and r['stamp'] > 0 for r in rows):
+        return np.array([r['stamp'] for r in rows], dtype=float) * 1e-9
+    return np.array([r['t'] for r in rows], dtype=float)
+
+
+def _moving_average(values: np.ndarray, samples: int = SMOOTHING_SAMPLES) -> np.ndarray:
+    """Return the centred moving average over ``samples`` rows (the ends use what exists)."""
+    if len(values) < samples:
+        return values
+    kernel = np.ones(samples) / samples
+    full = np.stack([np.convolve(values[:, i], kernel, mode='valid')
+                     for i in range(values.shape[1])], axis=1)
+    return full
+
+
+def joint_accelerations(times: np.ndarray, positions: np.ndarray):
+    """
+    Return ``(raw, smoothed)`` peak joint acceleration (rad/s^2) of a joint position series.
+
+    Raw: second difference of the positions at the sample times (joint-state rate), largest
+    over joints and samples. Smoothed: the same series after a 3-sample moving average of
+    the acceleration. Rows with a repeated time are dropped; NaN when fewer than 3 remain.
+    """
+    keep = np.concatenate([[True], np.diff(times) > 1e-6])
+    times, positions = times[keep], positions[keep]
+    if len(times) < 3:
+        return math.nan, math.nan
+    dt = np.diff(times)
+    velocity = np.diff(positions, axis=0) / dt[:, None]
+    middle = (times[1:] + times[:-1]) / 2.0
+    acceleration = np.diff(velocity, axis=0) / np.diff(middle)[:, None]
+    smooth = _moving_average(acceleration)
+    return float(np.abs(acceleration).max()), float(np.abs(smooth).max())
+
+
+def tool_speeds(rows: List[Dict[str, Any]]):
+    """
+    Return the peak linear (m/s) and angular (rad/s) speed of the measured tool pose.
+
+    ``rows`` are state rows with a ``tool`` pose. The tool pose is forward kinematics of
+    the newest joint state, so successive rows can repeat a pose: speed is taken between
+    consecutive *different* poses over the time between them.
+    """
+    linear = angular = 0.0
+    seen = False
+    times = _seconds(rows)
+    previous = None
+    for row, t in zip(rows, times):
+        if previous is not None and (row['tool'][0] != previous[0][0]
+                                     or row['tool'][1] != previous[0][1]):
+            dt = t - previous[1]
+            if dt > 1e-6:
+                seen = True
+                linear = max(linear, float(np.linalg.norm(
+                    np.array(row['tool'][0]) - np.array(previous[0][0]))) / dt)
+                angular = max(angular, q_between(row['tool'][1], previous[0][1]) / dt)
+        if previous is None or row['tool'][0] != previous[0][0] \
+                or row['tool'][1] != previous[0][1]:
+            previous = (row['tool'], t)
+    return (linear, angular) if seen else (math.nan, math.nan)
+
+
+def _command_step(rows: List[Dict[str, Any]]) -> float:
+    """
+    Return the largest change of any joint's commanded velocity between two rows, rad/s.
+
+    A joint missing from a row counts as zero there (the node sends zeros on release).
+    """
+    if len(rows) < 2:
+        return math.nan
+    names = sorted({name for row in rows for name in row['names']})
+    series = np.array([[dict(zip(row['names'], row['v'])).get(name, 0.0) for name in names]
+                       for row in rows])
+    return float(np.abs(np.diff(series, axis=0)).max())
+
+
+def _solver_figures(engaged_states: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the figures that come from the solver fields of the state rows (NaN if absent)."""
+    def column(name: str) -> List[float]:
+        return [float(r[name]) for r in engaged_states if r.get(name) is not None]
+    lead_t, lead_r = column('lead_translation'), column('lead_rotation')
+    conditioning = column('conditioning')
+    damped = [bool(r['damped']) for r in engaged_states if r.get('damped') is not None]
+    codes = [r['servo'] for r in engaged_states if r.get('servo') is not None]
+    entered = sum(1 for before, now in zip([None] + codes, codes)
+                  if now in HALT_CODES and before not in HALT_CODES)
+    return {
+        'lead_translation_max': max(lead_t, default=math.nan),
+        'lead_rotation_max_deg': math.degrees(max(lead_r, default=math.nan)),
+        'damped_share': sum(damped) / len(damped) if damped else math.nan,
+        'conditioning_min': min(conditioning, default=math.nan),
+        'servo_halts': entered if codes else None}
 
 
 def engagements(records: List[Dict[str, Any]]) -> List[Dict[str, float]]:
@@ -82,6 +187,8 @@ def analyze(records: List[Dict[str, Any]], settle: float = 1.0) -> Dict[str, Any
     targets = [r for r in records if r['k'] == 'target']
     joints = [r for r in records if r['k'] == 'joints']
     inputs = [r for r in records if r['k'] == 'input']
+    commands = [r for r in records if r['k'] == 'command']
+    all_states = [r for r in records if r['k'] == 'state']
     by_stamp = {r['stamp']: r for r in states}
     tool_t = np.array([r['t'] for r in states])
     tool_p = np.array([r['tool'][0] for r in states]) if states else np.zeros((0, 3))
@@ -159,8 +266,45 @@ def analyze(records: List[Dict[str, Any]], settle: float = 1.0) -> Dict[str, Any
             out['stop_distance'] = float(travel[-1]) if len(travel) else math.nan
             out['stop_distance_max'] = float(travel.max()) if len(travel) else math.nan
         out['stop_time'] = _stop_time(joint_t, joint_q, float(target_t[-1]), until)
+
+        # Peaks of the motion itself, from the start of the engagement until the tip has
+        # settled (the same window as the path error).
+        moving = [r for r in joints if start <= r['t'] <= min(end + settle, until)]
+        out['peak_joint_speed'] = _peak_joint_speed(moving)
+        raw, smoothed = (joint_accelerations(_seconds(moving), np.array([r['q'] for r in moving]))
+                         if len(moving) >= 3 else (math.nan, math.nan))
+        out['peak_joint_acceleration'] = raw
+        out['peak_joint_acceleration_smoothed'] = smoothed
+        window_states = [r for r in states if start <= r['t'] <= min(end + settle, until)]
+        out['peak_tool_speed'], out['peak_tool_angular_speed'] = (
+            tool_speeds(window_states) if len(window_states) >= 2 else (math.nan, math.nan))
+        out['command_step_max'] = _command_step([r for r in commands
+                                                 if start <= r['t'] <= end])
+        out.update(_solver_figures([r for r in all_states if start <= r['t'] <= end]))
         runs.append(out)
     return {'engagements': runs, 'records': len(records)}
+
+
+def _peak_joint_speed(rows: List[Dict[str, Any]]) -> float:
+    """
+    Return the largest joint speed (rad/s) over the rows.
+
+    From the reported velocities if every row has them, else from the differences of the
+    joint positions over the row times.
+    """
+    if not rows:
+        return math.nan
+    if all(r.get('v') is not None for r in rows):
+        return float(np.abs(np.array([r['v'] for r in rows])).max())
+    if len(rows) < 2:
+        return math.nan
+    times = _seconds(rows)
+    q = np.array([r['q'] for r in rows])
+    dt = np.diff(times)
+    ok = dt > 1e-6
+    if not ok.any():
+        return math.nan
+    return float((np.abs(np.diff(q, axis=0))[ok] / dt[ok][:, None]).max())
 
 
 def _progress(times: np.ndarray, values: np.ndarray, start: float, end: float):
@@ -210,6 +354,13 @@ def _stop_time(joint_t, joint_q, release: float, until: float) -> float:
     return 0.0 if len(moving) == 0 else float(t[moving[-1] + 1] - release)
 
 
+def _fmt(value: Any, scale: float = 1.0, spec: str = '.2f') -> str:
+    """Return ``value * scale`` formatted, or ``n/a`` for None and NaN."""
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return 'n/a'
+    return format(value * scale, spec)
+
+
 def format_report(result: Dict[str, Any]) -> str:
     """Return the figures as text."""
     lines = [f"records: {result['records']}, engagements: {len(result['engagements'])}"]
@@ -232,5 +383,17 @@ def format_report(result: Dict[str, Any]) -> str:
             f'  after the last target: tip travels {run.get("stop_distance", math.nan) * 1000:.2f}'
             f' mm (max {run.get("stop_distance_max", math.nan) * 1000:.2f} mm), joints stopped '
             f'after {run["stop_time"] * 1000:.0f} ms',
+            f'  joints: peak speed {_fmt(run.get("peak_joint_speed"))} rad/s, peak acceleration '
+            f'{_fmt(run.get("peak_joint_acceleration"), spec=".1f")} rad/s^2 raw, '
+            f'{_fmt(run.get("peak_joint_acceleration_smoothed"), spec=".1f")} rad/s^2 after a '
+            f'{SMOOTHING_SAMPLES}-sample moving average; largest step of the commanded joint '
+            f'velocity {_fmt(run.get("command_step_max"))} rad/s per cycle',
+            f'  tool: peak speed {_fmt(run.get("peak_tool_speed"), 1000.0, ".0f")} mm/s, '
+            f'{_fmt(run.get("peak_tool_angular_speed"), math.degrees(1.0), ".1f")} deg/s',
+            f'  solver: max lead {_fmt(run.get("lead_translation_max"), 1000.0, ".1f")} mm / '
+            f'{_fmt(run.get("lead_rotation_max_deg"), 1.0, ".1f")} deg, damped '
+            f'{_fmt(run.get("damped_share"), 100.0, ".0f")} % of the engaged time, minimum '
+            f'conditioning {_fmt(run.get("conditioning_min"), 1.0, ".3f")}, Servo halt statuses '
+            f'{"n/a" if run.get("servo_halts") is None else run["servo_halts"]}',
         ]
     return '\n'.join(lines)
