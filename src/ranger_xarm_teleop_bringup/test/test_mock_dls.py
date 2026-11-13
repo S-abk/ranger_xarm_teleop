@@ -373,7 +373,7 @@ def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
     assert spread < 1e-3
     # No joint reverses while the arm slows into the far point: from a second before the
     # target last moved (the start of the hold) to the turn.
-    before = [(when, p) for when, p in targets if when < t1]
+    before = targets[:far + 1]
     hold = next(when for (when, p), (_, p_next) in zip(reversed(before[1:]), reversed(before[:-1]))
                 if v_norm(v_sub(p, p_next)) > 1e-6)
     approach = np.array([q for when, q in probe.timed_joints_since(start)
@@ -396,6 +396,11 @@ def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
               f'{against / np.abs(big).max() * 100.0:.1f} % of its approach speed')
         assert changes <= 1, f'joint {j + 1} rings at the far point'
     assert moving, 'no joint moved in the approach: the window missed it'
+    # In task space, where the operator sees it: the tool never falls back on its way out
+    # by more than 0.2 mm (the tolerance of the step test).
+    out = _tool_between(timed, hold - 1.0, t1)[:, 0]
+    assert len(out) > 10
+    assert np.max(np.maximum.accumulate(out) - out) < 2e-4
     # The arm stays on the hand's path while it can. The hand moves level in this fixture,
     # so within an engagement the tool's height must stay at its height at engagement (the
     # target is no reference: the lead clamp would drag it along with a sagging tool).
@@ -409,7 +414,9 @@ def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
     if current:
         runs.append(current)
     assert runs
-    off_path = max(max(abs(z - run[0]) for z in run) for run in runs)
+    # Against the height at the first engagement: the hand is level for the whole fixture,
+    # and the arm holds where it was while the grip is open, so a sag could add up.
+    off_path = max(abs(z - runs[0][0]) for run in runs for z in run)
     print(f'largest height of the tool off the path of the hand: {off_path * 1000.0:.1f} mm')
     assert off_path < 0.005
     # The arm itself turns back soon after the target has come back past it (the target
