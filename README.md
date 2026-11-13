@@ -10,7 +10,7 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 |---|---|
 | `src/ranger_xarm_teleop_interfaces` | `InputStatus` / `HandStatus`, `TeleopState`, `ArmOwner` messages, `SetArmOwner` service |
 | `src/ranger_xarm_teleop_bridge` | Bridge node (relay WebSocket → `/teleop/input/*`), JSONL replay node, pure parsing/conversion/analysis modules and their tests |
-| `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, MoveIt Servo pose commands), command mux node, and the pure modules behind them with their tests |
+| `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, damped least-squares solver, MoveIt Servo joint-jog commands), command mux node, and the pure modules behind them with their tests |
 | `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator, simulation-only limit values |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
 | `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py` |
@@ -156,9 +156,11 @@ to a test fixture (`test/fixtures/clip_*.jsonl` are such clips from real recordi
 ## Teleoperating the arm
 
 The teleop node turns the right controller's motion into a tool-frame target
-(`/teleop/target_pose`, in `xarm_link_base`, 50 Hz) and sends it to MoveIt Servo as a pose
-command. Nothing here addresses hardware: the launch files below start mock execution or attach
-to a running simulator.
+(`/teleop/target_pose`, in `xarm_link_base`, 50 Hz), solves it into joint velocities itself
+(damped least squares, below) and sends those to MoveIt Servo as joint-jog commands
+(`/servo_node/delta_joint_cmds`, same stamp). MoveIt Servo keeps its collision monitor and
+joint-limit checks and feeds the teleop trajectory controller. Nothing here addresses hardware:
+the launch files below start mock execution or attach to a running simulator.
 
 ```bash
 # mock execution (ros2_control mock components, move_group, RViz), system clock:
@@ -186,8 +188,9 @@ ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:=<recording.js
    grip then has to be released and pressed again.
 
 `ros2 topic echo /teleop/state` shows why the arm is not moving (`hold_reason`), which bound is
-shaping the target (`active_limit`), the owner of the arm, the calibration in use, the measured
-input age and the measured tool pose.
+shaping the target or the joint command (`active_limit`), the owner of the arm, the calibration
+in use, the measured input age, the measured tool pose, and the solver: `conditioning`,
+`damped`, `solver_error_*`, `lead_*` and the commanded tool speed (next section).
 
 ### Mapping
 
@@ -196,9 +199,40 @@ Clutch-relative in a fixed frame: `p_now - p_clutch` and `q_now * inverse(q_clut
 pose measured at engagement. How the controller is held when the grip closes does not change
 the mapping. `wrist_pivot_offset` (controller frame, default zero) moves the tracked point from
 the grip origin to the operator's wrist pivot. `tool_frame` (default `xarm_link_tcp`) is the
-frame the target is for; if it is not the tip of the MoveIt Servo group (`servo_tip_frame`),
-the target is converted with the fixed transform between the two, taken from `/tf_static`
-only: a tool frame that is not rigidly attached to the tip is refused (no target).
+frame the target is for. The solver works on the chain from `base_frame` to `servo_tip_frame`
+in `/robot_description`, plus the fixed transform from the tip to the tool frame taken from
+`/tf_static` only: a tool frame that is not rigidly attached to the tip is refused (no
+target). The measured tool pose is the forward kinematics of the newest `/joint_states` on
+that chain, not a transform-tree lookup.
+
+### Joint commands, singularities and the lead limit
+
+Each cycle the solver turns the target into joint velocities:
+
+- **Units.** The arm Jacobian is divided by the tool speed caps (linear rows by the linear
+  cap, angular rows by the angular cap) and multiplied by the joint velocity limits. Its
+  singular values are then the share of the speed cap the tool reaches in that direction with
+  the joints at their limits, in the same units for translation and rotation. `conditioning`
+  in `/teleop/state` is the smallest of them (>= 1 unrestricted, 0 singular).
+- **Position first.** Orientation is solved in what the position leaves free. For the xArm 6
+  the tool position stays well conditioned through the wrist and shoulder regions, so near
+  them the accuracy given up is orientation.
+- **Damping**, per level, grows as that level's smallest singular value falls below 0.5
+  (`damping_threshold`, `max_damping` 0.5). The arm never halts for a singularity; `damped`
+  says when accuracy is reduced and `solver_error_*` by how much.
+- **Limits.** A joint slows toward a position limit from 0.35 rad and stops 0.15 rad short
+  (`joint_limit_zone`, `joint_limit_margin`); the rest of the motion is solved again without
+  it. One factor then scales the whole command, so its direction is kept, to stay within the
+  joint velocity limits (the smaller of the URDF's and MoveIt's `joint_limits.yaml`, x 0.95)
+  and the tool speed caps.
+- **Reference.** The error is taken against MoveIt Servo's own commanded state (its output on
+  the teleop controller's command topic), seeded from the measured joints at engagement. If
+  that output stops following the commands for 0.1 s, the clutch releases.
+- **Lead limit (G-14).** The target may not lead the measured tool pose by more than
+  `max_lead_translation_m` / `max_lead_rotation_deg` (required, no default). The excess is
+  absorbed into the mapping, so after a hand motion faster than the arm the arm does not catch
+  up once the hand stops; it follows the hand again from where it is.
+- **Stop.** The cycle that releases the clutch sends a zero joint command.
 
 ### Safety gate
 
@@ -210,14 +244,17 @@ only: a tool frame that is not rigidly attached to the tip is refused (no target
 | controller pose absent or emulated; headset pose absent or emulated; controller outside the view cone; reset count or session id changed; sequence or headset time went backwards (judged on every headset frame, not only the newest one at each 50 Hz cycle) | clutch released |
 | raw controller motion between two headset frames faster than the per-cycle limit allows (checked before filtering), or a step of the final target beyond the per-cycle limit | clutch released, never slowed into a smaller jump |
 | no calibration for the current session id and reset count | no target |
-| measured tool pose older than 100 ms (by joint-state arrival and by the transform's stamp), or MoveIt Servo not confirmed running, or its speed caps / collision checking no longer as required (re-read every second) | no target; clutch released if engaged |
+| measured tool pose older than 100 ms (by joint-state arrival and by its stamp), or MoveIt Servo not confirmed running in joint-jog mode, or its collision checking, `command_in_type` (`speed_units`), joint limit margins (narrower than the solver's) or command timeout (at most the input timeout) no longer as required (re-read every second), or its output no longer following the commands, or a singularity status (never caused by joint jog) | no target; clutch released if engaged |
+| no kinematic chain or joint state, or the tool at MoveIt Servo's commanded state more than two lead limits from the measured one | no target (`hold_reason` 20); clutch released if engaged |
+| target ahead of the measured tool pose by more than the lead limit | clamped onto the limit, the excess absorbed (`active_limit` 5) |
 | target beyond the offset limit from the engagement pose | clamped onto the limit |
 | (view cone) | the cone's axis is the headset's forward axis, tilted down by `view_cone_tilt_deg` (default 0) about the headset's left-right axis; its half-angle is the required `view_cone_half_angle_deg` |
 | tool point or wrist point (`wrist_frame`) beyond a keep-out plane (`keep_out_planes`, flat list `nx ny nz d` per plane, allowed side `n . x >= d`, in `xarm_link_base`) | pushed back onto the plane; if that breaks another bound, the last accepted target is kept |
-| self-collision, scene collision, singularity, joint limit | MoveIt Servo slows (`active_limit`, `servo_status`); when it halts, the clutch is released (`hold_reason` 19) so the target cannot run on ahead of a standing arm |
+| singularity, joint position limit, joint velocity limit, tool speed cap | the solver damps, holds the joint or scales the command (`active_limit` 6-8); never a halt |
+| self-collision, scene collision; a joint inside MoveIt Servo's own margin (a backstop) | MoveIt Servo slows (`active_limit` 4, `servo_status`); when it halts, the clutch is released (`hold_reason` 19) so the target cannot run on ahead of a standing arm |
 
-**The limit values have no defaults.** Maximum offset, view cone, per-cycle limits and speed
-caps are required parameters; the teleop node exits if one is missing. For simulation,
+**The limit values have no defaults.** Maximum offset, view cone, per-cycle limits, speed
+caps and lead limits are required parameters; the teleop node exits if one is missing. For simulation,
 `config/SIMULATION_ONLY_limits.yaml` supplies values. That file marks itself simulation-only:
 the node then starts only if every ros2_control hardware plugin in the robot description is a
 simulator, and `teleop_core.launch.py` refuses the file unless called with `simulation:=true`,
@@ -255,10 +292,10 @@ travels after the last target. The fixtures `clutch_*.jsonl` and `gate_*.jsonl` 
 
 ### Diagnosing MoveIt Servo halts
 
-MoveIt Servo slows the arm and stops it by the condition number of the arm Jacobian
-(`lower_singularity_threshold`, `hard_stop_singularity_threshold` in `config/servo.yaml`). It
-does not publish that number, so the tools compute it from joint angles with the same
-definition (`ranger_xarm_teleop_servo/kinematics.py`, numpy only).
+With joint-jog commands MoveIt Servo's singularity stop no longer applies; it still halts for a
+collision or a joint inside its own margin. The tools below also compute the condition number
+of the arm Jacobian that its singularity stop used (`ranger_xarm_teleop_servo/kinematics.py`,
+numpy only), for comparing recordings made with pose commands.
 
 ```bash
 tools/record_session.py record NAME          # start BEFORE arming; Ctrl-C AFTER releasing the grip
@@ -276,12 +313,15 @@ shoulder) and what was being commanded; then counts by reason and the distributi
 condition number over the engaged time. `workspace_map.py` reports the condition number along
 tool motions from a posture: how far the tool gets in each direction before each threshold.
 
-At or beyond the hard stop MoveIt Servo refuses motion in every direction, and after a collision
-halt as well: the arm has to be moved out by MoveIt.
+After a collision halt MoveIt Servo refuses motion in every direction: the arm has to be moved
+out by MoveIt.
 
 ```bash
 tools/recover_arm.py          # disarm, wait until MoveIt owns the arm, plan to the ready posture
 ```
+
+When the arm is in contact, MoveIt refuses to plan from that start state
+(`start state in collision`) and `recover_arm.py` moves nothing.
 
 (simulation only, like `tools/move_arm.py`, which now prints why a goal was rejected).
 
