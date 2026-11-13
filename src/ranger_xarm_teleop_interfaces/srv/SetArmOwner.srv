@@ -1,0 +1,10 @@
+# Ask the command mux to hand the arm to MoveIt or to teleop (ArmOwner.OWNER_MOVEIT / OWNER_TELEOP).
+# The switch happens only with the arm stopped and no trajectory goal executing (G-9).
+uint8 owner
+---
+# True when the requested owner owns the arm after the call.
+bool success
+# ArmOwner.STATUS_* of this request and the owner after it.
+uint8 status
+uint8 owner
+string detail

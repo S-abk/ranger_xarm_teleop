@@ -189,6 +189,11 @@ def _sources(samples: List[Sample]) -> Dict[str, Any]:
     return out
 
 
+def _reset_part(frame: ParsedFrame, name: str) -> Optional[float]:
+    """Return one reported reset movement (distance_m or angle_deg); None if not reported."""
+    return None if frame.reset_event is None else getattr(frame.reset_event, name)
+
+
 def _gamepad_activity(hand_samples: List[Optional[HandSample]]) -> Dict[str, Any]:
     """Per button index: pressed/touched frames and max value; per axis: min and max."""
     buttons: List[Dict[str, Any]] = []
@@ -285,8 +290,11 @@ def analyze(records: Iterable[Record], hand: str = 'right',
     }
 
     # Reference-space resets.
+    # The movement comes from the frame's reset_event when the headset reported one.
     resets = [{'at': times[i], 'seq': samples[i].frame.seq,
-               'from': samples[i - 1].frame.reset_count, 'to': samples[i].frame.reset_count}
+               'from': samples[i - 1].frame.reset_count, 'to': samples[i].frame.reset_count,
+               'distance_m': _reset_part(samples[i].frame, 'distance_m'),
+               'angle_deg': _reset_part(samples[i].frame, 'angle_deg')}
               for i in range(1, len(samples))
               if samples[i].frame.reset_count != samples[i - 1].frame.reset_count]
     report['resets'] = {'count': len(resets), 'events': resets,
@@ -428,7 +436,10 @@ def format_report(report: Dict[str, Any]) -> str:
     lines.append(f"reference-space resets: {r['count']}  "
                  f"final reset_count {r['final_reset_count']}")
     for ev in r['events']:
-        lines.append(f"  reset at {ev['at']:.2f} s (seq {ev['seq']}): {ev['from']} -> {ev['to']}")
+        moved = ('movement not reported' if ev['distance_m'] is None
+                 else f"moved {ev['distance_m']:.3f} m, rotated {ev['angle_deg']:.2f} deg")
+        lines.append(f"  reset at {ev['at']:.2f} s (seq {ev['seq']}): {ev['from']} -> {ev['to']}, "
+                     f'{moved}')
     se = report['sessions']
     lines.append(f"XR session changes: {se['count']}  "
                  f"session_id {se['first_session_id']} .. {se['final_session_id']}")

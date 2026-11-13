@@ -34,6 +34,10 @@ for the analysis. The optional ``profiles`` list of a source is kept.
 ``session_id``, ``seq``, ``t_xr`` and ``t_client`` are carried through unchanged
 (INV-4). A frame without ``session_id`` (or any other field the patched client
 adds) is malformed.
+The optional ``reset_event`` (``{"count": n, "transform": null | {"position", "orientation"}}``)
+is sent once on the first frame after a reference-space reset: ``transform`` is how far the
+headset says the frame moved, in WebXR axes (null when it did not say). It becomes
+``ParsedFrame.reset_event`` (None when absent); a malformed one makes the frame malformed.
 Positions are WebXR axes in metres and quaternions are xyzw; conversion to ROS
 axes happens elsewhere (``axes.py``).
 """
@@ -97,6 +101,30 @@ class ViewerSample:
 
 
 @dataclass(frozen=True)
+class ResetEvent:
+    """A reference-space reset reported by the client; the movement is None when not reported."""
+
+    count: int
+    position: Optional[Tuple[float, float, float]]
+    orientation: Optional[Tuple[float, float, float, float]]
+
+    @property
+    def distance_m(self) -> Optional[float]:
+        """Return the translation of the reported movement in metres, None if not reported."""
+        if self.position is None:
+            return None
+        return math.hypot(*self.position)
+
+    @property
+    def angle_deg(self) -> Optional[float]:
+        """Return the rotation angle of the reported movement in degrees, None if not reported."""
+        if self.orientation is None:
+            return None
+        x, y, z, w = self.orientation
+        return math.degrees(2.0 * math.atan2(math.hypot(x, y, z), abs(w)))
+
+
+@dataclass(frozen=True)
 class ParsedFrame:
     """A valid ``xr_frame`` message."""
 
@@ -114,6 +142,8 @@ class ParsedFrame:
     # Everything the client said about the source for that side (None: nothing sent).
     left_source: Optional[SourceInfo] = None
     right_source: Optional[SourceInfo] = None
+    # Present only on the first frame after a reference-space reset.
+    reset_event: Optional[ResetEvent] = None
 
     def controller(self, side: str) -> Optional[HandSample]:
         """Return the sample for ``side`` only if it is a real controller, else None."""
@@ -297,6 +327,26 @@ def _viewer(value: Any) -> Optional[ViewerSample]:
                         _emulated(value, 'viewer'))
 
 
+def _reset_event(value: Any) -> ResetEvent:
+    if not isinstance(value, dict):
+        raise _Invalid('reset_event: expected an object')
+    if 'count' not in value:
+        raise _Invalid('reset_event.count: missing')
+    try:
+        count = _count(value, 'count')
+    except _Invalid as err:
+        raise _Invalid(f'reset_event.{err}')
+    if 'transform' not in value:
+        raise _Invalid('reset_event.transform: missing (expected an object or null)')
+    transform = value['transform']
+    if transform is None:
+        return ResetEvent(count, None, None)
+    if not isinstance(transform, dict):
+        raise _Invalid('reset_event.transform: expected an object or null')
+    return ResetEvent(count, _position(transform, 'reset_event.transform'),
+                      _orientation(transform, 'reset_event.transform'))
+
+
 def _frame(obj: dict) -> ParsedFrame:
     for key in PATCHED_CLIENT_KEYS:
         if key not in obj:
@@ -320,13 +370,15 @@ def _frame(obj: dict) -> ParsedFrame:
         if side in controllers:
             hands[side], sources[side] = _hand(controllers[side], f'controllers.{side}')
     viewer = _viewer(obj['viewer'])
+    reset_event = _reset_event(obj['reset_event']) if 'reset_event' in obj else None
     return ParsedFrame(session_id, seq, xr_time, client_time, reset_count,
                        hands['left'], hands['right'], viewer,
                        left_hand_tracked=bool(sources['left']
                                               and sources['left'].client_hand_tracked),
                        right_hand_tracked=bool(sources['right']
                                                and sources['right'].client_hand_tracked),
-                       left_source=sources['left'], right_source=sources['right'])
+                       left_source=sources['left'], right_source=sources['right'],
+                       reset_event=reset_event)
 
 
 def parse_message(obj: Any) -> ParseResult:

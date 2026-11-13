@@ -1,4 +1,4 @@
-// Modified from oscardvs/vr-teleop-kit commit 80589ee for ranger_xarm_teleop. Changes: raw grip position (no wrist-pivot offset), emulated_position per pose, t_xr frame time, seq counter, reset_count, session_id drawn per XR session, hand-tracking requested so hands are XRHand sources, profiles sent, only real controllers (thumbstick axes + controller profile) streamed as poses, frame sent even with no controller. See third_party/vr-teleop-kit/VENDORED.md.
+// Modified from oscardvs/vr-teleop-kit commit 80589ee for ranger_xarm_teleop. Changes: raw grip position (no wrist-pivot offset), emulated_position per pose, t_xr frame time, seq counter, reset_count, reset_event (how far a reference-space reset moved the frame, sent once on the next frame), session_id drawn per XR session, hand-tracking requested so hands are XRHand sources, profiles sent, only real controllers (thumbstick axes + controller profile) streamed as poses, frame sent even with no controller. See third_party/vr-teleop-kit/VENDORED.md.
 (() => {
   const $ = (id) => document.getElementById(id);
   // Live tick rate of get_action() in the teleop process. Populated from
@@ -257,6 +257,16 @@
   // current XR session (random 32-bit number drawn at every session start), sent with every frame.
   let xrSeq = 0, xrResetCount = 0, xrSessionId = 0;
   const newXrSessionId = () => { xrSessionId = crypto.getRandomValues(new Uint32Array(1))[0]; return xrSessionId; };
+  // Latest reset, with how far the headset says the frame moved (ev.transform, null if not reported),
+  // in WebXR axes; the next xr_frame carries it once as reset_event.
+  let xrResetPending = null;
+  const onXrReset = (ev) => {
+    xrResetCount++;
+    const t = ev.transform;
+    xrResetPending = { count: xrResetCount, transform: t ? { position: [t.position.x, t.position.y, t.position.z], orientation: [t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w] } : null };
+    const moved = xrResetPending.transform;
+    append(`reference space reset (#${xrResetCount}), ` + (moved ? `moved ${JSON.stringify(moved.position)} rotated ${JSON.stringify(moved.orientation)}` : "movement not reported"));
+  };
   const append = (msg) => {
     const line = document.createElement("div");
     line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
@@ -885,7 +895,7 @@
       xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
       xrRefSpace = await xrSession.requestReferenceSpace("local-floor")
         .catch(() => xrSession.requestReferenceSpace("local"));
-      xrRefSpace.addEventListener("reset", () => { xrResetCount++; append(`reference space reset (#${xrResetCount})`); });
+      xrRefSpace.addEventListener("reset", onXrReset);
       append(`xr session id ${newXrSessionId()}`);
       xrSession.addEventListener("end", () => {
         xrSession = null; xrRefSpace = null;
@@ -1011,7 +1021,7 @@
         xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
         xrRefSpace = await xrSession.requestReferenceSpace("local-floor")
           .catch(() => xrSession.requestReferenceSpace("local"));
-        xrRefSpace.addEventListener("reset", () => { xrResetCount++; append(`reference space reset (#${xrResetCount})`); });
+        xrRefSpace.addEventListener("reset", onXrReset);
         append(`xr session id ${newXrSessionId()}`);
 
         calibMode = true;
@@ -1530,6 +1540,8 @@
       };
     }
 
-    wsSend({ type: "xr_frame", t_client: performance.now(), t_xr: _time, seq: xrSeq++, reset_count: xrResetCount, session_id: xrSessionId, controllers, viewer });
+    const xrFrame = { type: "xr_frame", t_client: performance.now(), t_xr: _time, seq: xrSeq++, reset_count: xrResetCount, session_id: xrSessionId, controllers, viewer };
+    if (xrResetPending) { xrFrame.reset_event = xrResetPending; xrResetPending = null; }
+    wsSend(xrFrame);
   }
 })();

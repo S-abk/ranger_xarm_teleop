@@ -14,13 +14,14 @@
 """INV-5: topic names, types and QoS of the bridge's publishers match the interface contract."""
 
 import pytest
-from ranger_xarm_teleop_bridge.bridge_node import BridgeNode
+from ranger_xarm_teleop_bridge.bridge_node import BridgeNode, HEAD_POSE_TOPIC
 import rclpy
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
 
 EXPECTED_TYPES = {
     '/teleop/input/left/pose': ['geometry_msgs/msg/PoseStamped'],
     '/teleop/input/right/pose': ['geometry_msgs/msg/PoseStamped'],
+    '/teleop/input/head/pose': ['geometry_msgs/msg/PoseStamped'],
     '/teleop/input/joy': ['sensor_msgs/msg/Joy'],
     '/teleop/input/status': ['ranger_xarm_teleop_interfaces/msg/InputStatus'],
 }
@@ -30,6 +31,8 @@ EXPECTED_QOS = {
                                 HistoryPolicy.KEEP_LAST, 1),
     '/teleop/input/right/pose': (ReliabilityPolicy.BEST_EFFORT, DurabilityPolicy.VOLATILE,
                                  HistoryPolicy.KEEP_LAST, 1),
+    '/teleop/input/head/pose': (ReliabilityPolicy.BEST_EFFORT, DurabilityPolicy.VOLATILE,
+                                HistoryPolicy.KEEP_LAST, 1),
     '/teleop/input/joy': (ReliabilityPolicy.BEST_EFFORT, DurabilityPolicy.VOLATILE,
                           HistoryPolicy.KEEP_LAST, 1),
     '/teleop/input/status': (ReliabilityPolicy.RELIABLE, DurabilityPolicy.VOLATILE,
@@ -65,6 +68,7 @@ def test_topic_history_and_depth_on_the_publishers(node):
     """DDS discovery does not carry history/depth; check the publisher objects themselves."""
     publishers = {node.pose_pubs['left'].topic_name: node.pose_pubs['left'],
                   node.pose_pubs['right'].topic_name: node.pose_pubs['right'],
+                  node.head_pub.topic_name: node.head_pub,
                   node.joy_pub.topic_name: node.joy_pub,
                   node.status_pub.topic_name: node.status_pub}
     assert set(publishers) == set(EXPECTED_QOS)
@@ -72,6 +76,12 @@ def test_topic_history_and_depth_on_the_publishers(node):
         qos = publishers[topic].qos_profile
         assert (qos.reliability, qos.durability, qos.history, qos.depth) == \
             (reliability, durability, history, depth), topic
+
+
+def test_head_pose_topic_constant(node):
+    assert HEAD_POSE_TOPIC == '/teleop/input/head/pose'
+    assert node.head_pub.topic_name == HEAD_POSE_TOPIC
+    assert node.head_pub.qos_profile.depth == node.pose_pubs['left'].qos_profile.depth == 1
 
 
 def test_default_parameters(node):

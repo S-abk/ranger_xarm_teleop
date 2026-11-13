@@ -13,6 +13,8 @@
 # limitations under the License.
 """Message-level checks of the bridge node: INV-1 to INV-4, INV-7 and the identical-stamp rule."""
 
+import dataclasses
+import json
 import os
 
 from builtin_interfaces.msg import Time
@@ -82,10 +84,15 @@ def test_inv1_conversion_called_once_per_present_pose(node, monkeypatch):
     monkeypatch.setattr(bridge_node, 'xr_pose_to_ros', counting)
     both = next(f for f in frames_of('still_controller') if f.left and f.right)
     node.build_messages(both, STAMP)
-    assert len(calls) == 2
+    assert len(calls) == 3    # left, right and the headset
     one = next(f for f in frames_of('dropped_controller') if f.left and f.right is None)
     calls.clear()
     node.build_messages(one, STAMP)
+    # One call per published pose: the present controller and the headset.
+    assert calls == [(one.left.position, one.left.orientation),
+                     (one.viewer.position, one.viewer.orientation)]
+    calls.clear()
+    node.build_messages(dataclasses.replace(one, viewer=None), STAMP)
     assert calls == [(one.left.position, one.left.orientation)]
 
 
@@ -119,6 +126,55 @@ def test_inv3_viewer_only_frame_publishes_no_pose(node):
     assert list(msgs.joy.axes) == [0.0] * 8 and list(msgs.joy.buttons) == [0] * 10
 
 
+def test_head_pose_shares_the_stamp_and_is_the_converted_viewer(node):
+    frame = next(f for f in frames_of('still_controller') if f.viewer.orientation[1] != 0.0)
+    msgs = node.build_messages(frame, STAMP)
+    assert msgs.head is not None
+    assert msgs.head.header.stamp == msgs.status.header.stamp == STAMP
+    assert msgs.head.header.frame_id == 'quest_world'
+    assert pose_tuple(msgs.head) == xr_pose_to_ros(frame.viewer.position, frame.viewer.orientation)
+    assert 'head' not in msgs.poses and msgs.head not in msgs.poses.values()
+
+
+def test_head_pose_not_published_without_a_viewer(node):
+    frame = dataclasses.replace(frames_of('still_controller')[0], viewer=None)
+    msgs = node.build_messages(frame, STAMP)
+    assert msgs.head is None
+    assert msgs.status.viewer_present is False
+    assert set(msgs.poses) == {'left', 'right'}
+
+
+def test_head_pose_published_even_with_no_controller(node):
+    frame = next(f for f in frames_of('malformed')
+                 if f.left is None and f.right is None and f.viewer)
+    msgs = node.build_messages(frame, STAMP)
+    assert msgs.poses == {}
+    assert pose_tuple(msgs.head) == xr_pose_to_ros(frame.viewer.position, frame.viewer.orientation)
+
+
+def test_head_pose_goes_to_the_head_publisher_only(node, monkeypatch):
+    sent = {'head': [], 'left': [], 'right': [], 'joy': [], 'status': []}
+
+    class Fake:
+
+        def __init__(self, name):
+            self.name = name
+
+        def publish(self, msg):
+            sent[self.name].append(msg)
+    monkeypatch.setattr(node, 'head_pub', Fake('head'))
+    monkeypatch.setattr(node, 'pose_pubs', {'left': Fake('left'), 'right': Fake('right')})
+    monkeypatch.setattr(node, 'joy_pub', Fake('joy'))
+    monkeypatch.setattr(node, 'status_pub', Fake('status'))
+    msgs = node.build_messages(frames_of('still_controller')[0], STAMP)
+    node.publish_frame(msgs)
+    assert sent['head'] == [msgs.head]
+    assert sent['left'] == [msgs.poses['left']] and sent['right'] == [msgs.poses['right']]
+    node.publish_frame(node.build_messages(
+        dataclasses.replace(frames_of('still_controller')[0], viewer=None), STAMP))
+    assert len(sent['head']) == 1
+
+
 def test_inv3_headset_pose_never_on_a_controller_topic(node):
     for name in ('still_controller', 'dropped_controller', 'moving_controller'):
         for frame in frames_of(name):
@@ -126,6 +182,7 @@ def test_inv3_headset_pose_never_on_a_controller_topic(node):
                 continue
             viewer_ros = xr_pose_to_ros(frame.viewer.position, frame.viewer.orientation)
             msgs = node.build_messages(frame, STAMP)
+            assert pose_tuple(msgs.head) == viewer_ros
             for hand, pose in msgs.poses.items():
                 assert pose_tuple(pose) != viewer_ros, (name, hand, frame.seq)
 
@@ -241,3 +298,96 @@ def test_handle_text_garbage_never_raises(node, published):
                  'x' * 10000]:
         node.handle_text(text)
     assert published == []
+
+
+# ---- reference-space reset logging ----
+
+class FakeLogger:
+
+    def __init__(self):
+        self.infos = []
+        self.warnings = []
+
+    def info(self, msg, **kwargs):
+        assert 'throttle_duration_sec' not in kwargs    # a reset is never throttled
+        self.infos.append(msg)
+
+    def warning(self, msg, **kwargs):
+        self.warnings.append(msg)
+
+    def error(self, msg, **kwargs):
+        self.warnings.append(msg)
+
+
+@pytest.fixture
+def logs(node, published, monkeypatch):
+    """Reset the node history and make its logger record instead of print."""
+    for name in ('last_seq', 'last_session_id', 'last_reset_count'):
+        monkeypatch.setattr(node, name, None)
+    logger = FakeLogger()
+    monkeypatch.setattr(node, 'get_logger', lambda: logger)
+    return logger
+
+
+def feed(node, name):
+    for rec in read_records(os.path.join(FIXTURES, name + '.jsonl')):
+        node.handle_text(rec.text())
+
+
+def reset_lines(logger):
+    return [m for m in logger.infos if m.startswith('reference-space reset')]
+
+
+def test_reset_is_logged_with_the_reported_movement(node, logs):
+    feed(node, 'reset_event')
+    lines = reset_lines(logs)
+    assert len(lines) == 1
+    assert 'seq 180' in lines[0] and 'reset_count 0 -> 1' in lines[0]
+    assert 'moved 0.112 m, rotated 10.00 deg' in lines[0]
+    assert 'ROS time ' in lines[0]
+    events = [m for m in logs.infos if m.startswith('reset_event')]
+    assert len(events) == 1
+    assert 'seq 180' in events[0] and 'count 1' in events[0]
+    assert 'moved 0.112 m, rotated 10.00 deg' in events[0]
+    assert logs.warnings == []
+
+
+def test_reset_without_a_reported_movement_is_logged(node, logs):
+    raw = json.loads(next(r.text() for r in read_records(
+        os.path.join(FIXTURES, 'reset_event.jsonl'))))
+    for seq, count in enumerate([0, 0, 1, 1, 3]):
+        frame = dict(raw, seq=seq, reset_count=count)
+        node.handle_text(json.dumps(frame))
+    lines = reset_lines(logs)
+    assert len(lines) == 2    # every change is logged, none throttled
+    assert 'seq 2' in lines[0] and 'reset_count 0 -> 1' in lines[0]
+    assert 'seq 4' in lines[1] and 'reset_count 1 -> 3' in lines[1]
+    assert all('movement not reported by the headset' in m for m in lines)
+    assert [m for m in logs.infos if m.startswith('reset_event')] == []
+
+
+def test_reset_event_with_a_null_transform_is_logged_as_not_reported(node, logs):
+    raw = json.loads(next(r.text() for r in read_records(
+        os.path.join(FIXTURES, 'reset_event.jsonl'))))
+    node.handle_text(json.dumps(dict(raw, seq=0, reset_count=0)))
+    node.handle_text(json.dumps(dict(raw, seq=1, reset_count=1,
+                                     reset_event={'count': 1, 'transform': None})))
+    assert 'movement not reported by the headset' in reset_lines(logs)[0]
+    assert any(m.startswith('reset_event') and 'not reported' in m for m in logs.infos)
+
+
+def test_reset_count_change_across_sessions_is_not_a_reset(node, logs):
+    feed(node, 'new_session')
+    assert reset_lines(logs) == []
+    raw = json.loads(next(r.text() for r in read_records(
+        os.path.join(FIXTURES, 'reset_event.jsonl'))))
+    node.handle_text(json.dumps(dict(raw, seq=0, session_id=5, reset_count=0)))
+    node.handle_text(json.dumps(dict(raw, seq=0, session_id=6, reset_count=4)))
+    assert reset_lines(logs) == []
+
+
+def test_reset_event_does_not_change_the_published_status(node, logs, published):
+    feed(node, 'reset_event')
+    carrying = next(m for m in published if m.status.seq == 180)
+    assert carrying.status.reset_count == 1
+    assert node.frames > 0

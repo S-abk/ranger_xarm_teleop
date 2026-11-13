@@ -20,7 +20,10 @@ published. ``header.stamp`` is ROS time at republication (interface contract); t
 client's ``seq`` and frame time are preserved in ``InputStatus``, whose ``source``
 field reads ``replay:<file>``.
 
-Parameters: ``file`` (required), ``rate`` (1.0; 0 = as fast as possible), ``loop`` (false).
+Parameters: ``file`` (required), ``rate`` (1.0; 0 = as fast as possible), ``loop`` (false),
+``wait_for_subscriber_s`` (0.0; wait up to this long for a subscriber on the status topic),
+``start_delay_s`` (0.0; then wait this long before the first record). Together they keep
+the first frames of a recording from being published before anyone listens.
 """
 
 import os
@@ -36,11 +39,14 @@ from rclpy.executors import ExternalShutdownException
 class ReplaySource:
     """Feeds a recording to a node from a background thread."""
 
-    def __init__(self, node: BridgeNode, path: str, rate: float, loop: bool) -> None:
+    def __init__(self, node: BridgeNode, path: str, rate: float, loop: bool,
+                 start_delay: float = 0.0, wait_for_subscriber: float = 0.0) -> None:
         self.node = node
         self.path = path
         self.rate = rate
         self.loop = loop
+        self.start_delay = max(0.0, start_delay)
+        self.wait_for_subscriber = max(0.0, wait_for_subscriber)
         self.done = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name='replay', daemon=True)
@@ -57,6 +63,17 @@ class ReplaySource:
     def _run(self) -> None:
         log = self.node.get_logger()
         try:
+            waited = 0.0
+            while (waited < self.wait_for_subscriber
+                   and self.node.status_pub.get_subscription_count() == 0):
+                if self._stop.wait(0.1):
+                    return
+                waited += 0.1
+            if self.wait_for_subscriber > 0.0:
+                found = self.node.status_pub.get_subscription_count()
+                log.info(f'{found} subscriber(s) on the status topic after {waited:.1f} s')
+            if self.start_delay > 0.0 and self._stop.wait(self.start_delay):
+                return
             while not self._stop.is_set():
                 count = self._play_once()
                 log.info(f'replayed {count} records from {self.path}')
@@ -94,18 +111,23 @@ def main(args=None) -> None:
     probe.declare_parameter('file', '')
     probe.declare_parameter('rate', 1.0)
     probe.declare_parameter('loop', False)
+    probe.declare_parameter('start_delay_s', 0.0)
+    probe.declare_parameter('wait_for_subscriber_s', 0.0)
     path = str(probe.get_parameter('file').value)
     rate = float(probe.get_parameter('rate').value)
     loop = bool(probe.get_parameter('loop').value)
+    start_delay = float(probe.get_parameter('start_delay_s').value)
+    wait_for_subscriber = float(probe.get_parameter('wait_for_subscriber_s').value)
     probe.destroy_node()
     if not path:
         print('replay_node needs the parameter file:=<recording.jsonl> '
-              '(optional: rate:=1.0 loop:=false)')
+              '(optional: rate:=1.0 loop:=false start_delay_s:=0.0 '
+              'wait_for_subscriber_s:=0.0)')
         rclpy.try_shutdown()
         return
     node = BridgeNode(node_name='teleop_input_replay',
                       source_label=f'replay:{os.path.basename(path)}')
-    source = ReplaySource(node, path, rate, loop)
+    source = ReplaySource(node, path, rate, loop, start_delay, wait_for_subscriber)
     source.start()
     try:
         while rclpy.ok() and not source.done.is_set():

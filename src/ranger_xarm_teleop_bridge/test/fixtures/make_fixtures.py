@@ -36,6 +36,12 @@ NUM_BUTTONS = 7
 SESSION_ID = 0x12345678
 SESSION_ID_2 = 0xCAFE0042
 
+# The movement reported with the reset in ``reset_event``: 0.1 m along -x, 0.05 m along -z
+# (0.1118 m) and 10 degrees about +y, in WebXR axes.
+RESET_TRANSFORM = {'position': [-0.1, 0.0, -0.05],
+                   'orientation': [0.0, round(math.sin(math.radians(5.0)), 8), 0.0,
+                                   round(math.cos(math.radians(5.0)), 8)]}
+
 RIGHT_STILL = (0.25, 0.95, -0.45)
 LEFT_STILL = (-0.25, 0.95, -0.45)
 VIEWER_BASE = (0.0, 1.6, 0.0)
@@ -126,14 +132,15 @@ def _viewer(position: Vec, orientation: Quat) -> Dict[str, Any]:
 
 def _frame(i: int, left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any]],
            viewer: Optional[Dict[str, Any]], reset_count: int = 0, seq: Optional[int] = None,
-           session_id: int = SESSION_ID) -> Dict[str, Any]:
+           session_id: int = SESSION_ID,
+           reset_event: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     t_xr = round(T_XR_START_MS + i * 1000.0 / RATE_HZ, 6)
     controllers: Dict[str, Any] = {}
     if left is not None:
         controllers['left'] = left
     if right is not None:
         controllers['right'] = right
-    return {
+    frame = {
         'type': 'xr_frame',
         't_client': round(t_xr + CLIENT_OFFSET_MS, 6),
         't_xr': t_xr,
@@ -143,6 +150,9 @@ def _frame(i: int, left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any
         'controllers': controllers,
         'viewer': viewer,
     }
+    if reset_event is not None:
+        frame['reset_event'] = reset_event
+    return frame
 
 
 def _t_recv(i: int) -> float:
@@ -209,7 +219,12 @@ def dropped_controller() -> List[str]:
 
 
 def reset_event() -> List[str]:
-    """Both controllers still; at 2.5 s reset_count becomes 1 and positions jump."""
+    """
+    Both controllers still; at 2.5 s reset_count becomes 1 and positions jump.
+
+    The frame where the count rises carries the reset event once, with the movement the
+    headset reports (``RESET_TRANSFORM``).
+    """
     lines = []
     jump = (0.1, 0.0, 0.05)
     for i in range(5 * RATE_HZ):
@@ -217,7 +232,9 @@ def reset_event() -> List[str]:
         shift = jump if after else (0.0, 0.0, 0.0)
         right = _hand(tuple(RIGHT_STILL[k] + shift[k] for k in range(3)), RIGHT_QUAT)
         left = _hand(tuple(LEFT_STILL[k] + shift[k] for k in range(3)), LEFT_QUAT)
-        lines.append(_line(i, _frame(i, left, right, _static_viewer(), 1 if after else 0)))
+        event = ({'count': 1, 'transform': RESET_TRANSFORM} if i == _idx(2.5) else None)
+        lines.append(_line(i, _frame(i, left, right, _static_viewer(), 1 if after else 0,
+                                     reset_event=event)))
     return lines
 
 
@@ -353,6 +370,21 @@ def _malformed_cases() -> List[Tuple[str, Any, str]]:
         ('frame', _set(('controllers', 'right', 'profiles'), ['meta-quest-touch-plus', 3]),
          'malformed'),
         ('frame', _set(('controllers', 'right', 'profiles'), ['meta-quest-touch-plus']), 'frame'),
+        ('frame', _set(('reset_event',), {'count': 2, 'transform': None}), 'frame'),
+        ('frame', _set(('reset_event',), {'count': 2, 'transform': RESET_TRANSFORM}), 'frame'),
+        ('frame', _set(('reset_event',), None), 'malformed'),
+        ('frame', _set(('reset_event',), [1, 2]), 'malformed'),
+        ('frame', _set(('reset_event',), {'transform': None}), 'malformed'),
+        ('frame', _set(('reset_event',), {'count': -1, 'transform': None}), 'malformed'),
+        ('frame', _set(('reset_event',), {'count': 1.5, 'transform': None}), 'malformed'),
+        ('frame', _set(('reset_event',), {'count': 1}), 'malformed'),
+        ('frame', _set(('reset_event',), {'count': 1, 'transform': 'moved'}), 'malformed'),
+        ('frame', _set(('reset_event',), {'count': 1, 'transform': {
+            'position': [0.1, 0.0], 'orientation': [0.0, 0.0, 0.0, 1.0]}}), 'malformed'),
+        ('frame', _set(('reset_event',), {'count': 1, 'transform': {
+            'position': [0.1, 0.0, 0.0], 'orientation': [0.0, 0.0, 0.0, 2.0]}}), 'malformed'),
+        ('frame', _set(('reset_event',), {'count': 1, 'transform': {
+            'position': [0.1, 0.0, 0.0]}}), 'malformed'),
         ('frame', _hand_as_controller, 'frame'),
     ]
 
