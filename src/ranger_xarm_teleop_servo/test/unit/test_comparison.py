@@ -144,7 +144,8 @@ def test_sessions_small_count_is_reproducible_and_inside_the_joint_speed(arm):
                                                     'halted': 0.01, 'joint_limit': 0.01},
                                        'sessions_halted': 0.27})
     for wanted in ('2 sessions of 3', 'motions unaffected', '60.0 %', 'sessions with any halt',
-                   '27.0 %', 'sessions with a joint-limit hold', 'DLS peak joint speed'):
+                   '27.0 %', 'sessions with the joint-limit damper active',
+                   'DLS peak joint speed', 'motions with a joint above 0.5 rad/s'):
         assert wanted in text, wanted
 
 
@@ -216,9 +217,35 @@ def test_replay_follows_recorded_targets_and_reports_each_figure(arm, origin):
     text = cmp.format_replay(result, (median, largest))
     for wanted in ('frame check', 'engagements replayed: 1', 'time damped: 0.0 s',
                    'minimum conditioning', 'max solver error', 'peak joint speed',
-                   'joint-limit holds: 0 cycles in 0 engagements'):
+                   'joint-limit damper holding a joint: 0 cycles in 0 engagements',
+                   'closest approach to a bound 0.892 rad', 'in both directions: 0'):
         assert wanted in text, wanted
     assert 'no engagement' not in cmp.format_replay({'engagements': []})
+
+
+def test_a_target_beyond_the_reach_leaves_the_solver_moving_and_a_reachable_one_does_not(arm,
+                                                                                         origin):
+    for x, moving in ((0.40, False), (0.95, True)):
+        offset = np.array([x - origin[0, 3], 0.0, 0.0])
+        run_ = cmp.cube(arm, SOLVER, READY, [offset], hold=1.0)['solver'][0]
+        assert run_.moving_at_end is moving
+        assert run_.reversed_fast is moving
+    assert not cmp.moving_at_end(np.zeros((10, 6)), 0.02)
+    chatter = np.zeros((10, 6))
+    chatter[2, 1], chatter[6, 1] = 1.0, -1.0
+    assert cmp.reversed_fast(chatter) and not cmp.reversed_fast(np.abs(chatter))
+    slow = np.zeros((10, 6))
+    slow[2, 0], slow[6, 0] = 0.4, -0.4
+    assert not cmp.reversed_fast(slow)
+
+
+def test_runs_report_the_closest_approach_to_a_joint_bound(arm, origin):
+    run_ = cmp.cube(arm, SOLVER, READY, [np.array([0.0, 0.1, 0.0])], hold=0.2)['solver'][0]
+    assert run_.min_margin == pytest.approx(0.892, abs=0.01)         # joint 3 at -0.7, bound 0.19
+    held = cmp.pose_at(origin, (0, 0, 0), (0.0, -math.radians(55.0), 0.0))
+    ff = cmp.twists([held] * 100, origin, 0.02)
+    tilted = cmp.solver_motion(arm, SOLVER, READY, [held] * 100, ff)
+    assert tilted.joint_limit and 0.14 < tilted.min_margin < 0.152
 
 
 def test_cube_report_carries_both_columns_and_the_reference(arm):

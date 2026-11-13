@@ -37,6 +37,9 @@ from .rotations import q_from_axis_angle, q_to_matrix
 from .solver import (Arm, make_arm, pose_error, Solution, solve, SolverParams, tool_pose,
                      twist_between)
 
+STILL_RAD_S = 0.05                  # a joint faster than this at the end of a hold is moving
+FAST_RAD_S = 0.5                    # a joint that is this fast in both directions is reversing
+STILL_WINDOW_S = 0.5                # the end of a hold, in seconds
 REACHED_M = 0.005                   # a motion "reached" its target within 5 mm ...
 REACHED_RAD = math.radians(2.0)     # ... and 2 deg
 LIMIT_MARGIN = workspace.LIMIT_MARGIN_RAD
@@ -183,17 +186,42 @@ class Run:
     peak_joint_speed: float             # rad/s
     affected: bool                      # damping engaged (solver) / the rule slowed or halted
     halted: bool                        # the old rule's hard stop
-    joint_limit: bool                   # a joint held at / stopped by its position limit
+    joint_limit: bool                   # solver: damper holding a joint at a bound; rule: stop
+    min_margin: float = math.inf        # rad: closest any joint came to a position bound
+    moving_at_end: Optional[bool] = None    # solver: a joint still above 0.05 rad/s at the end
+    reversed_fast: Optional[bool] = None    # solver: a joint above 0.5 rad/s in both directions
 
 
-def _run_of(arm_track: Track, final: Tuple[float, float]) -> Run:
+def moving_at_end(qdot: np.ndarray, period: float) -> bool:
+    """Return whether any joint is faster than 0.05 rad/s in the last 0.5 s of the run."""
+    window = max(1, int(round(STILL_WINDOW_S / period)))
+    return bool(qdot.size and np.abs(qdot[-window:]).max() > STILL_RAD_S)
+
+
+def reversed_fast(qdot: np.ndarray) -> bool:
+    """Return whether any joint moved faster than 0.5 rad/s in both directions."""
+    for v in qdot.T:
+        fast = v[np.abs(v) > FAST_RAD_S]
+        if len(fast) and (fast > 0).any() and (fast < 0).any():
+            return True
+    return False
+
+
+def _margin(arm: Arm, q: np.ndarray) -> float:
+    return float(np.minimum(q - arm.lower, arm.upper - q).min())
+
+
+def _run_of(arm: Arm, arm_track: Track, final: Tuple[float, float], period: float) -> Run:
     err = arm_track.tool_error
     return Run(reached=final[0] < REACHED_M and final[1] < REACHED_RAD, final_error=final,
                max_error=(float(err[:, 0].max()), float(err[:, 1].max())) if len(err)
                else (0.0, 0.0),
                peak_joint_speed=arm_track.peak_joint_speed,
                affected=bool(arm_track.damped.any()), halted=False,
-               joint_limit=bool(arm_track.fixed.any()))
+               joint_limit=bool(arm_track.fixed.any()),
+               min_margin=min(_margin(arm, q) for q in arm_track.q),
+               moving_at_end=moving_at_end(arm_track.qdot, period),
+               reversed_fast=reversed_fast(arm_track.qdot))
 
 
 def solver_motion(arm: Arm, params: SolverParams, q0: Sequence[float], targets, ff,
@@ -202,7 +230,8 @@ def solver_motion(arm: Arm, params: SolverParams, q0: Sequence[float], targets, 
     result = track(arm, params, q0, targets, ff, delay_ticks, stale_ticks)
     final_pose = tool_pose(arm, result.q[-1])
     dp, dr = pose_error(targets[-1], final_pose)
-    return _run_of(result, (float(np.linalg.norm(dp)), float(np.linalg.norm(dr))))
+    return _run_of(arm, result, (float(np.linalg.norm(dp)), float(np.linalg.norm(dr))),
+                   params.period)
 
 
 def rule_motion(chain: kinematics.Chain, q0: Sequence[float], targets: Sequence[np.ndarray],
@@ -220,6 +249,7 @@ def rule_motion(chain: kinematics.Chain, q0: Sequence[float], targets: Sequence[
     max_p = max_r = 0.0
     peak = 0.0
     slowed = halted = at_limit = False
+    closest = math.inf
     for target in targets:
         tip, _, _ = kinematics.forward(chain, q)
         dp, dr = pose_error(target, tip)
@@ -243,14 +273,15 @@ def rule_motion(chain: kinematics.Chain, q0: Sequence[float], targets: Sequence[
             speed = joint_limit
         q = q + step
         peak = max(peak, speed)
-        if kinematics.limit_margin(chain, q)[1] < LIMIT_MARGIN:
+        closest = min(closest, kinematics.limit_margin(chain, q)[1])
+        if closest < LIMIT_MARGIN:
             at_limit = True
     tip, _, _ = kinematics.forward(chain, q)
     dp, dr = pose_error(targets[-1], tip)
     final = (float(np.linalg.norm(dp)), float(np.linalg.norm(dr)))
     return Run(reached=final[0] < REACHED_M and final[1] < REACHED_RAD, final_error=final,
                max_error=(max_p, max_r), peak_joint_speed=peak, affected=slowed or halted,
-               halted=halted, joint_limit=at_limit)
+               halted=halted, joint_limit=at_limit, min_margin=closest)
 
 
 def cube(arm: Arm, params: SolverParams, start: Sequence[float], offsets: Sequence[np.ndarray],
@@ -322,7 +353,8 @@ def sessions(arm: Arm, params: SolverParams, start: Sequence[float], count: int 
             ff = twists(targets, tool, params.period)
             result = track(arm, params, q, targets, ff)
             dp, dr = pose_error(targets[-1], tool_pose(arm, result.q[-1]))
-            runs.append(_run_of(result, (float(np.linalg.norm(dp)), float(np.linalg.norm(dr)))))
+            runs.append(_run_of(arm, result, (float(np.linalg.norm(dp)),
+                                              float(np.linalg.norm(dr))), params.period))
             hit = hit or bool(result.fixed.any())
             q = result.q[-1]
         limit_sessions += hit
@@ -472,6 +504,8 @@ def replay(arm: Arm, params: SolverParams, engagements: Sequence[Engagement],
                                float(result.tool_error[:, 1].max())),
             'peak_joint_speed': result.peak_joint_speed,
             'joint_limit_cycles': int(result.fixed.sum()),
+            'min_margin': min(_margin(arm, q) for q in result.q),
+            'reversed_fast': reversed_fast(result.qdot),
             'conditioning_min': float(result.conditioning.min())})
     return {'engagements': results}
 
@@ -496,6 +530,9 @@ def summarize_runs(runs: Sequence[Run]) -> Dict[str, float]:
         'affected': share(r.affected for r in runs),
         'halted': share(r.halted for r in runs),
         'joint_limit': share(r.joint_limit for r in runs),
+        'min_margin': min((r.min_margin for r in runs), default=math.nan),
+        'moving_at_end': share(r.moving_at_end for r in runs if r.moving_at_end is not None),
+        'reversed_fast': share(r.reversed_fast for r in runs if r.reversed_fast is not None),
         'peak_joint_speed_max': max((r.peak_joint_speed for r in runs), default=math.nan),
         'peak_joint_speed_p95': _percentile([r.peak_joint_speed for r in runs], 0.95),
         'max_error_mm_p95': _percentile([r.max_error[0] * 1000.0 for r in runs], 0.95),
@@ -532,13 +569,13 @@ def table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> List[str]:
 
 def format_cube(result: Dict[str, List[Run]], reference: Optional[Dict[str, float]] = None
                 ) -> str:
-    """Return the cube table. ``reference`` is the servo_diag grid summary, if computed."""
+    """Return the cube table. ``reference`` is the workspace map's grid summary, if computed."""
     rule, sol = summarize_runs(result['rule']), summarize_runs(result['solver'])
     lines = [f"cube of {int(sol['count'])} tool positions, straight line at fixed orientation, "
              'target at the speed caps then held 1 s;',
              'reached = final error under 5 mm and 2 deg']
     if reference:
-        lines.append('servo_diag map (kinematic walk; the condition number staying below 17 / '
+        lines.append('workspace map (kinematic walk; the condition number staying below 17 / '
                      f"30 / 100): {_pct(reference['17.0'])} / {_pct(reference['30.0'])} / "
                      f"{_pct(reference['100.0'])}; walk completed at all: "
                      f"{_pct(reference['complete'])}")
@@ -547,8 +584,13 @@ def format_cube(result: Dict[str, List[Run]], reference: Optional[Dict[str, floa
         ('share where the rule slowed / damping engaged', _pct(rule['affected']),
          _pct(sol['affected'])),
         ('share halted by the rule', _pct(rule['halted']), '-'),
-        ('share at a joint limit (rule stop / solver hold)', _pct(rule['joint_limit']),
-         _pct(sol['joint_limit'])),
+        ('joint limit: rule stopped within 0.1 rad / solver damper holding',
+         _pct(rule['joint_limit']), _pct(sol['joint_limit'])),
+        ('closest approach to a joint bound, rad (min)', _num(rule['min_margin'], '.3f'),
+         _num(sol['min_margin'], '.3f')),
+        ('still moving in the last 0.5 s of the hold (a joint above 0.05 rad/s)', '-',
+         _pct(sol['moving_at_end'])),
+        ('a joint above 0.5 rad/s in both directions', '-', _pct(sol['reversed_fast'])),
         ('peak joint speed, rad/s (max / 95th pct)',
          _pair(rule['peak_joint_speed_max'], rule['peak_joint_speed_p95'], '.2f'),
          _pair(sol['peak_joint_speed_max'], sol['peak_joint_speed_p95'], '.2f')),
@@ -568,6 +610,7 @@ def format_sessions(result: Dict[str, Any], old: Optional[Dict[str, Any]] = None
     limit = share(r.joint_limit for r in runs)
     damped = share(r.affected and not r.joint_limit for r in runs)
     with_limit = result['sessions_with_joint_limit'] / result['sessions']
+    stats = summarize_runs(runs)
     lines = [f"{result['sessions']} sessions of {result['segments']} one-second motions "
              f'({len(runs)} motions with the solver): random direction, 30-100 % of the speed '
              'caps, chained from where the last ended, kept within 0.30 m and 60 deg of the start']
@@ -577,12 +620,16 @@ def format_sessions(result: Dict[str, Any], old: Optional[Dict[str, Any]] = None
         ('motions slowed / damped', _pct(out.get('slowed', math.nan)), _pct(damped)),
         ('motions held to a standstill', _pct(out.get('stalled', math.nan)), '-'),
         ('motions ending in a halt', _pct(out.get('halted', math.nan)), '0 (no halt state)'),
-        ('motions at a joint limit', _pct(out.get('joint_limit', math.nan)), _pct(limit)),
+        ('motions ending at a joint limit (rule: within 0.1 rad)',
+         _pct(out.get('joint_limit', math.nan)), '-'),
+        ('motions with the joint-limit damper active', '-', _pct(limit)),
+        ('closest approach to a joint bound, rad (min)', '-', _num(stats['min_margin'], '.3f')),
+        ('motions with a joint above 0.5 rad/s in both directions', '-',
+         _pct(stats['reversed_fast'])),
         ('sessions with any halt', _pct(old['sessions_halted']) if old else 'n/a',
          '0 (no halt state)'),
-        ('sessions with a joint-limit hold', '-', _pct(with_limit))]
+        ('sessions with the joint-limit damper active', '-', _pct(with_limit))]
     lines += table(('', 'old rule (17 / 30)', 'DLS solver'), rows)
-    stats = summarize_runs(runs)
     lines += [
         f"DLS peak joint speed {_num(stats['peak_joint_speed_max'])} rad/s",
         'DLS error against the moving target, per motion: max position error (95th pct / max) '
@@ -624,8 +671,12 @@ def format_replay(result: Dict[str, Any], frame_check: Optional[Tuple[float, flo
         f"{max(r['tool_error_max'][0] for r in runs) * 1000:.0f} mm, "
         f"{math.degrees(max(r['tool_error_max'][1] for r in runs)):.0f} deg",
         f"peak joint speed {max(r['peak_joint_speed'] for r in runs):.2f} rad/s",
-        f"joint-limit holds: {sum(r['joint_limit_cycles'] for r in runs)} cycles in "
-        f"{sum(1 for r in runs if r['joint_limit_cycles'] > 0)} engagements"]
+        f"joint-limit damper holding a joint: {sum(r['joint_limit_cycles'] for r in runs)} "
+        f"cycles in {sum(1 for r in runs if r['joint_limit_cycles'] > 0)} engagements; closest "
+        f"approach to a bound {min(r['min_margin'] for r in runs):.3f} rad",
+        'engagements with a joint above 0.5 rad/s in both directions: '
+        f"{sum(1 for r in runs if r['reversed_fast'])} (a real reversal of the hand counts "
+        'too)']
     if recorded:
         lines.append(f"for comparison, the recording itself: {recorded['halts']} MoveIt Servo "
                      f"halt statuses, {recorded['decelerating']} decelerate statuses")

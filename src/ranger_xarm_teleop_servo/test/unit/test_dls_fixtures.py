@@ -220,10 +220,10 @@ def test_reach_runs_out_at_the_elbow_and_the_target_comes_back_at_once(runs, arm
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "finding: held at a target beyond the arm's reach (elbow straight), the joints do not "
-    'come to rest: q2 and q3 swing at the joint velocity limit, in opposite directions, '
-    'with the tool still. Reproduces with a constant target from 0.90 m forward and a '
-    'reference two or more cycles old; see the handback of the fixtures task.'))
+    "finding: with a target beyond the arm's reach (elbow straight) the joints do not come "
+    'to rest: q2 and q3 swing against each other at the joint velocity limit while the tool '
+    'stays put. Reproduces without any delay: a constant target 0.93 m forward of the ready '
+    'posture (tool pointing down), reference = the arm, gives 1.9 rad/s after 8 s.'))
 def test_reach_arm_comes_to_rest_at_the_far_point(runs):
     engaged = _engaged(runs['clutch_reach'])
     onset = _rest_onset(engaged, 13.1, 16.5)       # hand still from 13.1 s to 16.5 s

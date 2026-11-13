@@ -91,7 +91,7 @@ def main() -> int:
     parser.add_argument('--sessions', type=int, default=100)
     parser.add_argument('--segments', type=int, default=30)
     parser.add_argument('--seed', type=int, default=7, help='seed of the session model '
-                        '(7 is the one the servo_diag figures were made with)')
+                        '(7 reproduces the earlier survey of the old rule)')
     parser.add_argument('--out', default='', help='also write the report to this file')
     args = parser.parse_args()
 
@@ -146,13 +146,16 @@ def main() -> int:
              'to the speed caps and scaled by the singularity rule (hard stop: nothing moves '
              'again), then to the joint limit; it trails the moving target by one cycle '
              '(5 mm at the cap) even when free, and a motion it only slowed can catch up '
-             'during the hold, so its "reached" is higher than the servo_diag walk shares',
+             'during the hold, so its "reached" is higher than the walk shares of the '
+             'workspace map',
              '- solver: kinematic, reference = the arm; the target also gives its own twist '
              'as feedforward. Position has priority, so the error it accepts is in orientation',
              '- the session model ends an old-rule session at its first halt or joint limit; '
-             'a solver session never ends, so it spends more time near joint limits (the '
-             'solver starts holding a joint 0.15 rad from its bound, the old model stops at '
-             '0.1 rad)']
+             'a solver session never ends. The old model counts a joint limit within 0.1 rad '
+             "of a bound; the solver's damper acts from 0.35 rad and holds a joint 0.15 rad "
+             'from its bound, so its "damper active" rows are not the same event',
+             '- "still moving" and "above 0.5 rad/s in both directions" flag joints that '
+             "swing instead of settling (the solver's reach-boundary limit cycle)"]
     lines.extend(notes)
     report = '\n'.join(lines)
     if args.out:
