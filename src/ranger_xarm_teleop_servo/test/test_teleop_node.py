@@ -425,7 +425,7 @@ def servo_parameters(collisions=True, units='speed_units', margins=(0.1,), timeo
     ({'timeout': 0.0}, 'input timeout'),
 ])
 def test_servo_with_wrong_parameters_is_refused(harness, values, text):
-    """D5: replaces the speed-cap comparison of pose mode (the caps are the node's now)."""
+    """Replaces the speed-cap comparison of pose mode (the caps are the node's now)."""
     h = harness()
     h.node._verified(servo_parameters(**values))
     assert not h.node.servo_verified and text in h.node.servo_refusal
@@ -446,7 +446,7 @@ def test_servo_with_the_right_parameters_is_accepted(harness):
 # ---- reviewer findings: tool pose stamp, Servo re-verification, Servo halt ----
 
 def test_measured_tool_pose_is_forward_kinematics_of_the_joint_state_and_its_age(ros):
-    """A1: the measured pose comes from /joint_states, aged by arrival and by stamp."""
+    """The measured pose comes from /joint_states, aged by arrival and by stamp."""
     node = TeleopNode(node_name='teleop_tool_age',
                       parameter_overrides=overrides({**LIMITS, 'motion_enabled': True}))
     try:
@@ -538,7 +538,7 @@ def test_servo_halt_releases_the_clutch_and_is_reported(ros, code):
 
 @pytest.mark.parametrize('code', [1, 2, 3])  # singularity codes: never caused by joint jog
 def test_servo_singularity_status_means_wrong_mode_and_releases(ros, code):
-    """D5: Servo's singularity handling never runs on joint jog; seeing it, refuse."""
+    """Servo's singularity handling never runs on joint jog; seeing it, refuse."""
     def singular(node):
         status(node, code)
     h = _Midway(ros, 2.5, singular)
@@ -680,7 +680,7 @@ def test_servo_that_stops_answering_is_unknown_and_unverified(ros):
         node.destroy_node()
 
 
-# ---- joint-jog driving path (dls) ----
+# ---- joint-jog driving path ----
 
 def _engaged_span(h):
     return [s for s in h.states if s.clutch_engaged]
@@ -731,7 +731,7 @@ def test_state_reports_the_solver(harness):
 
 
 def test_servo_output_going_quiet_releases_within_the_timeout(ros):
-    """D2/D5: the reference is Servo's output; when it stops, the clutch releases."""
+    """The reference is Servo's output; when it stops, the clutch releases."""
     def quiet(node):
         h.output_on = False
     h = _Midway(ros, 2.5, quiet)
@@ -761,7 +761,7 @@ def test_servo_that_never_follows_the_first_command_releases_after_the_grace(ros
 
 
 def test_a_halt_status_left_from_before_the_engagement_does_not_release(ros):
-    """D5: the first status after unpausing can be the old one; it counts once Servo follows."""
+    """The first status after unpausing can be the old one; it counts once Servo follows."""
     class Stale(Harness):
 
         def tick(self, now):
@@ -812,6 +812,28 @@ def test_measured_arm_far_from_the_commanded_state_stops_the_solver(ros):
         first = next(i for i, s in enumerate(h.states)
                      if s.hold_reason == TeleopState.HOLD_SOLVER)
         assert first * 0.02 <= 1.6 + 0.04
+        assert not any(s.clutch_engaged for s in h.states[first:])
+    finally:
+        h.close()
+
+
+def test_a_servo_output_that_is_not_finite_stops_the_solver(ros):
+    """A NaN in Servo's output never reaches the solver: HOLD_SOLVER, no NaN command sent."""
+    def poison(node):
+        h.pending_output_override = True
+
+    class Poisoned(_Midway):
+
+        def tick(self, now):
+            if getattr(self, 'pending_output_override', False) and self.pending_output is not None:
+                self.pending_output = self.pending_output * np.nan
+            super().tick(now)
+    h = Poisoned(ros, 1.6, poison)
+    try:
+        h.play('clutch_line')
+        assert any(s.hold_reason == TeleopState.HOLD_SOLVER for s in h.states)
+        assert all(np.all(np.isfinite(c.velocities)) for c in h.commands)
+        first = next(i for i, s in enumerate(h.states) if s.hold_reason == TeleopState.HOLD_SOLVER)
         assert not any(s.clutch_engaged for s in h.states[first:])
     finally:
         h.close()

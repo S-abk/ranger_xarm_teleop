@@ -182,3 +182,27 @@ def test_lead_clamp_does_not_hide_a_jump(arm):
     holds = [s.output.hold.name for s in steps]
     assert 'INPUT_JUMP' in holds or 'STEP_REJECTED' in holds
     assert math.isfinite(steps[-1].tool.p[0])
+
+
+def test_bound_fallback_after_the_lead_clamp_sends_no_feedforward():
+    """When G-6 rejects the lead-clamped pose, the last target is kept with zero feedforward."""
+    from ranger_xarm_teleop_servo.gate import Env, tick
+    from helpers import frame
+    from dataclasses import replace
+    gp = params(max_offset_translation_m=0.30)
+    state = ready_state()
+    tool = Pose((0.30, 0.0, 0.40), (0.0, 0.0, 0.0, 1.0))
+    from ranger_xarm_teleop_servo.gate import on_frame
+    state = on_frame(state, frame(0), gp)
+    state, out = tick(state, Env(now=0.0, owner_is_teleop=True, tool_pose=tool,
+                                 tool_pose_age=0.0, servo_active=True), gp)
+    assert out.target is not None
+    # Now the measured tool is far outside the offset sphere (pushed away), and the hand
+    # moves: the lead clamp pulls the target toward it, out of the G-6 bound.
+    pushed = Pose((0.30, 0.50, 0.40), tool.q)
+    moved = replace(frame(2), controller=Pose((HAND.p[0] + 0.01, HAND.p[1], HAND.p[2]), HAND.q))
+    state = on_frame(state, moved, gp)
+    state, out = tick(state, Env(now=0.02, owner_is_teleop=True, tool_pose=pushed,
+                                 tool_pose_age=0.0, servo_active=True), gp)
+    assert out.target is not None and out.limit == Limit.KEEP_OUT
+    assert out.feedforward == (0.0,) * 6

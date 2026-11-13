@@ -120,7 +120,7 @@ SERVO_NOT_JOINT_JOG_CODES = (ServoStatus.DECELERATE_FOR_APPROACHING_SINGULARITY,
                              ServoStatus.HALT_FOR_SINGULARITY,
                              ServoStatus.DECELERATE_FOR_LEAVING_SINGULARITY)
 # Servo's output must follow the first command within this time and then never be older:
-# the solver's reference is that output, never the delayed measurement (D2).
+# the solver's reference is that output, never the delayed measurement.
 SERVO_OUTPUT_TIMEOUT_S = 0.1
 # Commanded and measured tool pose further apart than this many lead limits: the arm is
 # not following what Servo commands; the solver stops (HOLD_SOLVER).
@@ -288,6 +288,7 @@ class TeleopNode(Node):
         self.commanding = False             # a non-final command was sent last cycle
         self.solution: Optional[dls.Solution] = None
         self.lead = (0.0, 0.0)
+        self.solver_fault = ''                # why the last command could not be made
 
         # Ownership.
         self.owner = ArmOwner.OWNER_NONE
@@ -573,10 +574,14 @@ class TeleopNode(Node):
         grace after the first one, then never older than the timeout), and the tool at
         Servo's commanded state must agree with the measured one.
         """
-        ready = self.arm is not None
+        ready = self.arm is not None and not self.solver_fault
         if not self.state.engaged or self.first_command_at is None:
             return ready, True
         reference = self.reference(now)
+        if reference is not None and not np.all(np.isfinite(reference)):
+            self.get_logger().error('MoveIt Servo output not finite; clutch released',
+                                    throttle_duration_sec=1.0)
+            return False, True
         if reference is None:
             self.get_logger().error(
                 'MoveIt Servo output stopped following the joint commands (last status '
@@ -667,10 +672,11 @@ class TeleopNode(Node):
 
         stamp = self.get_clock().now().to_msg()
         if output.target is not None:
-            self.publish_target(output.target, stamp)
-            self.command(output, joints, tool, stamp, now, engaged_before)
+            if self.command(output, joints, tool, stamp, now, engaged_before):
+                self.publish_target(output.target, stamp)
         else:
             self.stop_command(stamp)
+            self.solver_fault = ''
         marks.append(('publish target', self.mono()))
         self.publish_calibration(stamp)
         self.manage_servo(now, output.want_servo_active)
@@ -701,8 +707,13 @@ class TeleopNode(Node):
         self.servo_pub.publish(msg)
 
     def command(self, output, joints, tool: Pose, stamp, now: float,
-                engaged_before: bool) -> None:
-        """Solve this cycle's target into joint velocities and send them, same stamp."""
+                engaged_before: bool) -> bool:
+        """
+        Solve this cycle's target into joint velocities and send them, same stamp.
+
+        Return False, after sending a zero command, when no valid command exists; the
+        target is then not published and the gate releases the clutch (HOLD_SOLVER).
+        """
         if not engaged_before or self.first_command_at is None:
             # Engagement: the reference starts at the measured joint state (G-10).
             self.first_command_at = now
@@ -711,18 +722,31 @@ class TeleopNode(Node):
             reference = joints
         else:
             reference = self.reference(now)
+        why = ''
         if reference is None or joints is None:
-            # Cannot happen after the checks of this cycle; never send a guess.
-            self.get_logger().error('no solver reference; sending a stop')
+            why = 'no solver reference'
+        elif not np.all(np.isfinite(reference)):
+            why = 'solver reference not finite'
+        else:
+            try:
+                solution = dls.solve(self.arm, reference, pose_to_matrix(output.target),
+                                     self.solver_params, output.feedforward)
+            except (np.linalg.LinAlgError, ValueError) as err:
+                solution, why = None, f'solver failed: {err}'
+            if solution is not None and not np.all(np.isfinite(solution.qdot)):
+                why = 'joint command not finite'
+        if why:
+            # Never send a guess: stop now, and the gate releases the clutch next cycle.
+            self.get_logger().error(f'{why}; sending a stop, clutch released')
             self.stop_command(stamp, force=True)
-            return
-        target = pose_to_matrix(output.target)
-        self.solution = dls.solve(self.arm, reference, target, self.solver_params,
-                                  output.feedforward)
-        self.own_reference = reference + self.solution.qdot * self.params.target_period
+            self.solver_fault = why
+            return False
+        self.solution = solution
+        self.own_reference = reference + solution.qdot * self.params.target_period
         self.lead = (v_norm(v_sub(output.target.p, tool.p)), q_between(output.target.q, tool.q))
-        self.publish_joint_command(self.solution.qdot, stamp)
+        self.publish_joint_command(solution.qdot, stamp)
         self.commanding = True
+        return True
 
     def stop_command(self, stamp, force: bool = False) -> None:
         """

@@ -42,7 +42,7 @@ from stack_helpers import (child_environment, Probe, Process, READY,
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
 # Wrist 0.05 rad from aligned: MoveIt Servo's singularity measure is 34.6 there, beyond
-# its hard stop; with pose commands every engagement halted at once (servo_diag).
+# its hard stop; with pose commands every engagement halted at once.
 BEYOND_HARD_STOP = [0.0, -0.6, -0.7, 0.0, 0.05, 0.0]
 ELSEWHERE = [0.4, -0.3, -1.0, 0.5, 0.9, -0.4]
 # Wrist bent the other way: the fixture's tilt then drives joint 5 to its lower bound with
@@ -93,7 +93,7 @@ def group_chain():
 
 
 def test_measured_tool_pose_agrees_with_the_transform_tree(stack):
-    """A1: forward kinematics on /joint_states = TF for the same joint state, MoveIt's chain."""
+    """Forward kinematics on /joint_states = TF for the same joint state, MoveIt's chain."""
     probe, _, _, launch = stack
     base, tip = group_chain()
     assert (base, tip) == ('xarm_link_base', 'xarm_link_tcp')
@@ -172,7 +172,7 @@ def test_singularity_replay_passes_through_without_a_halt(stack):
 
 def test_after_a_collision_halt_recovery_is_refused_and_teleop_works_again(stack):
     """
-    INV-9, and ``recover_arm.py`` after a collision halt (servo_diag left it untested).
+    INV-9, and ``recover_arm.py`` after a collision halt.
 
     Found here: after a collision halt the arm is in contact, and MoveIt refuses to plan
     from a start state in collision, so ``recover_arm.py`` reports it and moves nothing.
@@ -352,7 +352,7 @@ def test_step_settles_without_overshoot_or_ringing(stack):
 
 
 def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
-    """A2: past the reach the arm stops smoothly, no halt, and follows the hand back."""
+    """Past the reach the arm stops smoothly, no halt, and follows the hand back."""
     probe, env, logs, _ = stack
     timed, start = _clean_run(probe, env, logs, 'clutch_reach', 3.0)
     holds = _holds(probe, start, still_for=1.5)
@@ -365,6 +365,10 @@ def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
     assert spread < 1e-3                              # at rest, not chattering
     back = [p for when, p in probe.targets_since(t1) if when <= t1 + 0.2]
     assert back and back[-1][0] < probe.targets_since(t0)[0][1][0] - 1e-3
+    # The arm itself turns back at once, not only the target.
+    at_hold = _tool_between(timed, t1 - 0.2, t1)[-1]
+    after = _tool_between(timed, t1, t1 + 0.4)
+    assert after.size and after[:, 0].min() < at_hold[0] - 2e-3
     probe.disarm()
 
 

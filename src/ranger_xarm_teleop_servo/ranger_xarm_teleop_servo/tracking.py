@@ -83,16 +83,35 @@ def _moving_average(values: np.ndarray, samples: int = SMOOTHING_SAMPLES) -> np.
     return full
 
 
+RESAMPLE_S = 0.02      # resampling step: one command cycle (velocity is piecewise constant)
+
+
+def resample(times: np.ndarray, positions: np.ndarray, step: float = RESAMPLE_S):
+    """
+    Return ``(times, positions)`` interpolated onto a uniform grid of ``step`` seconds.
+
+    Joint states of a simulator arrive with uneven stamps (4 to 10 ms apart in Gazebo);
+    differencing them directly turns that jitter into speed and acceleration that the arm
+    never had. Rows with a repeated time are dropped first.
+    """
+    keep = np.concatenate([[True], np.diff(times) > 1e-6])
+    times, positions = times[keep], positions[keep]
+    if len(times) < 2 or times[-1] - times[0] < 2 * step:
+        return times, positions
+    grid = np.arange(times[0], times[-1] + 1e-9, step)
+    return grid, np.stack([np.interp(grid, times, positions[:, i])
+                           for i in range(positions.shape[1])], axis=1)
+
+
 def joint_accelerations(times: np.ndarray, positions: np.ndarray):
     """
     Return ``(raw, smoothed)`` peak joint acceleration (rad/s^2) of a joint position series.
 
-    Raw: second difference of the positions at the sample times (joint-state rate), largest
+    Raw: second difference of the positions resampled to a uniform 20 ms grid, largest
     over joints and samples. Smoothed: the same series after a 3-sample moving average of
-    the acceleration. Rows with a repeated time are dropped; NaN when fewer than 3 remain.
+    the acceleration. NaN when fewer than 3 samples remain.
     """
-    keep = np.concatenate([[True], np.diff(times) > 1e-6])
-    times, positions = times[keep], positions[keep]
+    times, positions = resample(times, positions)
     if len(times) < 3:
         return math.nan, math.nan
     dt = np.diff(times)
@@ -289,9 +308,10 @@ def _peak_joint_speed(rows: List[Dict[str, Any]]) -> float:
     """
     Return the largest joint speed (rad/s) over the rows.
 
-    From the differences of the joint positions over the row times: a joint state's own
-    velocity field is not a measurement everywhere (mock hardware with a position
-    interface reports zero). The reported velocities are used only without two positions.
+    From the differences of the joint positions, resampled to a uniform 20 ms grid: a
+    joint state's own velocity field is not a measurement everywhere (mock hardware with a
+    position interface reports zero). The reported velocities are used only without two
+    positions.
     """
     if not rows:
         return math.nan
@@ -299,8 +319,7 @@ def _peak_joint_speed(rows: List[Dict[str, Any]]) -> float:
         if all(r.get('v') is not None for r in rows):
             return float(np.abs(np.array([r['v'] for r in rows])).max())
         return math.nan
-    times = _seconds(rows)
-    q = np.array([r['q'] for r in rows])
+    times, q = resample(_seconds(rows), np.array([r['q'] for r in rows]))
     dt = np.diff(times)
     ok = dt > 1e-6
     if not ok.any():

@@ -249,7 +249,7 @@ def test_at_an_exact_singularity_the_command_is_finite_and_moves(arm):
 
 
 def test_conditioning_matches_the_planned_table(arm):
-    """The figures the plan used to choose the damping threshold."""
+    """The figures behind the choice of the damping threshold."""
     ready = sv.levels(arm, READY, PARAMS)
     assert ready.position == pytest.approx(1.91, abs=0.01)
     assert ready.orientation == pytest.approx(1.09, abs=0.01)
@@ -276,3 +276,18 @@ def test_twist_between_inverts_a_constant_motion(arm):
     b[:3, 3] += (0.004, 0, 0)
     twist = sv.twist_between(a, b, 0.02)
     assert np.allclose(twist[:3], (0.2, 0, 0)) and np.allclose(twist[3:], (0, 0, 1.0))
+
+
+def test_gain_beyond_the_ringing_bound_is_refused():
+    sv.SolverParams(0.25, 1.0, gain=5.0)
+    with pytest.raises(ValueError, match='gain'):
+        sv.SolverParams(0.25, 1.0, gain=6.0)        # 0.12 > 27/256
+
+
+def test_a_narrow_damper_zone_still_never_steps_into_the_margin(arm):
+    """INV-3 when limit_zone is set barely wider than limit_margin (tau below one cycle)."""
+    params = sv.SolverParams(0.25, 1.0, limit_margin=0.15, limit_zone=0.151)
+    q0 = [0.0, -0.3, -0.25, 0.0, 0.5, 0.0]
+    target = sv.tool_pose(arm, [0.0, -0.3, 0.6, 0.0, 0.5, 0.0])
+    path, _ = _simulate(arm, q0, lambda t: target, 4.0, params=params)
+    assert np.max(path[:, 2]) <= arm.upper[2] - params.limit_margin + 1e-9

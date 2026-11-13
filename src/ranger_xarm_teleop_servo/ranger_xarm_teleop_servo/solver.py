@@ -38,7 +38,9 @@ One call of ``solve`` turns the tool target of a cycle into the joint velocity c
 4. **Damping law,** per level, from that level's smallest singular value ``s``:
    ``lambda^2 = max_damping^2 (1 - (s / threshold)^2)`` for ``s < threshold``, else 0.
    With ``max_damping = 0.5`` a command of one speed cap along the weakest direction asks
-   for at most one joint velocity limit (``1 / (2 max_damping)``).
+   for at most ``1 / damping_threshold`` = 2 joint velocity limits (at the threshold, where
+   damping starts; below it ``s / (s^2 + lambda^2)`` is smaller), before the one scale
+   factor below.
 5. **Joint position limits.** A joint may move toward a limit at most
    ``(distance - margin) / tau`` (a velocity damper), ``tau`` chosen so the bound reaches
    the joint velocity limit at ``limit_zone`` from the limit. A joint that would exceed its
@@ -58,6 +60,9 @@ import numpy as np
 from .kinematics import Chain, chain_from_urdf, forward, jacobian
 from .rotations import q_conj, q_from_matrix, q_mul, q_to_rotvec
 
+# z^4 - z^3 + gain * period has only real roots up to 27/256: the loop does not ring with
+# the reference three cycles old (see ``SolverParams.gain``).
+STABLE_GAIN_PERIOD = 27.0 / 256.0
 LIMIT_NONE = ''
 LIMIT_JOINT_POSITION = 'joint_position'
 LIMIT_JOINT_VELOCITY = 'joint_velocity'
@@ -92,8 +97,9 @@ class SolverParams:
             raise ValueError('limit_zone must be larger than limit_margin')
         if not 0.0 < self.velocity_fraction <= 1.0:
             raise ValueError('velocity_fraction: expected a value in (0, 1]')
-        if self.gain * self.period >= 0.5:
-            raise ValueError('gain * period must stay below 0.5 (stability of the loop)')
+        if self.gain * self.period > STABLE_GAIN_PERIOD:
+            raise ValueError(f'gain * period must be at most {STABLE_GAIN_PERIOD:.4f}: no '
+                             'ringing with the reference up to three cycles old')
 
 
 @dataclass(frozen=True)
@@ -253,7 +259,8 @@ def position_bounds(arm: Arm, q: Sequence[float],
     whole vector, so a joint that is merely fast is never held on its own.
     """
     q = np.asarray(q, dtype=float)
-    tau = (params.limit_zone - params.limit_margin) / arm.velocity
+    # At least one cycle, so one step never covers more than the remaining distance.
+    tau = np.maximum((params.limit_zone - params.limit_margin) / arm.velocity, params.period)
     with np.errstate(invalid='ignore'):
         up = np.maximum((arm.upper - q - params.limit_margin) / tau, 0.0)
         down = np.maximum((q - arm.lower - params.limit_margin) / tau, 0.0)

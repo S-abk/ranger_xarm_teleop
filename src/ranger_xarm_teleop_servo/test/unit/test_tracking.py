@@ -99,14 +99,16 @@ def test_peak_acceleration_raw_and_after_three_sample_average():
     steady = only(recording(joint_q=lambda t: [0.0, 0.0, t * t, 0, 0, 0]))
     assert steady['peak_joint_acceleration'] == pytest.approx(2.0, rel=1e-6)
     assert steady['peak_joint_acceleration_smoothed'] == pytest.approx(2.0, rel=1e-6)
-    # One position glitch of 1 mrad at 100 Hz is [e, -2e, e] / dt^2 in the second difference:
-    # raw peak 2e/dt^2 = 20 rad/s^2; the average of any three of those is at most e/(3 dt^2).
+    # One position glitch of 1 mrad in a 100 Hz series, on a point of the 20 ms grid it is
+    # resampled to: [e, -2e, e] / step^2 in the second difference, raw peak 2e/step^2; the
+    # average of any three of those is at most e/(3 step^2).
     dt = 1.0 / JOINT_HZ
+    step = tracking.RESAMPLE_S
     glitch = only(recording(
         joint_q=lambda t: [0.0, 0.001 if abs(t - 1.5) < dt / 2 else 0.0, 0, 0, 0, 0]))
-    assert glitch['peak_joint_acceleration'] == pytest.approx(2 * 0.001 / dt ** 2, rel=1e-6)
+    assert glitch['peak_joint_acceleration'] == pytest.approx(2 * 0.001 / step ** 2, rel=1e-6)
     assert glitch['peak_joint_acceleration_smoothed'] == pytest.approx(
-        0.001 / (3 * dt ** 2), rel=1e-6)
+        0.001 / (3 * step ** 2), rel=1e-6)
 
 
 def test_joint_acceleration_needs_three_samples_and_ignores_repeated_times():
@@ -208,3 +210,19 @@ def test_report_names_every_new_figure():
                    'max lead 12.0 mm / 3.0 deg', 'damped 100 % of the engaged time',
                    'minimum conditioning 0.250', 'Servo halt statuses 0'):
         assert wanted in text, wanted
+
+
+def test_uneven_joint_state_stamps_do_not_make_speed_or_acceleration():
+    """Joint states 4 to 10 ms apart (a simulator) of a steady motion: 0.4 rad/s, no jerk."""
+    from ranger_xarm_teleop_servo.tracking import joint_accelerations, resample
+    rng = np.random.default_rng(3)
+    times = np.cumsum(rng.uniform(0.004, 0.010, 400))
+    # The position is sampled at a slightly different instant than the stamp says.
+    positions = np.stack([np.zeros_like(times), 0.4 * (times + rng.uniform(-5e-4, 5e-4,
+                                                                           len(times)))]
+                         + [np.zeros_like(times)] * 4, axis=1)
+    grid, resampled = resample(times, positions)
+    speed = np.abs(np.diff(resampled, axis=0)).max() / (grid[1] - grid[0])
+    assert speed == pytest.approx(0.4, abs=0.05)
+    raw, smoothed = joint_accelerations(times, positions)
+    assert smoothed < 10.0

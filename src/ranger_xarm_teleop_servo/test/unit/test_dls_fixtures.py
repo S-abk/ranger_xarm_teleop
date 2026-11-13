@@ -222,7 +222,7 @@ def test_reach_runs_out_at_the_elbow_and_the_target_comes_back_at_once(runs, arm
 
 def test_reach_arm_comes_to_rest_at_the_far_point(runs):
     """
-    Past the reach the arm comes to rest and stays still (A2).
+    Past the reach the arm comes to rest and stays still.
 
     Before the orientation term faded out with the position level's damping, q2 and q3
     chattered here from cycle to cycle at up to the joint velocity limit.

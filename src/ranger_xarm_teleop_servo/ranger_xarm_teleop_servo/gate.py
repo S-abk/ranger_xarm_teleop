@@ -545,7 +545,9 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
     if leading:
         limit = Limit.LEAD
         if not within_bounds(final, state.tool0, params):
-            final, limit = state.last_target, Limit.KEEP_OUT      # G-6 outranks
+            # G-6 outranks: the last accepted target is kept, and so is the arm.
+            final, limit = state.last_target, Limit.KEEP_OUT
+            feedforward = (0.0,) * 6
     anchor, filtered = state.anchor, filtered
     if final != target:
         mapped_turn = clutch_relative(controller, state.clutch, state.heading,
