@@ -66,7 +66,7 @@ def test_rejection_reason_names_the_owner_and_the_way_out():
 
 
 def header(sec=5, nanosec=7):
-    return NS(stamp=NS(sec=sec, nanosec=nanosec))
+    return NS(stamp=NS(sec=sec, nanosec=nanosec), frame_id='base')
 
 
 def pose(x=1.0):
@@ -86,7 +86,8 @@ def test_rows():
     state.measured_tool_pose_valid = False
     assert session.state_row(state)['tool'] is None
     assert session.pose_row('target', NS(header=header(), pose=pose(4.0))) == {
-        'k': 'target', 'stamp': 5_000_000_007, 'p': [4.0, 2.0, 3.0], 'q': [0.0, 0.0, 0.0, 1.0]}
+        'k': 'target', 'stamp': 5_000_000_007, 'frame': 'base', 'p': [4.0, 2.0, 3.0],
+        'q': [0.0, 0.0, 0.0, 1.0]}
     assert session.servo_row(NS(code=2, message='stop')) == {'k': 'servo', 'code': 2,
                                                              'msg': 'stop'}
     assert session.owner_row(NS(owner=2, status=0, detail='')) == {

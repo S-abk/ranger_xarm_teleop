@@ -25,8 +25,10 @@ the robot description. It only listens: it calls no service and publishes nothin
 
 Start it BEFORE arming and stop it AFTER releasing the grip. A ROS tool that starts or
 stops while the clutch is held can stall the input and release the clutch, so ``record``
-refuses to start while the clutch is engaged (exit status 2), and after Ctrl-C it keeps
-recording until the clutch is released.
+refuses to record when it finds the clutch engaged (exit status 2), and it never leaves
+the ROS graph under an engaged clutch: after Ctrl-C, a refusal or an error it stays on
+until the clutch is released. What it cannot avoid is joining the graph to learn the
+clutch state at all; hence: start it before arming.
 
 ``halts`` needs no ROS. Per halt it prints MoveIt Servo's status, the hold reason, the
 joint angles, the singularity measure (the Jacobian condition number MoveIt Servo
@@ -96,16 +98,30 @@ def record(name: str, directory: str, duration: float, servo_node: str) -> int:
         watch.update(time.monotonic(), msg.clutch_engaged)
         write(session.state_row(msg))
 
+    def leave_quietly() -> None:
+        """Keep listening until the clutch is released: leaving the graph is a stop too."""
+        told = False
+        while rclpy.ok() and not watch.may_stop(time.monotonic()):
+            if not told:
+                told = True
+                print('the clutch is engaged: staying on until the grip is released',
+                      flush=True)
+            rclpy.spin_once(node, timeout_sec=0.05)
+
     code = 0
     try:
         # Only the state first: nothing else is created until the clutch is known released.
-        node.create_subscription(TeleopState, '/teleop/state', on_state, 50)
+        # Depth 1, so the newest state is the one judged (no backlog of old ones).
+        node.create_subscription(TeleopState, '/teleop/state', on_state, 1)
         deadline = time.monotonic() + START_WAIT_S
         while watch.seen_at is None and time.monotonic() < deadline and not stop['asked']:
             rclpy.spin_once(node, timeout_sec=0.05)
+        if stop['asked']:
+            print('stopped before the recording began: nothing recorded')
+            return 1
         allowed, why = watch.may_start(time.monotonic())
         if not allowed:
-            print(f'REFUSED, nothing recorded: {why}')
+            print(f'REFUSED, nothing recorded: {why}', flush=True)
             return 2
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -148,6 +164,9 @@ def record(name: str, directory: str, duration: float, servo_node: str) -> int:
                     print('the clutch is engaged: still recording, will stop when the '
                           'grip is released', flush=True)
     finally:
+        # Whatever ended the run (refusal, an error, the normal stop): this process
+        # leaves the ROS graph only once the clutch is released.
+        leave_quietly()
         if out is not None:
             out.close()
             print(f'wrote {path}')

@@ -109,15 +109,27 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
         late = Process(tool('record_session.py', 'record', 'late', '--dir', str(logs)),
                        env, str(logs / 'late.log'))
         os.killpg(recorder.proc.pid, signal.SIGINT)
-        assert late.wait(30.0) == 2, late.output()
-        assert 'the clutch is engaged' in late.output()
-        assert not os.path.exists(logs / 'late.jsonl')
+        assert wait_for_text(late, 'REFUSED, nothing recorded: the clutch is engaged', 20.0), \
+            late.output()
         assert wait_for_text(recorder, 'still recording', 5.0), recorder.output()
-        still_engaged = probe.state().clutch_engaged
-        assert recorder.proc.poll() is None or not still_engaged
+        time.sleep(1.0)
+        assert probe.state().clutch_engaged
+        assert recorder.proc.poll() is None and late.proc.poll() is None    # both still on
         probe.wait_for(lambda: not probe.state().clutch_engaged, 20.0, 'the release')
         released_at = time.monotonic()
+        # The refused recorder joined the graph and stayed on; the first was asked to
+        # stop: neither cost the engagement. The grip is held for 6.0 s in the fixture.
+        during = probe.timed_states_since(engaged_at - 0.5)
+        held = [when for when, s in during if s.clutch_engaged]
+        assert max(held) - min(held) > 5.7, max(held) - min(held)
+        release = next(s for when, s in during if when > max(held))
+        assert release.hold_reason == TeleopState.HOLD_CLUTCH_RELEASED, release.hold_reason
+        # Neither recorder left the graph before the release.
+        assert 'staying on until the grip is released' in late.output()
+        assert late.proc.poll() is None or late.proc.returncode == 2
         assert recorder.wait(10.0) == 0, recorder.output()
+        assert late.wait(10.0) == 2, late.output()
+        assert not os.path.exists(logs / 'late.jsonl')
         assert player.wait(30.0) == 0, player.output()
     finally:
         player.stop()

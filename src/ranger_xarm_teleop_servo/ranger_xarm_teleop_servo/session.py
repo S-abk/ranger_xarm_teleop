@@ -123,7 +123,7 @@ def state_row(msg: Any) -> Dict[str, Any]:
 def pose_row(kind: str, msg: Any) -> Dict[str, Any]:
     """Row for a ``PoseStamped`` (kind ``target`` or ``input``)."""
     p, q = _pose(msg.pose)
-    return {'k': kind, 'stamp': _stamp(msg), 'p': p, 'q': q}
+    return {'k': kind, 'stamp': _stamp(msg), 'frame': str(msg.header.frame_id), 'p': p, 'q': q}
 
 
 def joints_row(msg: Any, names: Sequence[str] = ARM_JOINTS) -> Optional[Dict[str, Any]]:

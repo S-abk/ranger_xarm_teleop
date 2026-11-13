@@ -147,7 +147,7 @@ def _measure(chain: kinematics.Chain, row: Optional[Dict[str, Any]]) -> Optional
     return None if row is None else kinematics.condition_number(chain, row['q'])
 
 
-def _describe(event, chain, states, targets, joints, servo) -> Dict[str, Any]:
+def _describe(event, chain, states, targets, joints, servo, lower) -> Dict[str, Any]:
     t = event['t']
     message = event['msg']
     if not message:         # a halt at once on re-engaging: the status did not change
@@ -178,14 +178,14 @@ def _describe(event, chain, states, targets, joints, servo) -> Dict[str, Any]:
         'at_minus_0.5s': _measure(chain, joints.at(t - 0.5, 0.2)),
         'at_minus_0.2s': _measure(chain, joints.at(t - 0.2, 0.2)),
         'max_in_window': max((value for _, value in window), default=None),
-        'rate_per_s': (float(np.polyfit([a for a, _ in window[-10:]],
-                                        [b for _, b in window[-10:]], 1)[0])
-                       if len(window) >= 3 and window[-1][0] - window[-10:][0][0] > 1e-3
+        # Mean rate over the window: the slope of a straight line fitted to all of it.
+        'rate_per_s': (float(np.polyfit([a for a, _ in window], [b for _, b in window], 1)[0])
+                       if len(window) >= 3 and window[-1][0] - window[0][0] > 0.1
                        else None)}
     name, margin = kinematics.limit_margin(chain, q)
     out['nearest_limit'] = {'joint': name, 'margin_rad': margin}
     shape = kinematics.resemblance(chain, q)
-    out['resembles'] = shape.label(DEFAULT_LOWER)
+    out['resembles'] = shape.label(lower)
     out['joint_shares'] = {'wrist': shape.wrist_share, 'shoulder': shape.shoulder_share,
                            'elbow': shape.elbow_share}
     out['wrist_deg'], out['elbow_deg'], out['shoulder_m'] = (
@@ -197,6 +197,7 @@ def _describe(event, chain, states, targets, joints, servo) -> Dict[str, Any]:
                              'angular': [float(v) for v in weak[3:]],
                              'smallest_singular_value': float(values[-1])}
     target = targets.at(t, 0.5)
+    out['target_frame'] = target.get('frame') if target else None
     state = states.at(t, 0.5)
     tool = state.get('tool') if state else None
     command: Dict[str, Any] = {}
@@ -259,7 +260,7 @@ def analyze(records: Sequence[Dict[str, Any]], urdf: Optional[str] = None,
     targets = _Series(by_kind.get('target', []))
     joints = _Series(by_kind.get('joints', []))
     servo = _Series(by_kind.get('servo', []))
-    halts = [_describe(event, chain, states, targets, joints, servo)
+    halts = [_describe(event, chain, states, targets, joints, servo, lower)
              for event in _events(states, servo)]
     counts: Dict[str, int] = {}
     for halt in halts:
@@ -318,7 +319,7 @@ def format_report(result: Dict[str, Any]) -> str:
         lines.append(f"  nearest joint limit: {limit['joint']}, margin "
                      f"{limit['margin_rad']:.3f} rad")
         lines.append(
-            f"  resembles: {halt['resembles'] or 'no singularity (measure below 17)'}  "
+            f"  resembles: {halt['resembles'] or 'no singularity (measure below the lower threshold)'}  "
             f"(axes 4-6 {halt['wrist_deg']:.1f} deg apart, elbow {halt['elbow_deg']:.1f} deg "
             f"from straight, wrist {halt['shoulder_m'] * 1000:.0f} mm from axis 1)")
         weak = halt['weak_direction']
