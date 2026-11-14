@@ -152,6 +152,29 @@ def command_row(msg: Any) -> Dict[str, Any]:
             'v': [float(v) for v in msg.velocities]}
 
 
+def joy_row(msg: Any) -> Dict[str, Any]:
+    """Row for the input buttons and axes, a ``sensor_msgs/Joy`` (bridge index order)."""
+    return {'k': 'joy', 'stamp': _stamp(msg), 'buttons': [int(b) for b in msg.buttons],
+            'axes': [float(a) for a in msg.axes]}
+
+
+def _hand(hand: Any) -> Dict[str, bool]:
+    return {'pose_present': bool(hand.pose_present), 'hand_tracked': bool(hand.hand_tracked),
+            'emulated_position': bool(hand.emulated_position)}
+
+
+def status_row(msg: Any) -> Dict[str, Any]:
+    """Row for an ``InputStatus``: everything but the source label."""
+    return {'k': 'status', 'stamp': _stamp(msg), 'session_id': int(msg.session_id),
+            'seq': int(msg.seq), 'xr_time_ms': float(msg.xr_time_ms),
+            'client_time_ms': float(msg.client_time_ms), 'reset_count': int(msg.reset_count),
+            'left': _hand(msg.left), 'right': _hand(msg.right),
+            'viewer_present': bool(msg.viewer_present),
+            'viewer_emulated_position': bool(msg.viewer_emulated_position),
+            'malformed_count': int(msg.malformed_count),
+            'ignored_count': int(msg.ignored_count)}
+
+
 def servo_row(msg: Any) -> Dict[str, Any]:
     """Row for a ``moveit_msgs/ServoStatus``."""
     return {'k': 'servo', 'code': int(msg.code), 'msg': str(msg.message)}

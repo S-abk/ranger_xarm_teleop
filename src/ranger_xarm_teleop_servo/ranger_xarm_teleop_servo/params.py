@@ -55,6 +55,12 @@ DEFAULTS = {
     'calibration_min_horizontal': 0.5,  # refuse a pointing axis within 30 deg of vertical
     'tool_pose_timeout_s': 0.1,
     'servo_ready_timeout_s': 0.5,
+    # Arming is refused while the solver's orientation conditioning at the measured joints is
+    # below this (0 disables). The conditioning is in units of the speed caps: with the
+    # simulation caps (0.25 m/s, 1 rad/s) it is 1.09 at the ready posture and 0 with the wrist
+    # aligned, and 0.2 refuses within about 0.32 rad of the wrist singularity of the ready
+    # posture's family; a smaller angular cap raises the conditioning and narrows that band.
+    'min_arming_conditioning': 0.2,
 }
 
 
@@ -95,6 +101,7 @@ class GateParams:
     calibration_min_horizontal: float
     tool_pose_timeout: float
     servo_ready_timeout: float
+    min_arming_conditioning: float = DEFAULTS['min_arming_conditioning']
 
     @property
     def raw_speed_limit(self) -> float:
@@ -166,6 +173,9 @@ def build_params(values: Mapping[str, Any]) -> GateParams:
     if not math.isfinite(tilt_deg) or not -90.0 <= tilt_deg <= 90.0:
         raise ValueError(f'view_cone_tilt_deg: expected -90 to 90, got {tilt_deg!r}')
     tilt = math.radians(tilt_deg)
+    arming = float(opt('min_arming_conditioning'))
+    if not math.isfinite(arming) or arming < 0.0:
+        raise ValueError(f'min_arming_conditioning: expected a number >= 0, got {arming!r}')
     cone = math.radians(_positive('view_cone_half_angle_deg', values['view_cone_half_angle_deg']))
     if cone > math.pi:
         raise ValueError('view_cone_half_angle_deg: expected at most 180')
@@ -198,6 +208,7 @@ def build_params(values: Mapping[str, Any]) -> GateParams:
         calibration_min_horizontal=min_horizontal,
         tool_pose_timeout=_positive('tool_pose_timeout_s', opt('tool_pose_timeout_s')),
         servo_ready_timeout=_positive('servo_ready_timeout_s', opt('servo_ready_timeout_s')),
+        min_arming_conditioning=arming,
     )
 
 

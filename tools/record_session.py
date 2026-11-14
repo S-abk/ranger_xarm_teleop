@@ -20,7 +20,8 @@ Record a live teleop session and list every MoveIt Servo halt in it.
 
 ``record`` needs a sourced workspace and a running teleop stack. It writes
 ``recordings/NAME.jsonl`` (ignored by git) until Ctrl-C: the teleop state, the tool
-target, the controller and headset poses, the joint states, the joint command of the node
+target, the controller and headset poses, the buttons (``/teleop/input/joy``) and input
+status, the joint states, the joint command of the node
 (``/servo_node/delta_joint_cmds``), MoveIt Servo's status, the arm owner and the robot
 description. It only listens: it calls no service and publishes nothing.
 
@@ -35,9 +36,10 @@ clutch state at all; hence: start it before arming.
 joint angles, the singularity measure (the Jacobian condition number MoveIt Servo
 thresholds, computed from the recorded joint angles) and its trend over the second
 before, the nearest joint limit, the singular configuration the posture resembles and
-what the operator was commanding; then counts by reason, the distribution of the
-measure over the engaged time and, when the recording has the joint-space solver's
-fields, the share of engaged time damped and the minimum conditioning.
+what the operator was commanding; then counts by reason, every clutch release counted by
+its hold reason, the distribution of the measure over the engaged time and, when the
+recording has the joint-space solver's fields, the share of engaged time damped and the
+minimum conditioning (the singularity figures are then labelled as the old rule's).
 """
 
 import argparse
@@ -61,12 +63,12 @@ def record(name: str, directory: str, duration: float, servo_node: str) -> int:
     from control_msgs.msg import JointJog
     from geometry_msgs.msg import PoseStamped
     from moveit_msgs.msg import ServoStatus
-    from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
+    from ranger_xarm_teleop_interfaces.msg import ArmOwner, InputStatus, TeleopState
     import rclpy
     from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
     from rclpy.qos import ReliabilityPolicy
     from rclpy.signals import SignalHandlerOptions
-    from sensor_msgs.msg import JointState
+    from sensor_msgs.msg import JointState, Joy
     from std_msgs.msg import String
 
     path = os.path.join(directory, name if name.endswith('.jsonl') else name + '.jsonl')
@@ -140,6 +142,14 @@ def record(name: str, directory: str, duration: float, servo_node: str) -> int:
         node.create_subscription(
             PoseStamped, '/teleop/input/head/pose',
             lambda msg: write(session.pose_row('head', msg)), qos_profile_sensor_data)
+        # Buttons and input status: with them a session can be rebuilt as replay input
+        # (the poses above alone cannot say what the grip did).
+        node.create_subscription(
+            Joy, '/teleop/input/joy', lambda msg: write(session.joy_row(msg)),
+            qos_profile_sensor_data)
+        node.create_subscription(
+            InputStatus, '/teleop/input/status', lambda msg: write(session.status_row(msg)),
+            QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE))
         node.create_subscription(
             JointJog, servo_node.rstrip('/') + '/delta_joint_cmds',
             lambda msg: write(session.command_row(msg)), 50)

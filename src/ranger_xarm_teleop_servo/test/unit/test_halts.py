@@ -191,3 +191,46 @@ def test_solver_summary_lines_appear_only_when_the_rows_carry_the_solver_fields(
 
 def test_hold_reason_20_is_named():
     assert halts.HOLD_REASON[20] == 'SOLVER'
+
+
+def _releases_session():
+    """Engaged spans ended by a pose loss, a grip release and a stuck arm near a collision."""
+    rows = [{'t': -1.0, 'k': 'description', 'urdf': arm_urdf()}]
+    tool = tool_of(READY)
+    plan = [(True, 0, 0)] * 5 + [(False, 7, 0)] * 3 + [(True, 0, 0)] * 5 + [(False, 5, 0)] * 3 \
+        + [(True, 0, 4)] * 5 + [(False, 19, 4)] * 3 + [(True, 0, 0)] * 2 + [(False, 7, 0)]
+    for i, (engaged, hold, code) in enumerate(plan):
+        t = i * 0.1
+        rows.append({'t': t, 'k': 'joints', 'q': READY, 'v': [0.0] * 6})
+        rows.append({'t': t + 0.0005, 'k': 'servo', 'code': code,
+                     'msg': halts.SERVO_STATUS[code]})
+        rows.append({'t': t + 0.001, 'k': 'state', 'engaged': engaged, 'hold': hold,
+                     'servo': code, 'armed': True, 'tool': [tool, IDENTITY],
+                     'conditioning': 1.0, 'damped': False})
+    return rows
+
+
+def test_clutch_releases_are_listed_by_hold_reason():
+    result = halts.analyze(_releases_session())
+    summary = result['summary']
+    # The stuck arm is also a halt (the hold is SERVO_HALTED; Servo reports no halt code).
+    assert summary['halts'] == 1
+    assert summary['releases'] == 4
+    assert summary['releases_by_reason'] == {
+        'POSE_ABSENT': 2, 'CLUTCH_RELEASED': 1, 'SERVO_HALTED (stuck near a collision)': 1}
+    assert [r['reason'] for r in result['releases']][:2] == ['POSE_ABSENT', 'CLUTCH_RELEASED']
+    text = halts.format_report(result)
+    assert 'clutch releases: 4' in text and '2  POSE_ABSENT' in text
+
+
+def test_old_rule_lines_are_labelled_when_the_recording_is_from_the_solver():
+    rows = wrist_session()
+    text = halts.format_report(halts.analyze(rows))
+    assert 'arm held back to a standstill' in text and 'old rule' not in text
+    for row in rows:
+        if row['k'] == 'state':
+            row['conditioning'], row['damped'] = 0.5, False
+    text = halts.format_report(halts.analyze(rows))
+    assert 'old rule (not applied in joint-jog mode), condition number' in text
+    assert 'old rule: engaged time within 3 % of its hard stop' in text
+    assert 'arm held back to a standstill' not in text

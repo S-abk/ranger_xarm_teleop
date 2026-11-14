@@ -175,6 +175,10 @@ ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:=<recording.js
 
 **Operating it** (right controller):
 
+0. **Start from the ready posture.** A simulator spawns the arm with every joint at 0, where
+   the wrist is aligned (joints 4 and 6 share an axis). Move it to ready first: in simulation
+   `tools/move_arm.py 0 -0.6 -0.7 0 1.3 0` (Gazebo: add `--controller xarm_xarm6_traj_controller`),
+   on a robot through MoveIt.
 1. **Calibrate (A).** Point the controller along the direction that should mean "arm forward"
    and press A. The horizontal projection of the pointing axis becomes `xarm_link_base` +x; the
    result is published as the static transform `xarm_link_base` -> `quest_world` and is valid only
@@ -183,6 +187,11 @@ ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:=<recording.js
 2. **Arm (B).** Toggles arming. Arming asks the command mux for the arm; it is granted only with
    the arm stopped and no trajectory executing. Disarming (B again, or
    `ros2 service call /teleop/disarm std_srvs/srv/Trigger`) gives the arm back to MoveIt.
+   Arming is refused while the wrist is near alignment: the solver's orientation conditioning
+   at the measured joints below `min_arming_conditioning` (default 0.2; 1.09 at the ready
+   posture, 0 at the spawn pose; 0.2 refuses within about 0.32 rad of the wrist singularity
+   of the ready posture's family). The log then says `arm refused: ...; move the arm to the
+   ready posture first`. Only the start is checked: once armed the arm may go anywhere.
 3. **Clutch (grip).** While the grip is held the tool follows the hand, relative to where both
    were when the grip closed. Release holds. Any gate condition (below) also releases, and the
    grip then has to be released and pressed again.
@@ -218,8 +227,11 @@ Each cycle the solver turns the target into joint velocities:
   the tool position stays well conditioned through the wrist and shoulder regions, so near
   them the accuracy given up is orientation.
 - **Damping**, per level, grows as that level's smallest singular value falls below 0.5
-  (`damping_threshold`, `max_damping` 0.5). The arm never halts for a singularity; `damped`
-  says when accuracy is reduced and `solver_error_*` by how much.
+  (`damping_threshold`), up to `max_damping` 0.5 for position and `orientation_max_damping`
+  1.0 for orientation. The larger orientation value keeps joints 4 and 6 from turning fast
+  against each other near the wrist singularity for a small tool rotation, at the cost of
+  some orientation accuracy there. The arm never halts for a singularity; `damped` says when
+  accuracy is reduced and `solver_error_*` by how much.
 - **Speed caps per level.** Each of the two levels' commands is first limited to its own
   speed cap, which can change the tool's direction of motion a little when both are beyond
   it (`active_limit` 6).
@@ -240,6 +252,15 @@ Each cycle the solver turns the target into joint velocities:
   absorbed into the mapping, so after a hand motion faster than the arm the arm does not catch
   up once the hand stops; it follows the hand again from where it is.
 - **Stop.** The cycle that releases the clutch sends a zero joint command.
+- **Stuck near a collision.** MoveIt Servo slows every joint command by one factor that
+  depends only on the distance to the nearest collision (down to 0.001 at contact), so near
+  contact no direction leads away. When Servo reports collision deceleration (`servo_status`
+  4) and 0.5 s of commanded motion (at least 20 mm or 0.2 rad) moves the tool less than 1 mm
+  and 1 deg and less than 2 % of what was commanded, the clutch releases with `hold_reason`
+  19 (`SERVO_HALTED`) and the log says `stuck near a collision`. An arm that has only come to
+  rest close to the body, with the hand still and a few millimetres of error left, is not
+  released: moving the hand away still moves it. MoveIt cannot plan from a stuck state
+  either (below).
 
 ### Safety gate
 
@@ -306,18 +327,20 @@ numpy only), for comparing recordings made with pose commands.
 
 ```bash
 tools/record_session.py record NAME          # start BEFORE arming; Ctrl-C AFTER releasing the grip
+tools/record_relay.py --out recordings/NAME_relay.jsonl  # live sessions: the raw headset frames too
 tools/record_session.py halts recordings/NAME.jsonl     # no ROS needed
 tools/workspace_map.py recordings/NAME.jsonl            # or a URDF file; no ROS needed
 ```
 
 `record` writes `recordings/NAME.jsonl` (git-ignored): teleop state, tool target, controller
-pose, joint states, MoveIt Servo's status, the arm owner and the robot description. It only
-listens. It refuses to start while the clutch is engaged, and after Ctrl-C it keeps recording
+and headset poses, buttons (`/teleop/input/joy`), input status, the joint command, joint
+states, MoveIt Servo's status, the arm owner and the robot description. It only listens. It refuses to start while the clutch is engaged, and after Ctrl-C it keeps recording
 until the clutch is released (see the timing note below). `halts` prints, per halt, MoveIt
 Servo's status, the hold reason, the joint angles, the condition number and its trend over the
 second before, the nearest joint limit, the singularity the posture resembles (wrist, elbow,
-shoulder) and what was being commanded; then counts by reason and the distribution of the
-condition number over the engaged time. `workspace_map.py` reports the condition number along
+shoulder) and what was being commanded; then counts by reason, every clutch release by its
+hold reason, and the distribution of the condition number over the engaged time (labelled as
+the old rule's when the recording comes from the joint-space solver). `workspace_map.py` reports the condition number along
 tool motions from a posture: how far the tool gets in each direction before each threshold.
 
 After a collision halt MoveIt Servo refuses motion in every direction: the arm has to be moved
@@ -331,6 +354,17 @@ When the arm is in contact, MoveIt refuses to plan from that start state
 (`start state in collision`) and `recover_arm.py` moves nothing.
 
 (simulation only, like `tools/move_arm.py`, which now prints why a goal was rejected).
+
+For a live session, also run `tools/record_relay.py` from the start. It is one more client of
+the relay (no ROS), and its file replays the session exactly through the bridge
+(`replay_node`), which the ROS-side recording alone cannot.
+
+The teleop node's log helps tell a busy process from missing input:
+- `slow cycle: ...` (throttled), with the parts of the joint command: reference, solve and
+  the two publish calls;
+- once a minute, the count of slow cycles and of cycles that started late;
+- `frame seq N incomplete: ...` when a frame that releases the clutch lacks a part (no pose,
+  no joy, or the status reporting no pose), with how long the input callbacks had paused.
 
 Timing note: when a new ROS participant joins the graph (a command-line tool, a node being
 started), DDS endpoint matching can delay messages or block a publish call for 0.1 to 0.3 s.

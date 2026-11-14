@@ -60,7 +60,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped
 from moveit_msgs.msg import ServoStatus
 from moveit_msgs.srv import ServoCommandType
 import numpy as np
-from ranger_xarm_teleop_bridge.bridge_node import (HEAD_POSE_TOPIC, JOY_QOS, JOY_TOPIC,
+from ranger_xarm_teleop_bridge.bridge_node import (HEAD_POSE_TOPIC, JOY_TOPIC,
                                                    POSE_TOPICS, STATUS_QOS, STATUS_TOPIC)
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, InputStatus, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
@@ -92,11 +92,17 @@ OWNER_TOPIC = '/teleop/mux/owner'
 SET_OWNER_SERVICE = '/teleop/mux/set_owner'
 DISARM_SERVICE = '/teleop/disarm'
 
-# Poses are published best effort, depth 1; a little depth here lets the pose, joy and
-# status of one frame be paired by stamp whatever order they arrive in.
+# Poses and joy are published best effort, depth 1; a little depth here lets the pose, joy
+# and status of one frame be paired by stamp whatever order they arrive in, and keeps them
+# while this node's executor is busy for longer than a frame period (frames come every
+# 11 ms at 90 Hz). With depth 1 a stall of one frame period replaces one frame's buttons
+# with the next frame's; the frame then counts as having no controller (POSE_ABSENT).
 INPUT_POSE_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                             history=HistoryPolicy.KEEP_LAST, depth=5,
                             durability=DurabilityPolicy.VOLATILE)
+INPUT_JOY_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                           history=HistoryPolicy.KEEP_LAST, depth=5,
+                           durability=DurabilityPolicy.VOLATILE)
 LATCHED_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST,
                          depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 TF_STATIC_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
@@ -105,6 +111,9 @@ TF_STATIC_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
 
 PAIR_WAIT_S = 0.02          # how long a status waits for the pose and joy of its frame
 SLOW_CYCLE_S = 0.01         # a cycle longer than this is reported
+LATE_START_S = 0.03         # a cycle starting this long after the previous one is counted
+CYCLE_REPORT_S = 60.0       # how often the slow and late cycles are summed up in the log
+INPUT_GAP_WINDOW_S = 0.2    # the longest gap between input callbacks is kept this long
 OWNER_TIMEOUT_S = 0.5       # mux state older than this counts as "no owner"
 SERVICE_TIMEOUT_S = 1.0     # a Servo or mux call without an answer is abandoned
 VERIFY_PERIOD_S = 1.0       # how often MoveIt Servo's caps and collision checking are re-read
@@ -126,12 +135,28 @@ SERVO_OUTPUT_TIMEOUT_S = 0.1
 # Commanded and measured tool pose further apart than this many lead limits: the arm is
 # not following what Servo commands; the solver stops (HOLD_SOLVER).
 DIVERGENCE_LEADS = 2.0
+# Stuck near a collision. MoveIt Servo scales every joint command by one factor that
+# depends only on the distance to the nearest collision, down to 0.001 at contact, so
+# no direction leads away. While Servo reports that deceleration, a window of
+# STUCK_WINDOW_S in which at least STUCK_COMMANDED_* of motion was commanded and the tool
+# moved less than STUCK_MOVED_* and less than STUCK_FRACTION of what was commanded releases
+# the clutch as a Servo halt. An arm that came to rest near a collision with a small error
+# left (the hand still, Servo passing a few per cent) commands too little to count: it is
+# not trapped, and moving the hand away still moves it.
+STUCK_WINDOW_S = 0.5
+STUCK_MOVED_M = 0.001
+STUCK_MOVED_RAD = math.radians(1.0)
+STUCK_COMMANDED_M = 0.02
+STUCK_COMMANDED_RAD = 0.2
+STUCK_FRACTION = 0.02
 SOLVER_LIMITS = {dls.LIMIT_JOINT_POSITION: Limit.JOINT_POSITION,
                  dls.LIMIT_JOINT_VELOCITY: Limit.JOINT_VELOCITY,
                  dls.LIMIT_TOOL_SPEED: Limit.TOOL_SPEED}
 # Solver tuning parameters (not safety limits) and their SolverParams fields.
 SOLVER_TUNING = {'solver_gain': 'gain', 'damping_threshold': 'damping_threshold',
-                 'max_damping': 'max_damping', 'joint_limit_margin': 'limit_margin',
+                 'max_damping': 'max_damping',
+                 'orientation_max_damping': 'orientation_max_damping',
+                 'joint_limit_margin': 'limit_margin',
                  'joint_limit_zone': 'limit_zone',
                  'joint_velocity_fraction': 'velocity_fraction'}
 FUTURE_STAMP_TOLERANCE_S = 0.05     # a joint state stamped further ahead than this is not trusted
@@ -149,6 +174,7 @@ _OPTIONAL = {
     'calibration_min_horizontal': Parameter.Type.DOUBLE,
     'tool_pose_timeout_s': Parameter.Type.DOUBLE,
     'servo_ready_timeout_s': Parameter.Type.DOUBLE,
+    'min_arming_conditioning': Parameter.Type.DOUBLE,
 }
 
 
@@ -171,6 +197,49 @@ def fill_pose(msg, pose: Pose) -> None:
     """Write a gate pose into a ``geometry_msgs/Pose``."""
     msg.position.x, msg.position.y, msg.position.z = pose.p
     msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w = pose.q
+
+
+class CycleCounter:
+    """Slow and late target cycles, summed up for the log once per CYCLE_REPORT_S."""
+
+    def __init__(self) -> None:
+        self.since: Optional[float] = None
+        self.slow_count = 0
+        self.slowest = (0.0, '', '')        # seconds, longest step, joint command parts
+        self.late_count = 0
+        self.latest = 0.0                   # longest interval between cycle starts
+
+    def started(self, now: float, interval: float) -> None:
+        """Count a cycle that started ``interval`` seconds after the previous one."""
+        if self.since is None:
+            self.since = now
+        if interval > LATE_START_S:
+            self.late_count += 1
+            self.latest = max(self.latest, interval)
+
+    def slow(self, took: float, slowest: str, parts: str) -> None:
+        """Count a cycle that took ``took`` seconds."""
+        self.slow_count += 1
+        if took > self.slowest[0]:
+            self.slowest = (took, slowest, parts)
+
+    def report(self, now: float) -> str:
+        """Return the summary when one is due and anything was counted, then start again."""
+        if self.since is None or now - self.since < CYCLE_REPORT_S:
+            return ''
+        text = ''
+        if self.slow_count or self.late_count:
+            took, slowest, parts = self.slowest
+            text = (f'last {now - self.since:.0f} s: {self.slow_count} slow cycles '
+                    f'(over {SLOW_CYCLE_S * 1000.0:.0f} ms'
+                    + (f'; longest {took * 1000.0:.0f} ms, {slowest}'
+                       + (f' ({parts})' if parts else '') if self.slow_count else '')
+                    + f'), {self.late_count} cycles started over '
+                    f'{LATE_START_S * 1000.0:.0f} ms after the previous one'
+                    + (f' (longest {self.latest * 1000.0:.0f} ms)' if self.late_count else ''))
+        self.__init__()
+        self.since = now
+        return text
 
 
 class TeleopNode(Node):
@@ -301,6 +370,16 @@ class TeleopNode(Node):
         self._cycle_started: Optional[float] = None
         self._cycle_took = 0.0
         self._cycle_slowest = ''
+        self._command_steps = []            # (step, seconds) inside the last joint command
+        self._cycles = CycleCounter()
+        # Input callbacks: arrival of the last one and the longest gaps between them, to
+        # tell an executor that was busy from input that did not arrive.
+        self._input_at: Optional[float] = None
+        self._input_gaps: deque = deque()   # (arrival, gap before it)
+        self._incomplete = False            # the last frame lacked a part
+        # Stuck near a collision: (start, tool pose, commanded travel m, rad) of the window.
+        self._stuck_window = None
+        self.stuck_near_collision = False
         self.last_hold = None
 
         self.target_pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 10)
@@ -311,7 +390,7 @@ class TeleopNode(Node):
         self.create_subscription(PoseStamped, POSE_TOPICS['right'], self._on_pose,
                                  INPUT_POSE_QOS)
         self.create_subscription(PoseStamped, HEAD_POSE_TOPIC, self._on_head, INPUT_POSE_QOS)
-        self.create_subscription(Joy, JOY_TOPIC, self._on_joy, JOY_QOS)
+        self.create_subscription(Joy, JOY_TOPIC, self._on_joy, INPUT_JOY_QOS)
         self.create_subscription(InputStatus, STATUS_TOPIC, self._on_status, STATUS_QOS)
         self.create_subscription(TFMessage, '/tf_static', self._on_tf_static, TF_STATIC_QOS)
         self.create_subscription(String, '/robot_description', self._on_robot_description,
@@ -345,20 +424,33 @@ class TeleopNode(Node):
 
     # ---- input ----
 
+    def _input_arrived(self) -> float:
+        """Note an input callback; return its arrival (monotonic)."""
+        now = self.mono()
+        if self._input_at is not None:
+            self._input_gaps.append((now, now - self._input_at))
+        self._input_at = now
+        while self._input_gaps and now - self._input_gaps[0][0] > INPUT_GAP_WINDOW_S:
+            self._input_gaps.popleft()
+        return now
+
     def _on_pose(self, msg: PoseStamped) -> None:
+        self._input_arrived()
         self._poses[stamp_key(msg.header.stamp)] = pose_of(msg.pose)
         self._assemble()
 
     def _on_head(self, msg: PoseStamped) -> None:
+        self._input_arrived()
         self._heads[stamp_key(msg.header.stamp)] = pose_of(msg.pose)
         self._assemble()
 
     def _on_joy(self, msg: Joy) -> None:
+        self._input_arrived()
         self._joys[stamp_key(msg.header.stamp)] = msg
         self._assemble()
 
     def _on_status(self, msg: InputStatus) -> None:
-        self._pending.append((self.mono(), msg))
+        self._pending.append((self._input_arrived(), msg))
         self._assemble()
 
     def _assemble(self) -> None:
@@ -373,10 +465,41 @@ class TeleopNode(Node):
             if not complete and now - arrival < PAIR_WAIT_S:
                 return
             self._pending.popleft()
+            self._diagnose_frame(status, key, now - arrival)
             self.state = on_frame(self.state, self.build_frame(status, arrival), self.params)
             for store in (self._poses, self._heads, self._joys):
                 for old in [k for k in store if k <= key]:
                     del store[old]
+
+    def _diagnose_frame(self, status: InputStatus, key: int, waited: float) -> None:
+        """
+        Log which part of a frame is missing, once per run of such frames, while it counts.
+
+        It counts when the clutch is engaged or the grip was last seen held: then the frame
+        releases the clutch, and the log says whether the input did not arrive (the status
+        says so, or a message is missing after the wait) and how long this node's input
+        callbacks had paused just before (a long pause: this process was busy).
+        """
+        missing = []
+        if not status.right.pose_present:
+            missing.append('the status reports no controller pose')
+        else:
+            if key not in self._poses:
+                missing.append('no pose message')
+            if key not in self._joys:
+                missing.append('no joy message (buttons unknown)')
+        if not missing:
+            self._incomplete = False
+            return
+        held = self.state.engaged or bool(self.state.buttons and self.state.buttons[0])
+        if held and not self._incomplete:
+            gap = max((g for _, g in self._input_gaps), default=0.0)
+            self.get_logger().warning(
+                f'frame seq {status.seq} incomplete: {", ".join(missing)}; waited '
+                f'{waited * 1000.0:.0f} ms; longest pause between input callbacks in the last '
+                f'{INPUT_GAP_WINDOW_S * 1000.0:.0f} ms: {gap * 1000.0:.0f} ms',
+                throttle_duration_sec=1.0)
+        self._incomplete = True
 
     def build_frame(self, status: InputStatus, arrival: float) -> Frame:
         """
@@ -615,6 +738,58 @@ class TeleopNode(Node):
         """Return True on a halt status that belongs to this engagement's commands."""
         return self.servo_status_current() and self.servo_status in SERVO_HALT_CODES
 
+    def arming_conditioning(self, joints) -> float:
+        """Return the solver's orientation conditioning at ``joints`` (NaN if unknown)."""
+        if joints is None or self.arm is None:
+            return math.nan
+        try:
+            return float(dls.levels(self.arm, joints, self.solver_params).orientation)
+        except (np.linalg.LinAlgError, ValueError) as err:
+            self.get_logger().error(f'orientation conditioning for the arm request failed: {err}')
+            return math.nan
+
+    def stuck_check(self, now: float, tool: Optional[Pose]) -> bool:
+        """
+        Return True once the arm is stuck near a collision (see STUCK_WINDOW_S).
+
+        Judged on the measured tool pose against the joint commands sent: while MoveIt
+        Servo reports collision deceleration for this engagement's commands, a window
+        starts; any motion of the tool beyond STUCK_MOVED_* restarts it; after
+        STUCK_WINDOW_S with at least STUCK_COMMANDED_* commanded and less than
+        STUCK_FRACTION of it done, the arm is stuck. Reset on release.
+        """
+        if self.stuck_near_collision:
+            return True
+        decelerating = (self.state.engaged and self.servo_status_current()
+                        and self.servo_status == ServoStatus.DECELERATE_FOR_COLLISION)
+        if not decelerating or tool is None:
+            self._stuck_window = None
+            return False
+        window = self._stuck_window
+        if window is None or (v_norm(v_sub(tool.p, window[1].p)) > STUCK_MOVED_M
+                              or q_between(tool.q, window[1].q) > STUCK_MOVED_RAD):
+            self._stuck_window = (now, tool, 0.0, 0.0)
+            return False
+        start, pose, linear, angular = window
+        if self.solution is not None:
+            linear += self.solution.linear_speed * self.params.target_period
+            angular += self.solution.angular_speed * self.params.target_period
+        self._stuck_window = (start, pose, linear, angular)
+        moved = v_norm(v_sub(tool.p, pose.p))
+        turned = q_between(tool.q, pose.q)
+        trapped = ((linear >= STUCK_COMMANDED_M and moved < STUCK_FRACTION * linear)
+                   or (angular >= STUCK_COMMANDED_RAD and turned < STUCK_FRACTION * angular))
+        if now - start >= STUCK_WINDOW_S and trapped:
+            self.stuck_near_collision = True
+            self.get_logger().error(
+                f'stuck near a collision: MoveIt Servo slows every direction by its collision '
+                f'scale; commanded {linear * 1000.0:.0f} mm and {math.degrees(angular):.0f} deg '
+                f'in {now - start:.1f} s, the tool moved {moved * 1000.0:.1f} mm and '
+                f'{math.degrees(turned):.1f} deg; clutch released. MoveIt cannot plan from here '
+                'either; the arm has to be moved out directly')
+            return True
+        return False
+
     # ---- the target cycle ----
 
     def _on_timer(self) -> None:
@@ -628,6 +803,8 @@ class TeleopNode(Node):
                 f'late cycle: {(now - self._cycle_started) * 1000.0:.0f} ms since the previous '
                 f'one, which took {self._cycle_took * 1000.0:.0f} ms '
                 f'(longest step: {self._cycle_slowest})')
+        if self._cycle_started is not None:
+            self._cycles.started(now, now - self._cycle_started)
         self._cycle_started = now
         marks = [('input', now)]
         self._assemble()
@@ -650,11 +827,14 @@ class TeleopNode(Node):
                     'commands never cause: it is not in joint-jog mode; teleop is disabled '
                     'until it is activated again')
             self.servo_mode_wrong = True
+        stuck = self.stuck_check(now, tool)
         env = Env(now=now, owner_is_teleop=owner == ArmOwner.OWNER_TELEOP,
                   tool_pose=tool if ready else None, tool_pose_age=tool_age,
                   servo_active=(self.servo_state == SERVO_ACTIVE and self.servo_verified
                                 and not self.servo_mode_wrong and following),
-                  servo_halted=self.servo_halted(), solver_ready=solver_ready)
+                  servo_halted=self.servo_halted() or stuck, solver_ready=solver_ready,
+                  arming_conditioning=(self.arming_conditioning(joints)
+                                       if self.state.arm_pending else math.inf))
         marks.append(('tool pose', self.mono()))
         engaged_before = self.state.engaged
         self.state, output = tick(self.state, env, self.params)
@@ -672,9 +852,12 @@ class TeleopNode(Node):
                 + f'{self.base_frame} -> {self.tip_frame}', throttle_duration_sec=5.0)
 
         stamp = self.get_clock().now().to_msg()
+        self._command_steps = []
         if output.target is not None:
             if self.command(output, joints, tool, stamp, now, engaged_before):
+                published = self.mono()
                 self.publish_target(output.target, stamp)
+                self._command_steps.append(('publish target', self.mono() - published))
         else:
             self.stop_command(stamp)
             self.solver_fault = ''
@@ -689,12 +872,19 @@ class TeleopNode(Node):
         steps = [(b[1] - a[1], b[0]) for a, b in zip(marks, marks[1:])]
         self._cycle_took = marks[-1][1] - now
         self._cycle_slowest = '%s %.0f ms' % (max(steps)[1], max(steps)[0] * 1000.0)
+        parts = ', '.join(f'{name} {seconds * 1000.0:.1f} ms'
+                          for name, seconds in self._command_steps)
         if self._cycle_took > SLOW_CYCLE_S:
             # Input of a headset frame waits at most PAIR_WAIT_S for its parts; a cycle this
             # long can make a frame count as having no pose.
+            self._cycles.slow(self._cycle_took, self._cycle_slowest, parts)
             self.get_logger().warning(
                 f'slow cycle: {self._cycle_took * 1000.0:.0f} ms (longest step: '
-                f'{self._cycle_slowest})', throttle_duration_sec=1.0)
+                f'{self._cycle_slowest}' + (f'; joint command: {parts}' if parts else '') + ')',
+                throttle_duration_sec=1.0)
+        summary = self._cycles.report(now)
+        if summary:
+            self.get_logger().info(summary)
 
     def publish_target(self, target: Pose, stamp) -> None:
         """Publish the tool-frame target (the recorded action)."""
@@ -721,6 +911,7 @@ class TeleopNode(Node):
         Return False, after sending a zero command, when no valid command exists; the
         target is then not published and the gate releases the clutch (HOLD_SOLVER).
         """
+        started = self.mono()
         if not engaged_before or self.first_command_at is None:
             # Engagement: the reference starts at the measured joint state (G-10).
             self.first_command_at = now
@@ -729,6 +920,8 @@ class TeleopNode(Node):
             reference = joints
         else:
             reference = self.reference(now)
+        solving = self.mono()
+        self._command_steps.append(('reference', solving - started))
         why = ''
         if reference is None or joints is None:
             why = 'no solver reference'
@@ -742,6 +935,7 @@ class TeleopNode(Node):
                 solution, why = None, f'solver failed: {err}'
             if solution is not None and not np.all(np.isfinite(solution.qdot)):
                 why = 'joint command not finite'
+        self._command_steps.append(('solve', self.mono() - solving))
         if why:
             # Never send a guess: stop now, and the gate releases the clutch next cycle.
             self.get_logger().error(f'{why}; sending a stop, clutch released')
@@ -751,7 +945,9 @@ class TeleopNode(Node):
         self.solution = solution
         self.own_reference = reference + solution.qdot * self.params.target_period
         self.lead = (v_norm(v_sub(output.target.p, tool.p)), q_between(output.target.q, tool.q))
+        publishing = self.mono()
         self.publish_joint_command(solution.qdot, stamp)
+        self._command_steps.append(('publish joint command', self.mono() - publishing))
         self.commanding = True
         return True
 
@@ -771,6 +967,8 @@ class TeleopNode(Node):
         self.own_reference = None
         self.solution = None
         self.lead = (0.0, 0.0)
+        self._stuck_window = None
+        self.stuck_near_collision = False
 
     def publish_calibration(self, stamp) -> None:
         """Publish the static transform arm base -> quest_world when the calibration changed."""
@@ -1023,7 +1221,7 @@ class TeleopNode(Node):
     def _disarm(self, why: str) -> None:
         if self.state.want_armed:
             self.get_logger().warning(f'disarmed: {why}')
-            self.state = replace(self.state, want_armed=False)
+            self.state = replace(self.state, want_armed=False, arm_pending=False)
 
 
 def main(args=None) -> None:

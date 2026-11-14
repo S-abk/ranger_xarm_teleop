@@ -194,16 +194,28 @@ def _rotation_about(pose, axis, angle):
     return out
 
 
+# Orientation error while crossing the wrist singularity, by the orientation level's maximum
+# damping: 0.5 (as first built) and 1.0 (the default since session 2: less wrist spin, more
+# orientation error there; 12 deg is the simulation's rotation lead limit, beyond which the
+# gate holds the target anyway).
+WRIST_CROSSING = [(0.5, 8.0), (1.0, 12.0)]
+
+
 @pytest.mark.parametrize('feedforward', [False, True])
-def test_wrist_singularity_is_crossed_without_stopping(arm, feedforward):
+@pytest.mark.parametrize('orientation_damping,error_bound_deg', WRIST_CROSSING)
+def test_wrist_singularity_is_crossed_without_stopping(arm, feedforward, orientation_damping,
+                                                       error_bound_deg):
     """INV-5 (wrist): tilt from q5 0.4 through the true singularity near -0.25 and beyond."""
     q0 = [0.0, -0.6, -0.7, 0.0, 0.4, 0.0]
     start = sv.tool_pose(arm, q0)
+    params = sv.SolverParams(linear_speed_cap=0.25, angular_speed_cap=1.0,
+                             orientation_max_damping=orientation_damping)
 
     def target_at(t):
         return _rotation_about(start, (0, -1, 0), math.radians(50) * min(t, 2.0) / 2.0)
 
-    path, solutions = _simulate(arm, q0, target_at, 3.0, feedforward=feedforward)
+    path, solutions = _simulate(arm, q0, target_at, 3.0, params=params,
+                                feedforward=feedforward)
     assert min(s.conditioning for s in solutions) < 0.05        # it went through
     assert any(s.damped for s in solutions)
     speeds = np.abs(np.diff(path, axis=0)) / PARAMS.period
@@ -213,7 +225,7 @@ def test_wrist_singularity_is_crossed_without_stopping(arm, feedforward):
     assert min(moving[1:]) > 1e-3
     # Position stays exact (priority), orientation error bounded, and reported.
     assert max(s.error_translation for s in solutions) < 1e-3
-    assert max(s.error_rotation for s in solutions) < math.radians(8)
+    assert max(s.error_rotation for s in solutions) < math.radians(error_bound_deg)
     final = sv.pose_error(target_at(3.0), sv.tool_pose(arm, path[-1]))
     assert np.linalg.norm(final[0]) < 1e-4 and np.linalg.norm(final[1]) < math.radians(0.5)
 
@@ -276,6 +288,42 @@ def test_damping_law_is_continuous_and_bounded():
     # Worst joint demand of a unit command along the weakest direction: s / (s^2 + lambda^2).
     gains = [s / (s * s + sv.damping_for(s, PARAMS) ** 2) for s in np.linspace(1e-3, 0.5, 500)]
     assert max(gains) <= 2.0 + 1e-9        # 1/s at the threshold; never more
+    # The orientation level's own maximum: the same threshold, a steeper fall below it.
+    assert PARAMS.orientation_max_damping == 1.0
+    assert sv.damping_for(0.0, PARAMS, PARAMS.orientation_max_damping) == 1.0
+    gains = [s / (s * s + sv.damping_for(s, PARAMS, 1.0) ** 2)
+             for s in np.linspace(1e-3, 0.5, 500)]
+    assert max(gains) <= 2.0 + 1e-9
+    assert 0.3 / (0.09 + sv.damping_for(0.3, PARAMS, 1.0) ** 2) == pytest.approx(0.41, abs=0.01)
+    with pytest.raises(ValueError):
+        sv.SolverParams(0.25, 1.0, orientation_max_damping=0.0)
+
+
+def test_orientation_damping_leaves_the_position_level_as_it_was(arm):
+    rng = np.random.default_rng(11)
+    first = sv.SolverParams(0.25, 1.0, orientation_max_damping=0.5)
+    for _ in range(200):
+        q = _random_posture(rng, arm)
+        a, b = sv.levels(arm, q, first), sv.levels(arm, q, PARAMS)
+        assert a.position == b.position and a.orientation == b.orientation
+        assert a.position_damping == b.position_damping
+        assert b.orientation_damping == pytest.approx(2.0 * a.orientation_damping)
+
+
+def test_near_the_wrist_singularity_joints_4_and_6_turn_less_against_each_other(arm):
+    # A session posture: wrist 0.21 rad from aligned, joints 4 and 6 already apart.
+    q = np.array([-0.24, 0.02, -0.43, -0.40, 0.21, 0.35])
+    start = sv.tool_pose(arm, q)
+    target = _rotation_about(start, (1, 0, 0), math.radians(3))
+    spin = {}
+    for damping in (0.5, 1.0):
+        params = sv.SolverParams(0.25, 1.0, orientation_max_damping=damping)
+        s = sv.solve(arm, q, target, params)
+        turn = np.linalg.norm((sv.tool_jacobian(arm, q) @ s.qdot)[3:])
+        assert s.qdot[3] * s.qdot[5] < 0                    # they turn against each other
+        spin[damping] = (abs(s.qdot[3]) + abs(s.qdot[5])) / turn
+        assert s.error_translation < 1e-9
+    assert spin[1.0] < 0.6 * spin[0.5]                      # 6.4 -> 3.4 rad per tool rad
 
 
 def test_twist_between_inverts_a_constant_motion(arm):

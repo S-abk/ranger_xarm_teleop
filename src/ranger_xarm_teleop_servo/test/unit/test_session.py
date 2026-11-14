@@ -103,6 +103,21 @@ def test_rows():
         'k': 'command', 'stamp': 5_000_000_007, 'names': ['a', 'b'], 'v': [0.5, -1.0]}
     assert session.command_row(NS(header=header(), joint_names=[], velocities=[])) == {
         'k': 'command', 'stamp': 5_000_000_007, 'names': [], 'v': []}
+    assert session.joy_row(NS(header=header(), buttons=[0, 1], axes=[0.5])) == {
+        'k': 'joy', 'stamp': 5_000_000_007, 'buttons': [0, 1], 'axes': [0.5]}
+    hand = NS(pose_present=True, hand_tracked=False, emulated_position=False)
+    assert session.status_row(NS(
+        header=header(), session_id=7, seq=12, xr_time_ms=1.5, client_time_ms=2.5,
+        reset_count=1, left=NS(pose_present=False, hand_tracked=False,
+                               emulated_position=False),
+        right=hand, viewer_present=True, viewer_emulated_position=False, malformed_count=0,
+        ignored_count=3, source='relay')) == {
+        'k': 'status', 'stamp': 5_000_000_007, 'session_id': 7, 'seq': 12,
+        'xr_time_ms': 1.5, 'client_time_ms': 2.5, 'reset_count': 1,
+        'left': {'pose_present': False, 'hand_tracked': False, 'emulated_position': False},
+        'right': {'pose_present': True, 'hand_tracked': False, 'emulated_position': False},
+        'viewer_present': True, 'viewer_emulated_position': False, 'malformed_count': 0,
+        'ignored_count': 3}
     assert session.servo_row(NS(code=2, message='stop')) == {'k': 'servo', 'code': 2,
                                                              'msg': 'stop'}
     assert session.owner_row(NS(owner=2, status=0, detail='')) == {

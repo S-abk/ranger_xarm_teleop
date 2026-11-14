@@ -34,7 +34,7 @@ import numpy as np
 from .gate import Env, Frame, GateState, on_frame, Output, tick
 from .params import GateParams
 from .rotations import Pose, pose_from_matrix, pose_to_matrix
-from .solver import Arm, Solution, solve, SolverParams, tool_pose
+from .solver import Arm, levels, Solution, solve, SolverParams, tool_pose
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,9 @@ def run(frames: Iterable[Frame], gate_params: GateParams, arm: Arm, solver_param
         measured = history[max(0, len(history) - 1 - delay_ticks)]
         tool = pose_from_matrix(tool_pose(arm, measured))
         env = Env(now=now, owner_is_teleop=True, tool_pose=tool, tool_pose_age=0.0,
-                  servo_active=wanted_for >= 1)
+                  servo_active=wanted_for >= 1,
+                  arming_conditioning=(levels(arm, measured, solver_params).orientation
+                                       if state.arm_pending else math.inf))
         engaged_before = state.engaged
         state, output = tick(state, env, gate_params)
         wanted_for = wanted_for + 1 if output.want_servo_active else 0

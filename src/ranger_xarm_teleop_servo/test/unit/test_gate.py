@@ -428,6 +428,63 @@ def test_arm_button_toggles_on_the_press_edge_only():
     assert seen == [False, False, False, False, True, True, True, True, False]
 
 
+def _press_arm(p):
+    """Return the state after a press of the arm button (one frame up, one down)."""
+    state = on_frame(GateState(), frame(0, grip=False, arm=False), p)
+    return on_frame(state, frame(1, grip=False, arm=True), p)
+
+
+def _arm_tick(state, p, conditioning):
+    return tick(state, Env(0.03, True, TOOL_START, 0.0, True,
+                           arming_conditioning=conditioning), p)
+
+
+def test_arming_is_refused_near_the_wrist_singularity():
+    p = params()
+    assert p.min_arming_conditioning == 0.2
+    state = _press_arm(p)
+    assert state.want_armed and state.arm_pending
+    state, output = _arm_tick(state, p, 0.05)
+    assert not state.want_armed and not state.arm_pending
+    assert output.hold == Hold.NOT_ARMED
+    refused = [e for e in output.events if e.startswith('arm refused')]
+    assert refused and '0.05' in refused[0] and 'ready posture' in refused[0]
+    # Pressing again from a posture with room arms.
+    state = on_frame(state, frame(2, grip=False, arm=False), p)
+    state = on_frame(state, frame(3, grip=False, arm=True), p)
+    state, output = _arm_tick(state, p, 1.09)
+    assert state.want_armed and not state.arm_pending
+    assert not any(e.startswith('arm refused') for e in output.events)
+
+
+def test_arming_with_the_posture_unknown_is_refused_and_zero_turns_the_check_off():
+    p = params()
+    state, output = _arm_tick(_press_arm(p), p, math.nan)
+    assert not state.want_armed
+    assert any('posture is unknown' in e for e in output.events)
+    off = params(min_arming_conditioning=0.0)
+    state, _ = _arm_tick(_press_arm(off), off, 0.0)
+    assert state.want_armed
+
+
+def test_only_the_arm_request_is_checked_not_the_armed_arm():
+    p = params()
+    state, _ = _arm_tick(_press_arm(p), p, 1.0)
+    assert state.want_armed
+    # Armed, the arm goes through the singularity: no disarm.
+    for k in range(2, 6):
+        state = on_frame(state, frame(k, grip=False, arm=False), p)
+        state, _ = _arm_tick(state, p, 0.0)
+    assert state.want_armed
+
+
+def test_arming_threshold_must_not_be_negative():
+    with pytest.raises(ValueError):
+        params(min_arming_conditioning=-0.1)
+    with pytest.raises(ValueError):
+        params(min_arming_conditioning=math.nan)
+
+
 def test_disarming_while_engaged_releases_and_latches():
     frames = [frame(k, arm=90 <= k < 100 or 150 <= k < 160) for k in range(240)]
     steps = run(frames, state=ready_state())

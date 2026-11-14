@@ -36,7 +36,7 @@ from ranger_xarm_teleop_servo.rotations import (pose_from_matrix, q_between, v_n
                                                 v_sub)
 import rclpy
 
-from stack_helpers import (child_environment, Probe, Process, READY,
+from stack_helpers import (child_environment, Probe, Process, READY, replay,
                            replay_with_clean_input)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -435,6 +435,36 @@ def test_reaching_past_full_reach_comes_to_rest_and_comes_back_at_once(stack):
           f'tool 2 mm back {back[0] - t1 if back else float("nan"):.2f} s after it turned')
     assert back and back[0] - t1 < 1.2
     probe.disarm()
+
+
+SPAWN = [0.0] * 6     # a simulator's spawn pose: the wrist aligned
+
+
+def test_arming_is_refused_at_the_spawn_pose(stack):
+    """Session 2 started here: arming is refused until the arm is moved to ready."""
+    probe, env, logs, launch = stack
+    probe.disarm()
+    probe.move_to(SPAWN)                    # straight to the controller: test only
+    try:
+        for attempt in range(3):
+            asked = launch.output().count('arm requested')
+            start = time.monotonic()
+            process = replay(env, 'clutch_line', str(logs / f'replay_spawn.log.{attempt}'))
+            try:
+                assert process.wait(90.0) == 0, process.output()
+            finally:
+                process.stop()
+            time.sleep(1.0)
+            if launch.output().count('arm requested') > asked:
+                break               # the arm button reached the node (else: discovery, again)
+        output = launch.output()
+        assert output.count('arm requested') > asked
+        assert 'arm refused: orientation conditioning 0.00' in output
+        states = probe.timed_states_since(start)
+        assert states and not any(s.clutch_engaged for _, s in states)
+        assert probe.owner_value() == ArmOwner.OWNER_MOVEIT
+    finally:
+        probe.move_to(READY)
 
 
 def test_log_has_no_errors(stack):

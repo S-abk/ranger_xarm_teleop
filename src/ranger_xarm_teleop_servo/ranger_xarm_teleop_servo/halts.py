@@ -27,6 +27,11 @@ recorder's monotonic clock, ``k`` the kind):
 
 The singularity measure is not published by MoveIt Servo; it is computed here from the
 recorded joint angles with ``kinematics.condition_number`` (the same definition).
+
+Clutch releases are listed by hold reason as well: with the joint-space solver MoveIt Servo
+runs in joint-jog mode and its singularity rule never acts, so a session can release
+often without a single Servo halt. The singularity figures are then labelled as the old
+rule's.
 """
 
 from bisect import bisect_right
@@ -265,6 +270,28 @@ def _solver_summary(states: _Series) -> Dict[str, Any]:
     return {'share_damped': damped, 'conditioning_min': lowest}
 
 
+def _releases(states: _Series, servo: _Series) -> List[Dict[str, Any]]:
+    """
+    Return every clutch release: the hold reason of the first state row not engaged.
+
+    A SERVO_HALTED release while MoveIt Servo reports collision deceleration (not a halt
+    code) is the teleop node's own release of an arm stuck near a collision.
+    """
+    out = []
+    rows = states.rows
+    start = rows[0]['t'] if rows else 0.0
+    for before, row in zip(rows, rows[1:]):
+        if not before.get('engaged') or row.get('engaged'):
+            continue
+        reason = HOLD_REASON.get(row.get('hold'), str(row.get('hold')))
+        code = row.get('servo', -1)
+        if row.get('hold') == HOLD_SERVO_HALTED and code == 4:
+            reason += ' (stuck near a collision)'
+        out.append({'t': row['t'] - start, 'reason': reason,
+                    'servo_status': SERVO_STATUS.get(code, str(code))})
+    return out
+
+
 def _percentile(values: np.ndarray, weights: np.ndarray, fraction: float) -> float:
     order = np.argsort(values)
     cumulative = np.cumsum(weights[order])
@@ -292,8 +319,13 @@ def analyze(records: Sequence[Dict[str, Any]], urdf: Optional[str] = None,
         counts[key] = counts.get(key, 0) + 1
     values, weights, codes = _engaged_measure(chain, states, joints, servo)
     total = float(weights.sum()) if len(weights) else 0.0
+    releases = _releases(states, servo)
+    by_release: Dict[str, int] = {}
+    for release in releases:
+        by_release[release['reason']] = by_release.get(release['reason'], 0) + 1
     summary: Dict[str, Any] = {
         'halts': len(halts), 'by_reason': counts, 'engaged_s': total,
+        'releases': len(releases), 'releases_by_reason': by_release,
         'thresholds': {'lower': lower, 'hard_stop': hard_stop}, **_solver_summary(states)}
     if total > 0.0:
         summary['condition_number'] = {
@@ -308,7 +340,8 @@ def analyze(records: Sequence[Dict[str, Any]], urdf: Optional[str] = None,
         # Servo's scale reaches zero at the hard stop, so an arm driven steadily into a
         # singularity comes to rest just below it without any halt being reported.
         summary['stalled_s'] = float(weights[values >= 0.97 * hard_stop].sum())
-    return {'halts': halts, 'summary': summary, 'joint_names': chain.joint_names}
+    return {'halts': halts, 'releases': releases, 'summary': summary,
+            'joint_names': chain.joint_names}
 
 
 def _number(value: Optional[float], spec: str = '.1f') -> str:
@@ -368,20 +401,35 @@ def format_report(result: Dict[str, Any]) -> str:
     lines.append(f"halts: {summary['halts']}   engaged time: {summary['engaged_s']:.1f} s")
     for reason, count in sorted(summary['by_reason'].items()):
         lines.append(f'  {count:3d}  {reason}')
-    if 'share_damped' in summary:
+    if 'releases' in summary:
+        lines.append(f"clutch releases: {summary['releases']}")
+        for reason, count in sorted(summary['releases_by_reason'].items(),
+                                    key=lambda item: (-item[1], item[0])):
+            lines.append(f'  {count:3d}  {reason}')
+    solver = 'share_damped' in summary
+    if solver:
         lines.append(f"solver: damped {summary['share_damped'] * 100:.1f} % of the engaged time, "
                      f"minimum conditioning {summary['conditioning_min']:.3f} "
                      '(normalised: 1 and above unrestricted, 0 singular)')
     measure = summary.get('condition_number')
     if measure:
+        # With the joint-space solver MoveIt Servo runs in joint-jog mode and never applies
+        # its singularity rule: these lines then only say what that rule would have done.
+        old = 'old rule (not applied in joint-jog mode), ' if solver else ''
         lines.append(
-            'condition number over engaged time: '
+            f'{old}condition number over engaged time: '
             f"min {measure['min']:.1f}  median {measure['p50']:.1f}  90 % {measure['p90']:.1f}  "
             f"95 % {measure['p95']:.1f}  99 % {measure['p99']:.1f}  max {measure['max']:.1f}")
-        lines.append('share of engaged time at or above: ' + '  '.join(
+        lines.append(f'{old}share of engaged time at or above: ' + '  '.join(
             f'{level}: {share * 100:.1f} %' for level, share in summary['share_above'].items()))
-        lines.append('share of engaged time Servo reported decelerating: '
-                     f"{summary['share_decelerating'] * 100:.1f} %")
-        lines.append('engaged time within 3 % of the hard stop or beyond (arm held back to '
-                     f"a standstill): {summary['stalled_s']:.1f} s")
+        lines.append('share of engaged time Servo reported decelerating'
+                     + (' (collision only in joint-jog mode): ' if solver else ': ')
+                     + f"{summary['share_decelerating'] * 100:.1f} %")
+        if solver:
+            lines.append('old rule: engaged time within 3 % of its hard stop or beyond (where '
+                         'it would have slowed the arm to a standstill): '
+                         f"{summary['stalled_s']:.1f} s")
+        else:
+            lines.append('engaged time within 3 % of the hard stop or beyond (arm held back to '
+                         f"a standstill): {summary['stalled_s']:.1f} s")
     return '\n'.join(lines)

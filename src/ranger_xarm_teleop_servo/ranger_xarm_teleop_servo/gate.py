@@ -141,6 +141,9 @@ class Env:
     # The solver can run: kinematic chain and joint state known, and the commanded state
     # agrees with the measured one.
     solver_ready: bool = True
+    # Orientation conditioning of the solver at the measured joints (NaN: unknown). Read
+    # only when an arm request waits for it; the default leaves arming unchecked.
+    arming_conditioning: float = math.inf
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,7 @@ class GateState:
     """Everything the gate remembers between calls."""
 
     want_armed: bool = False
+    arm_pending: bool = False         # armed by the button, the posture not yet checked
     calibration: Optional[Calibration] = None
     frame: Optional[Frame] = None
     # Buttons of the newest frame that had a controller: (grip, calibrate, arm). An
@@ -275,6 +279,7 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
     prev = state.frame
     trip = state.trip
     want_armed = state.want_armed
+    arm_pending = state.arm_pending
     calibration = state.calibration
     if prev is not None:
         tripped, text = _between_frames(prev, frame, params)
@@ -303,6 +308,7 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
         if buttons is not None:
             if frame.arm and not buttons[2]:
                 want_armed = not want_armed
+                arm_pending = want_armed
                 events.append('arm requested' if want_armed else 'disarm requested')
             if frame.calibrate and not buttons[1]:
                 result, text = _try_calibrate(state, frame, params)
@@ -311,7 +317,7 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
                     calibration = result
         buttons = (frame.grip, frame.calibrate, frame.arm)
     return replace(state, frame=frame, buttons=buttons, trip=trip, want_armed=want_armed,
-                   calibration=calibration, events=tuple(events))
+                   arm_pending=arm_pending, calibration=calibration, events=tuple(events))
 
 
 def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Hold:
@@ -475,10 +481,35 @@ def _released(state: GateState, latched: Hold) -> GateState:
                    events=())
 
 
+def _check_arming(state: GateState, env: Env, params: GateParams,
+                  events: list) -> GateState:
+    """
+    Keep or refuse a pending arm request by the posture the arm is in.
+
+    Near the wrist singularity the solver damps orientation and the wrist joints can take
+    a branch the operator did not mean; teleop starts from a posture with room to move.
+    Only the request is checked: once armed, the arm may go anywhere.
+    """
+    if not state.arm_pending:
+        return state
+    measure = env.arming_conditioning
+    if params.min_arming_conditioning <= 0.0 or measure >= params.min_arming_conditioning:
+        # The check is off, or the posture has room (NaN, unknown, fails the comparison).
+        return replace(state, arm_pending=False)
+    if math.isnan(measure):
+        why = 'the posture is unknown (no joint state or kinematic chain yet)'
+    else:
+        why = (f'orientation conditioning {measure:.2f} is below '
+               f'{params.min_arming_conditioning:.2f} (the wrist is near alignment)')
+    events.append(f'arm refused: {why}; move the arm to the ready posture first')
+    return replace(state, want_armed=False, arm_pending=False)
+
+
 def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Output]:
     """Run one target cycle; return the new state and what to publish."""
-    frame = state.frame
     events = list(state.events)
+    state = _check_arming(state, env, params, events)
+    frame = state.frame
     age = env.now - frame.arrival if frame is not None else math.inf
     seq = frame.seq if frame is not None else 0
     grip = frame is not None and frame.grip

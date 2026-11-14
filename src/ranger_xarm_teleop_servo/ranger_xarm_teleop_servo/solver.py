@@ -38,11 +38,15 @@ One call of ``solve`` turns the tool target of a cycle into the joint velocity c
    speed cap (normalised length 1): more would be scaled away anyway, and an oversized
    demand there flips the damped solution from one cycle to the next.
 4. **Damping law,** per level, from that level's smallest singular value ``s``:
-   ``lambda^2 = max_damping^2 (1 - (s / threshold)^2)`` for ``s < threshold``, else 0.
-   With ``max_damping = 0.5`` a command of one speed cap along the weakest direction asks
-   for at most ``1 / damping_threshold`` = 2 joint velocity limits (at the threshold, where
-   damping starts; below it ``s / (s^2 + lambda^2)`` is smaller), before the one scale
-   factor below.
+   ``lambda^2 = lambda_max^2 (1 - (s / threshold)^2)`` for ``s < threshold``, else 0, with
+   ``lambda_max`` = ``max_damping`` for the position level and ``orientation_max_damping``
+   for the orientation level. A command of one speed cap along the weakest direction asks
+   for ``s / (s^2 + lambda^2)`` joint velocity limits: at most ``1 / damping_threshold`` = 2
+   at the threshold, where damping starts, before the one scale factor below. Below the
+   threshold a larger ``lambda_max`` makes it fall faster. Near the wrist singularity,
+   where joints 4 and 6 nearly share an axis, that is what keeps them from turning fast
+   against each other for a small tool rotation (at ``s`` = 0.3 the orientation level asks
+   for 0.41 limits with ``lambda_max`` 1.0, 1.2 with 0.5).
 5. **Joint position limits.** A joint may move toward a limit at most
    ``(distance - margin) / tau`` (a velocity damper), ``tau`` chosen so the bound reaches
    the joint velocity limit at ``limit_zone`` from the limit. A joint that would exceed its
@@ -84,14 +88,16 @@ class SolverParams:
     # gain*period <= 1/4 (d = 1), 4/27 (d = 2), 27/256 (d = 3): 5 /s stays below all three.
     gain: float = 5.0
     damping_threshold: float = 0.5      # normalised singular value below which damping starts
-    max_damping: float = 0.5            # normalised damping at a singularity
+    max_damping: float = 0.5            # normalised damping at a singularity, position level
+    orientation_max_damping: float = 1.0    # the same for the orientation level
     limit_margin: float = 0.15          # rad: no motion toward a position limit closer than this
     limit_zone: float = 0.35            # rad: the damper starts slowing a joint from here
     velocity_fraction: float = 0.95     # share of each joint velocity limit that is used
 
     def __post_init__(self) -> None:
         for name in ('linear_speed_cap', 'angular_speed_cap', 'period', 'gain',
-                     'damping_threshold', 'max_damping', 'limit_margin'):
+                     'damping_threshold', 'max_damping', 'orientation_max_damping',
+                     'limit_margin'):
             value = getattr(self, name)
             if not (isinstance(value, (int, float)) and math.isfinite(value) and value > 0.0):
                 raise ValueError(f'{name}: expected a finite positive number, got {value!r}')
@@ -171,12 +177,18 @@ def pose_error(target: np.ndarray, current: np.ndarray) -> Tuple[np.ndarray, np.
     return dp, np.array(q_to_rotvec(turn))
 
 
-def damping_for(sigma: float, params: SolverParams) -> float:
-    """Return the damping ``lambda`` for a level whose smallest singular value is ``sigma``."""
+def damping_for(sigma: float, params: SolverParams,
+                maximum: Optional[float] = None) -> float:
+    """
+    Return the damping ``lambda`` for a level whose smallest singular value is ``sigma``.
+
+    ``maximum`` is the level's damping at a singularity (``params.max_damping`` if None).
+    """
     if sigma >= params.damping_threshold:
         return 0.0
     ratio = max(0.0, sigma) / params.damping_threshold
-    return params.max_damping * math.sqrt(1.0 - ratio * ratio)
+    top = params.max_damping if maximum is None else maximum
+    return top * math.sqrt(1.0 - ratio * ratio)
 
 
 def _damped_pinv(a: np.ndarray, lam: float) -> Tuple[np.ndarray, float]:
@@ -232,7 +244,7 @@ def _priority(jn: np.ndarray, yn: np.ndarray, params: SolverParams):
     projector = np.eye(cols) - jp_inv @ jp
     jop = jo @ projector
     so = _smallest_rank(jop, 3)
-    lam_o = damping_for(so, params)
+    lam_o = damping_for(so, params, params.orientation_max_damping)
     jop_inv, _ = _damped_pinv(jop, lam_o)
     fade = 1.0 - (lam_p / params.max_damping) ** 2
     z = zp + fade * (projector @ (jop_inv @ (yn[3:] - jo @ zp)))

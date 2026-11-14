@@ -23,9 +23,12 @@ asked to, and the mux grants ownership as soon as arming is requested. Time is a
 monotonic clock, so the test is deterministic.
 """
 
+from dataclasses import replace
 import math
 import os
 import sys
+import threading
+import time
 
 from geometry_msgs.msg import TransformStamped
 from moveit_msgs.msg import ServoStatus
@@ -43,6 +46,7 @@ from ranger_xarm_teleop_servo.rotations import (compose, inverse, Pose, pose_fro
 from ranger_xarm_teleop_servo.teleop_node import (pose_of, stamp_key, StartupRefused,
                                                   TeleopNode)
 import rclpy
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
@@ -102,6 +106,7 @@ class Harness:
         # The arm: Servo's commanded state, followed exactly by the measured joints.
         self.q = np.array(READY, dtype=float)
         self.output_on = True           # Servo publishes its output
+        self.servo_scale = 1.0          # Servo's collision scale on every joint command
         self.arm_follows = True         # the measured joints follow Servo's output
         self.measured_q = self.q.copy()
         self.pending_output = None
@@ -175,7 +180,7 @@ class Harness:
             assert list(command.joint_names) == JOINTS
             # Servo publishes every window point but the newest: the state before this step.
             self.pending_output = self.q.copy()
-            self.q = self.q + np.array(command.velocities) * 0.02
+            self.q = self.q + np.array(command.velocities) * 0.02 * self.servo_scale
         if self.arm_follows:
             self.measured_q = self.q.copy()
         if self.node.arm is not None and self.node.tool_to_tip is not None:
@@ -342,11 +347,22 @@ def test_tool_frame_offset_from_the_tip_rotates_about_the_tool_point(harness):
     assert max(tips) > 0.05                 # the tip did move, around the tool point
 
 
-def test_tool_frame_without_a_static_transform_to_the_tip_never_moves(ros):
+@pytest.mark.parametrize('arming_check', [True, False])
+def test_tool_frame_without_a_static_transform_to_the_tip_never_moves(ros, arming_check):
+    """
+    No tool pose and no solver chain: nothing moves.
+
+    With the arming check on, arming itself is refused (the posture cannot be judged);
+    with it off (``min_arming_conditioning`` 0), the arm is armed and the target held for
+    the stale tool pose.
+    """
     h = Harness(ros)
     h.close()
     stuck = Harness.__new__(Harness)
-    Harness.__init__(stuck, ros, tool_frame='xarm_link_tcp')
+    extra = {} if arming_check else {'min_arming_conditioning': 0.0}
+    Harness.__init__(stuck, ros, tool_frame='xarm_link_tcp', **extra)
+    log = _Log()
+    stuck.node.get_logger = lambda: log
     try:
         stuck.node.tool_to_tip = None
         stuck.node.tool_frame = 'frame_on_a_moving_joint'
@@ -356,7 +372,9 @@ def test_tool_frame_without_a_static_transform_to_the_tip_never_moves(ros):
                                      TeleopState.HOLD_TOOL_POSE_STALE,
                                      TeleopState.HOLD_CLUTCH_RELEASED,
                                      TeleopState.HOLD_INPUT_STALE) for s in stuck.states)
-        assert any(s.hold_reason == TeleopState.HOLD_TOOL_POSE_STALE for s in stuck.states)
+        refused = any('arm refused: the posture is unknown' in text for _, text in log.lines)
+        stale = any(s.hold_reason == TeleopState.HOLD_TOOL_POSE_STALE for s in stuck.states)
+        assert (refused, stale) == ((True, False) if arming_check else (False, True))
     finally:
         stuck.close()
 
@@ -837,3 +855,220 @@ def test_a_servo_output_that_is_not_finite_stops_the_solver(ros):
         assert not any(s.clutch_engaged for s in h.states[first:])
     finally:
         h.close()
+
+
+# ---- session 2: start posture, stuck near a collision, input diagnostics ----
+
+class _Log:
+    """Collects what the node logs (level, text)."""
+
+    def __init__(self):
+        self.lines = []
+
+    def __getattr__(self, level):
+        return lambda text, **_: self.lines.append((level, str(text)))
+
+
+def test_arming_is_refused_from_a_posture_near_the_wrist_singularity(harness):
+    h = harness()
+    log = _Log()
+    h.node.get_logger = lambda: log
+    h.q = np.array([0.0, -0.6, -0.7, 0.0, -0.3, 0.0])        # wrist aligned (true singularity)
+    h.measured_q = h.q.copy()
+    h.play('clutch_line')
+    assert not h.targets and not h.node.state.want_armed
+    assert not any(s.clutch_engaged for s in h.states)
+    refused = [text for _, text in log.lines if text.startswith('arm refused')]
+    assert refused and 'ready posture' in refused[0]
+
+
+def test_arming_from_the_ready_posture_is_accepted(harness):
+    h = harness()
+    h.play('clutch_line')
+    assert h.targets and h.node.state.want_armed
+
+
+def test_arm_stuck_near_a_collision_releases_as_a_servo_halt(ros):
+    """Servo decelerates for a collision and scales every command to 0.001: release."""
+    def trap(node):
+        status(node, ServoStatus.DECELERATE_FOR_COLLISION)
+        h.servo_scale = 0.001
+    h = _Midway(ros, 1.6, trap)
+    log = _Log()
+    h.node.get_logger = lambda: log
+    try:
+        h.play('clutch_line')
+        index = next(i for i, s in enumerate(h.states)
+                     if s.hold_reason == TeleopState.HOLD_SERVO_HALTED)
+        state = h.states[index]
+        assert state.servo_status == ServoStatus.DECELERATE_FOR_COLLISION
+        assert not state.clutch_engaged
+        # One state per 20 ms cycle: released 0.5 s after the trap, plus a cycle or two.
+        assert 0.5 <= index * 0.02 - 1.6 <= 0.6
+        commands = {stamp_key(c.header.stamp): c for c in h.commands}
+        assert list(commands[stamp_key(state.header.stamp)].velocities) == [0.0] * 6
+        assert any(text.startswith('stuck near a collision') for _, text in log.lines)
+    finally:
+        h.close()
+
+
+class _Solution:
+    """What ``stuck_check`` reads of a solver solution."""
+
+    def __init__(self, linear, angular=0.0):
+        self.linear_speed, self.angular_speed = linear, angular
+
+
+def _decelerating_engaged(node):
+    node.state = replace(node.state, engaged=True)
+    node.output_confirmed, node.confirmed_at = True, 0.0
+    node.servo_status, node.servo_status_at = ServoStatus.DECELERATE_FOR_COLLISION, 1.0
+
+
+@pytest.mark.parametrize('speed, step, stuck', [
+    (0.20, 0.0, True),          # the session 2 trap: 100 mm commanded, nothing moves
+    (0.026, 0.00002, False),    # at rest near the body: 13 mm commanded, 0.5 mm done
+    (0.20, 0.0001, False),      # slowed to 5 %: 5 mm done in the window
+])
+def test_stuck_needs_much_commanded_and_almost_nothing_done(harness, speed, step, stuck):
+    h = harness()
+    node = h.node
+    h.tick(0.0)
+    _decelerating_engaged(node)
+    node.solution = _Solution(speed)
+    tool = h.tool
+    results = []
+    for k in range(1, 40):                      # 0.78 s at 50 Hz
+        moved = Pose((tool.p[0] - step * k, tool.p[1], tool.p[2]), tool.q)
+        results.append(node.stuck_check(1.0 + k * 0.02, moved))
+    assert any(results) == stuck
+    if stuck:
+        first = results.index(True)
+        assert 0.5 <= (first + 1) * 0.02 <= 0.54
+
+
+class _Schedule(Harness):
+    """A harness that applies changes to the node at given times."""
+
+    def __init__(self, bridge, changes, **params):
+        super().__init__(bridge, **params)
+        self.changes = sorted(changes, key=lambda change: change[0])
+
+    def tick(self, now):
+        while self.changes and now >= self.changes[0][0]:
+            self.changes.pop(0)[1](self.node)
+        super().tick(now)
+
+
+def test_stuck_flag_is_cleared_when_the_clutch_releases(ros):
+    """A stuck release, then the arm free again: the next engagement runs to its end."""
+    def trap(node):
+        status(node, ServoStatus.DECELERATE_FOR_COLLISION)
+        h.servo_scale = 0.001
+
+    def free(node):
+        status(node, ServoStatus.NO_WARNING)
+        h.servo_scale = 1.0
+    # clutch_reengage: grip 1.2-2.7 s and 3.5-5.0 s.
+    h = _Schedule(ros, [(1.6, trap), (3.0, free)])
+    try:
+        h.play('clutch_reengage')
+        halted = [i for i, s in enumerate(h.states)
+                  if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
+        assert halted and halted[0] * 0.02 < 2.7
+        second = [i * 0.02 for i, s in enumerate(h.states) if s.clutch_engaged and i * 0.02 > 3.0]
+        assert second and second[0] < 3.7 and second[-1] > 4.9   # engaged until the grip opens
+        assert not h.node.stuck_near_collision
+    finally:
+        h.close()
+
+
+def test_arm_slowed_near_a_collision_but_still_moving_is_not_stuck(ros):
+    def slowed(node):
+        status(node, ServoStatus.DECELERATE_FOR_COLLISION)
+        h.servo_scale = 0.3
+    h = _Midway(ros, 1.6, slowed)
+    try:
+        h.play('clutch_line')
+        assert not any(s.hold_reason == TeleopState.HOLD_SERVO_HALTED for s in h.states)
+        assert not h.node.stuck_near_collision
+    finally:
+        h.close()
+
+
+def test_a_frame_that_lacks_its_joy_is_logged_with_the_input_pause(harness):
+    h = harness()
+    log = _Log()
+    h.node.get_logger = lambda: log
+    h.play('clutch_line', drop=lambda parsed: ('joy',) if 180 <= parsed.seq < 185 else ())
+    lines = [text for level, text in log.lines if 'incomplete' in text]
+    assert len(lines) == 1                                  # once per run of such frames
+    assert 'frame seq 180 incomplete: no joy message (buttons unknown)' in lines[0]
+    assert 'longest pause between input callbacks' in lines[0]
+
+
+def test_slow_and_late_cycles_are_counted_once_a_minute():
+    counter = teleop_node.CycleCounter()
+    counter.started(0.0, 0.02)
+    counter.slow(0.013, 'target and joint command 12 ms', 'solve 0.4 ms')
+    counter.started(1.0, 0.05)
+    assert counter.report(30.0) == ''
+    text = counter.report(61.0)
+    assert text.startswith('last 61 s: 1 slow cycles')
+    assert 'longest 13 ms, target and joint command 12 ms (solve 0.4 ms)' in text
+    assert '1 cycles started over 30 ms after the previous one (longest 50 ms)' in text
+    assert counter.report(200.0) == ''                      # nothing counted since
+
+
+def test_frames_keep_their_buttons_through_a_30_ms_executor_stall(ros):
+    """
+    90 Hz frames over real topics while the node's executor stops for 30 ms every 100 ms.
+
+    With the joy subscription kept at depth 1 a stall longer than one frame period lost a
+    frame's buttons and the frame counted as having no controller (session 2: POSE_ABSENT).
+    """
+    values = {**LIMITS, 'motion_enabled': True}
+    node = TeleopNode(node_name='teleop_stall_test', parameter_overrides=overrides(values))
+    built = []
+    build = node.build_frame
+
+    def record(status, arrival):
+        frame = build(status, arrival)
+        built.append(frame)
+        return frame
+    node.build_frame = record
+    stalls = []
+
+    def stall():
+        stalls.append(time.monotonic())
+        time.sleep(0.03)
+    node.create_timer(0.1, stall)
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    spinner = threading.Thread(target=executor.spin, daemon=True)
+    spinner.start()
+    try:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not all(
+                pub.get_subscription_count() > 0
+                for pub in (ros.pose_pubs['right'], ros.head_pub, ros.joy_pub, ros.status_pub)):
+            time.sleep(0.05)
+        records = read_records(os.path.join(FIXTURES, 'clutch_line.jsonl'))
+        frames = [parse_text(r.text()) for r in records]
+        frames = [f for f in frames if isinstance(f, ParsedFrame)][:180]
+        start = time.monotonic()
+        for k, parsed in enumerate(frames):
+            delay = start + k / 90.0 - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            stamp = rclpy.time.Time(nanoseconds=int(1e9 + parsed.seq * 1e7)).to_msg()
+            ros.publish_frame(ros.build_messages(parsed, stamp))
+        time.sleep(0.3)
+    finally:
+        executor.shutdown()
+        spinner.join(timeout=2.0)
+        node.close()
+        node.destroy_node()
+    assert len(stalls) >= 15                                # the executor did stop, often
+    assert len(built) >= 170                                # loopback: next to nothing lost
+    assert not [f.seq for f in built if not f.controller_present]
