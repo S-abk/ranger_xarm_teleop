@@ -67,9 +67,11 @@ tell a false alarm (box padding) from a real violation and to measure inflation 
 a model clearance above FCL's distance by more than the tolerance is a violation whatever the
 padding does (penetrating pairs, where both report contact, are not compared).
 (2) The inflation sweep: for a random subsample of (posture, pair) cases with ``d`` in
-[0, 0.06] m the smallest bucket at which MoveIt reports the pair in contact, which is an upper
-bound of MoveIt's clearance (a contact at p means distance <= p), so ``d_moveit - d_model``
-overstates the model's inflation by at most the box conservatism.
+[0, 0.06] m the smallest bucket at which MoveIt reports the pair in contact. For pairs of
+meshes this is an upper bound of the true distance (a contact at p means distance <= p); for
+pairs involving a box it can fall BELOW the true distance (padded boxes touch early), so for
+inflation FCL's exact distance minus the model's clearance is the figure to use; the contact
+figures are given for both shape classes.
 """
 
 import argparse
@@ -540,7 +542,7 @@ def run(args, model, chain, urdf, reference_text, joints, extra, helpers, pool, 
             by_class[shape_class(i)][field] += 1
     # Independent of padding: the model above FCL's exact distance by more than the tolerance.
     above = []
-    worst = 0.0
+    worst = -math.inf
     for p, i, d in cases:
         if keys[i] in allowed or d <= 0.0:
             continue                          # both report contact when penetrating
@@ -551,7 +553,7 @@ def run(args, model, chain, urdf, reference_text, joints, extra, helpers, pool, 
                           'd_model': d, 'fcl_distance': exact(p, i)})
 
     inflation = sweep(args, model, pool, postures, cases, keys, allowed, kinds, pairs, exact,
-                      rng)
+                      rng, shape_class)
 
     by_source = {}
     for s in sources:
@@ -585,7 +587,7 @@ def run(args, model, chain, urdf, reference_text, joints, extra, helpers, pool, 
         'fcl_cross_check': {'cases_compared': sum(1 for p, i, d in cases
                                                   if keys[i] not in allowed and d > 0.0),
                             'model_above_fcl_by_more_than_tol': len(above),
-                            'largest_model_minus_fcl_m': worst,
+                            'largest_model_minus_fcl_m': None if worst == -math.inf else worst,
                             'above_summary': above_summary(above), 'list': above[:2000]},
         'inflation': inflation,
         'wall_time_s': time.time() - started,
@@ -604,7 +606,8 @@ def above_summary(above) -> dict:
             'by_pair': dict(sorted(by_pair.items(), key=lambda kv: -kv[1]))}
 
 
-def sweep(args, model, pool, postures, cases, keys, allowed, kinds, pairs, exact, rng) -> dict:
+def sweep(args, model, pool, postures, cases, keys, allowed, kinds, pairs, exact, rng,
+          shape_class) -> dict:
     """Bisect-free inflation estimate: the first padding bucket at which MoveIt sees contact."""
     pick = [c for c in cases if 0.0 <= c[2] <= 0.06 and keys[c[1]] not in allowed]
     if len(pick) > args.inflation:
@@ -634,7 +637,8 @@ def sweep(args, model, pool, postures, cases, keys, allowed, kinds, pairs, exact
     rows = []
     for p, i, d in pick:
         k = first.get((p, i))
-        rows.append({'pair': list(pairs[i]), 'kind': kinds[i], 'd_model': d,
+        rows.append({'pair': list(pairs[i]), 'kind': kinds[i], 'shape_class': shape_class(i),
+                     'd_model': d,
                      'd_moveit_upper_bound': None if k is None else k * STEP,
                      'fcl_distance': exact(p, i)})
     groups = {}
@@ -643,12 +647,14 @@ def sweep(args, model, pool, postures, cases, keys, allowed, kinds, pairs, exact
             groups.setdefault('censored', []).append(r)
             continue
         gap = r['d_moveit_upper_bound'] - d
-        for name in ('all', f'{r["kind"]}-pairs', 'moving link ' + r['pair'][0]):
+        for name in ('all', f'{r["kind"]}-pairs', r['shape_class'],
+                     'moving link ' + r['pair'][0]):
             groups.setdefault(name, []).append(gap)
     gap_fcl = {}
     for r in rows:
         if math.isfinite(r['fcl_distance']):
-            for name in ('all', f'{r["kind"]}-pairs', 'moving link ' + r['pair'][0]):
+            for name in ('all', f'{r["kind"]}-pairs', r['shape_class'],
+                         'moving link ' + r['pair'][0]):
                 gap_fcl.setdefault(name, []).append(r['fcl_distance'] - r['d_model'])
     return {
         'cases_sampled': len(pick), 'cases_available': len(
@@ -694,8 +700,9 @@ def format_report(r: dict) -> str:
         f'{v["false_alarms_fcl_distance_above_padding"]}',
         f'    by shape class: {v["by_shape_class"]}',
         f'  FCL cross-check, independent of padding: {r["fcl_cross_check"]["cases_compared"]} '
-        f'cases; model above FCL by more than the tolerance: '
-        f'{r["fcl_cross_check"]["model_above_fcl_by_more_than_tol"]}; largest model - FCL '
+        f'cases (model clearance > 0); model above FCL by more than the tolerance: '
+        f'{r["fcl_cross_check"]["model_above_fcl_by_more_than_tol"]}; model minus FCL, largest '
+        f'(negative: the model is always below FCL by at least that much) '
         f'{mm(r["fcl_cross_check"]["largest_model_minus_fcl_m"])}',
         f'    summary of those: {r["fcl_cross_check"]["above_summary"]}',
         f'  pairs the SRDF allows to collide (never checked by MoveIt, excluded): '
@@ -712,7 +719,8 @@ def format_report(r: dict) -> str:
                  f'model clearance in [0, 0.06] m; no contact by 0.10 m: '
                  f'{inf["censored_no_contact_by_0.10"]}; contact not monotonic in padding: '
                  f'{inf["non_monotonic_in_padding"]}')
-    lines.append('    MoveIt (first contact padding, an upper bound) minus model:')
+    lines.append('    MoveIt first-contact padding minus model (an upper bound of the distance '
+                 'for mesh-only pairs; can be below it for pairs with a box):')
     for name, s in inf['moveit_minus_model_m'].items():
         if s['n']:
             lines.append(f'      {name}: n {s["n"]} median {mm(s["median"])} p90 {mm(s["p90"])} '
