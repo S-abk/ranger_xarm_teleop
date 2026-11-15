@@ -108,6 +108,7 @@ JOINT_PATH_SERVICE = '/teleop/joint_path'
 KEEPOUT_INFO_SERVICE = '/teleop/keepout_info'
 KEEPOUT_SLOW_S = 0.002      # a keep-out step longer than this is reported
 KEEPOUT_FLOOR_SLACK = 1e-4  # m: the clearance falling more below its floor is reported
+TARGET_PERIOD_MS = 20.0     # for the reference-age summary only
 IDLE_CLEARANCE_CYCLES = 5   # the clearance while not engaged is computed this seldom
 
 # Poses and joy are published best effort, depth 1; a little depth here lets the pose, joy
@@ -230,6 +231,11 @@ class CycleCounter:
         self.late_count = 0
         self.latest = 0.0                   # longest interval between cycle starts
         self.keepout = []                   # seconds of each keep-out step
+        self.reference_ages = []            # seconds: MoveIt Servo's output at each solve
+
+    def reference_age(self, age: float) -> None:
+        """Record how old MoveIt Servo's newest output was when the solver used it."""
+        self.reference_ages.append(age)
 
     def keepout_step(self, took: float) -> None:
         """Record one link keep-out step (model evaluation and, if bound, the fix)."""
@@ -258,6 +264,12 @@ class CycleCounter:
             steps = np.array(self.keepout) * 1000.0
             text = (f'link keep-out: {len(steps)} steps, median {np.median(steps):.2f} ms, '
                     f'p99 {np.percentile(steps, 99):.2f} ms, longest {steps.max():.2f} ms. ')
+        if self.reference_ages:
+            ages = np.array(self.reference_ages) * 1000.0
+            text += (f'solver reference (MoveIt Servo output) age: median {np.median(ages):.0f} '
+                     f'ms, p99 {np.percentile(ages, 99):.0f} ms, longest {ages.max():.0f} ms, '
+                     f'{int(np.sum(ages > 2.5 * TARGET_PERIOD_MS))} of {len(ages)} over 2.5 '
+                     'cycles. ')
         if self.slow_count or self.late_count:
             took, slowest, parts = self.slowest
             text += (f'last {now - self.since:.0f} s: {self.slow_count} slow cycles '
@@ -1064,6 +1076,9 @@ class TeleopNode(Node):
             reference = joints
         else:
             reference = self.reference(now)
+            output = self.servo_output
+            if reference is not None and self.output_confirmed and output is not None:
+                self._cycles.reference_age(now - output[0])
         solving = self.mono()
         self._command_steps.append(('reference', solving - started))
         why = ''
