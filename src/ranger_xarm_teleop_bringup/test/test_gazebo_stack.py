@@ -99,9 +99,12 @@ def use_sim_time(probe, node_name):
 
 def test_time_source_of_every_node(stack):
     probe, _, _ = stack
-    for node_name in ('servo_node', 'teleop_servo', 'arm_mux', 'move_group', TELEOP, MOVEIT):
+    # The helper nodes inside the mux and teleop processes have names of their own (the
+    # launch file gives those processes no name remap) and simulation time as well.
+    for node_name in ('servo_node', 'teleop_servo', 'teleop_servo_watcher', 'arm_mux',
+                      'arm_mux_observer', 'arm_mux_client', 'move_group', TELEOP, MOVEIT):
         assert use_sim_time(probe, node_name) is True, node_name
-    # Six new clients were just announced to every node. While endpoints are being
+    # Nine new clients were just announced to every node. While endpoints are being
     # matched a publish call can block for 0.1-0.2 s, which under a held clutch is a
     # (correct) release on stale input; let the discovery settle before the replays.
     time.sleep(3.0)

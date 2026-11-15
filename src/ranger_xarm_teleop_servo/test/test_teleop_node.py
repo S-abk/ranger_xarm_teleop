@@ -65,6 +65,7 @@ LIMITS = {
     'angular_speed_cap_rad_s': 1.0,
     'max_lead_translation_m': 0.05,
     'max_lead_rotation_deg': 12.0,
+    'max_translation_scale': 2.0,
 }
 TIP_IN_TOOL = Pose((0.0, 0.0, -0.10), (0.0, 0.0, 0.0, 1.0))
 TCP_START = pose_from_matrix(dls.tool_pose(
@@ -1072,3 +1073,77 @@ def test_frames_keep_their_buttons_through_a_30_ms_executor_stall(ros):
     assert len(stalls) >= 15                                # the executor did stop, often
     assert len(built) >= 170                                # loopback: next to nothing lost
     assert not [f.seq for f in built if not f.controller_present]
+
+
+# ---- translation scale ----
+
+def test_thumbstick_click_switches_to_coarse_and_the_state_reports_it(harness):
+    """clutch_scale_switch: click at 2.5 s, half way through a 0.12 m stroke at 0.06 m/s."""
+    h = harness(translation_scale_coarse=2.0)
+    log = _Log()
+    h.node.get_logger = lambda: log
+    h.play('clutch_scale_switch')
+    # One state per 20 ms cycle from t = 0.
+    assert all(s.translation_scale == 1.0 for s in h.states[:int(2.5 / 0.02)])
+    assert all(s.translation_scale == 2.0 for s in h.states[int(2.65 / 0.02):])
+    assert ('info', 'translation scale: coarse (2.00)') in log.lines
+    engaged = [s.clutch_engaged for s in h.states]
+    first, last = engaged.index(True), len(engaged) - engaged[::-1].index(True)
+    assert all(engaged[first:last])                         # one engagement, no release
+    positions = [np.array(pose_of(t.pose).p) for t in h.targets]
+    steps = [np.linalg.norm(b - a) for a, b in zip(positions, positions[1:])]
+    assert max(steps) < 0.0045                              # 0.12 m/s x 2 frames at 90 Hz
+    # 0.06 m of hand before the click, 0.06 m after it at twice the scale.
+    travel = np.linalg.norm(positions[-1] - positions[0])
+    assert travel == pytest.approx(0.18, abs=0.005)
+
+
+def test_without_a_coarse_scale_configured_the_click_changes_nothing(harness):
+    h = harness()
+    h.play('clutch_scale_switch')
+    assert all(s.translation_scale == 1.0 for s in h.states)
+    positions = [np.array(pose_of(t.pose).p) for t in h.targets]
+    assert np.linalg.norm(positions[-1] - positions[0]) == pytest.approx(0.12, abs=0.005)
+
+
+def test_a_coarse_scale_above_the_largest_allowed_stops_the_node(ros):
+    with pytest.raises(teleop_node.StartupRefused, match='translation_scale_coarse'):
+        TeleopNode(node_name='teleop_refused',
+                   parameter_overrides=overrides({**LIMITS, 'translation_scale_coarse': 2.5}))
+
+
+def test_re_engaging_while_servo_is_halted_for_a_collision_says_so(ros):
+    """Servo publishes nothing while halted for a collision: the log names the halt."""
+    h = Harness(ros)
+    log = _Log()
+    h.node.get_logger = lambda: log
+    try:
+        h.output_on = False
+        status(h.node, ServoStatus.HALT_FOR_COLLISION)
+        h.play('clutch_line')
+        assert any(s.hold_reason == TeleopState.HOLD_SERVO_NOT_READY for s in h.states)
+        errors = [text for level, text in log.lines if level == 'error']
+        assert any('halted for a collision' in text and 'moved out directly' in text
+                   for text in errors)
+        assert not any('stopped following' in text for text in errors)
+    finally:
+        h.close()
+
+
+def test_event_logging_has_its_own_timing_mark(harness):
+    """A slow log write shows up as the 'log' step of the cycle, not as the joint command."""
+    h = harness()
+    log = _Log()
+
+    class SlowLog(_Log):
+
+        def __getattr__(self, level):
+            def write(text, **_):
+                if str(text).startswith('clutch engaged'):
+                    h.now += 0.015                  # this write takes 15 ms
+                log.lines.append((level, str(text)))
+            return write
+    h.node.get_logger = lambda: SlowLog()
+    h.play('clutch_line')
+    slow = [text for level, text in log.lines if text.startswith('slow cycle')]
+    assert slow and 'longest step: log 15 ms' in slow[0]

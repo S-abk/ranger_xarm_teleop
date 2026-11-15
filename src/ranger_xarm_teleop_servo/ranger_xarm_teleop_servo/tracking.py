@@ -173,7 +173,9 @@ def _solver_figures(engaged_states: List[Dict[str, Any]]) -> Dict[str, Any]:
     codes = [r['servo'] for r in engaged_states if r.get('servo') is not None]
     entered = sum(1 for before, now in zip([None] + codes, codes)
                   if now in HALT_CODES and before not in HALT_CODES)
+    scales = column('scale')
     return {
+        'scale_max': max(scales, default=math.nan),
         'lead_translation_max': max(lead_t, default=math.nan),
         'lead_rotation_max_deg': math.degrees(max(lead_r, default=math.nan)),
         'damped_share': sum(damped) / len(damped) if damped else math.nan,
@@ -414,6 +416,7 @@ def format_report(result: Dict[str, Any]) -> str:
             f'{_fmt(run.get("lead_rotation_max_deg"), 1.0, ".1f")} deg, damped '
             f'{_fmt(run.get("damped_share"), 100.0, ".0f")} % of the engaged time, minimum '
             f'conditioning {_fmt(run.get("conditioning_min"), 1.0, ".3f")}, Servo halt statuses '
-            f'{"n/a" if run.get("servo_halts") is None else run["servo_halts"]}',
+            f'{"n/a" if run.get("servo_halts") is None else run["servo_halts"]}, '
+            f'largest translation scale {_fmt(run.get("scale_max"), 1.0, "g")}',
         ]
     return '\n'.join(lines)

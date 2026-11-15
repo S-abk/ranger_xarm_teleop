@@ -40,6 +40,7 @@ VALUES = {
     'angular_speed_cap_rad_s': 1.0,
     'max_lead_translation_m': 0.050,
     'max_lead_rotation_deg': 12.0,
+    'max_translation_scale': 2.0,
     'motion_enabled': True,
 }
 

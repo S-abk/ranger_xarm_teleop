@@ -80,7 +80,7 @@ def test_rows():
                measured_tool_pose=pose(), conditioning=0.25, damped=True, damping=0.3,
                solver_error_translation=0.004, solver_error_rotation=0.02,
                lead_translation=0.03, lead_rotation=0.1, commanded_linear_speed=0.2,
-               commanded_angular_speed=0.5)
+               commanded_angular_speed=0.5, translation_scale=2.0)
     row = session.state_row(state)
     assert row == {'k': 'state', 'stamp': 5_000_000_007, 'motion': True, 'armed': True,
                    'engaged': True, 'owner': 2, 'mux': 0, 'hold': 0, 'limit': 4, 'servo': 1,
@@ -89,7 +89,8 @@ def test_rows():
                    'conditioning': 0.25, 'damped': True, 'damping': 0.3,
                    'solver_error_translation': 0.004, 'solver_error_rotation': 0.02,
                    'lead_translation': 0.03, 'lead_rotation': 0.1,
-                   'commanded_linear_speed': 0.2, 'commanded_angular_speed': 0.5}
+                   'commanded_linear_speed': 0.2, 'commanded_angular_speed': 0.5,
+                   'scale': 2.0}
     state.measured_tool_pose_valid = False
     assert session.state_row(state)['tool'] is None
     assert session.pose_row('target', NS(header=header(), pose=pose(4.0))) == {
@@ -135,3 +136,47 @@ def test_joint_row_picks_the_arm_joints_in_order():
     assert session.joints_row(msg)['v'] is None
     assert session.joints_row(NS(header=header(), name=['wheel'], position=[0.0],
                                  velocity=[])) is None
+
+
+ARM = [f'xarm_joint{i}/position' for i in range(1, 7)]
+JTC = 'joint_trajectory_controller/JointTrajectoryController'
+LOADED = [('joint_state_broadcaster', 'joint_state_broadcaster/JointStateBroadcaster',
+           'active', []),
+          ('xarm_xarm6_traj_controller', JTC, 'inactive', ARM),
+          ('teleop_arm_controller', JTC, 'active', ARM),
+          ('wheel_controller', 'diff/Drive', 'active', ['wheel/velocity'])]
+
+
+def test_the_mux_names_the_controller_even_while_it_is_inactive():
+    assert session.choose_arm_controller(LOADED, 'xarm_xarm6_traj_controller',
+                                         'teleop_arm_controller') == (
+        'xarm_xarm6_traj_controller', '')
+    name, why = session.choose_arm_controller(LOADED, 'xarm6_traj_controller')
+    assert name is None and 'no such controller' in why
+    name, why = session.choose_arm_controller(LOADED, 'teleop_arm_controller')
+    assert name is None and 'both' in why
+
+
+def test_without_the_mux_the_arm_controller_other_than_teleops_is_found():
+    assert session.choose_arm_controller(LOADED) == ('xarm_xarm6_traj_controller', '')
+    only_teleop = [c for c in LOADED if c[0] != 'xarm_xarm6_traj_controller']
+    name, why = session.choose_arm_controller(only_teleop)
+    assert name is None and 'never used here' in why
+    two = LOADED + [('spare_traj_controller', JTC, 'inactive', ARM)]
+    name, why = session.choose_arm_controller(two)
+    assert name is None and '--controller' in why
+    # A renamed teleop controller looks like any other: with two candidates, none is taken,
+    # even when only one of them is active (that one may be teleop's, owning the arm).
+    renamed = [('xarm_xarm6_traj_controller', JTC, 'inactive', ARM),
+               ('my_teleop_controller', JTC, 'active', ARM)]
+    name, why = session.choose_arm_controller(renamed)
+    assert name is None and 'did not say' in why
+    assert session.choose_arm_controller(None)[0] is None
+
+
+def test_controllers_are_listed_with_state_type_and_joints():
+    text = session.describe_controllers(LOADED)
+    assert ('  xarm_xarm6_traj_controller: inactive, ' + JTC + ', joints xarm_joint1, '
+            'xarm_joint2, xarm_joint3, xarm_joint4, xarm_joint5, xarm_joint6') in text
+    assert 'joint_state_broadcaster: active' in text and 'joints none' in text
+    assert 'did not answer' in session.describe_controllers(None)

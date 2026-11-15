@@ -89,3 +89,9 @@ float64 lead_rotation
 # Tool speed of the joint command sent this cycle, m/s and rad/s (G-8 caps).
 float64 commanded_linear_speed
 float64 commanded_angular_speed
+
+# Translation scale selected by the operator (right thumbstick click switches between the
+# fine and the coarse value; every arming starts at fine). Filled in every cycle, engaged or
+# not: while engaged it is the scale in use, otherwise the one the next engagement uses.
+# Hand translation is multiplied by it; rotation is never scaled.
+float64 translation_scale

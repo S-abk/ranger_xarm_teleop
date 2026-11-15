@@ -47,7 +47,8 @@ def load_limits(path: str) -> dict:
 RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translation_m',
             'max_offset_rotation_deg', 'view_cone_half_angle_deg', 'step_translation_limit_m',
             'step_rotation_limit_deg', 'linear_speed_cap_m_s', 'angular_speed_cap_rad_s',
-            'max_lead_translation_m', 'max_lead_rotation_deg', 'tool_pose_timeout_s',
+            'max_lead_translation_m', 'max_lead_rotation_deg', 'max_translation_scale',
+            'tool_pose_timeout_s',
             'joint_velocity_limit_names', 'joint_velocity_limits')
 
 
@@ -65,8 +66,9 @@ def check_limits_file(path: str, simulation: bool) -> dict:
     Return the limit values of ``path``; refuse simulation-only values outside simulation.
 
     Raises ``SimulationOnlyRefused`` when the file is marked simulation-only and
-    ``simulation`` is false, and ``ValueError`` when a speed cap or a lead limit is missing
-    (the teleop node enforces them itself; they have no default).
+    ``simulation`` is false, and ``ValueError`` when a speed cap, a lead limit or the
+    largest translation scale is missing (the teleop node enforces them itself; they have
+    no default).
     """
     values = load_limits(path)
     if values.get(SIMULATION_ONLY_KEY) and not simulation:
@@ -75,7 +77,7 @@ def check_limits_file(path: str, simulation: bool) -> dict:
             'path is a simulation (simulation:=true, set only by the mock and simulator '
             'launch files)')
     for name in ('linear_speed_cap_m_s', 'angular_speed_cap_rad_s', 'max_lead_translation_m',
-                 'max_lead_rotation_deg'):
+                 'max_lead_rotation_deg', 'max_translation_scale'):
         if not isinstance(values.get(name), (int, float)) or isinstance(values.get(name), bool):
             raise ValueError(f'{path}: {name} is required and has no default')
     return values

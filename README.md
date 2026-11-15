@@ -177,7 +177,7 @@ ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:=<recording.js
 
 0. **Start from the ready posture.** A simulator spawns the arm with every joint at 0, where
    the wrist is aligned (joints 4 and 6 share an axis). Move it to ready first: in simulation
-   `tools/move_arm.py 0 -0.6 -0.7 0 1.3 0` (Gazebo: add `--controller xarm_xarm6_traj_controller`),
+   `tools/move_arm.py 0 -0.6 -0.7 0 1.3 0` (it asks the command mux for MoveIt's controller),
    on a robot through MoveIt.
 1. **Calibrate (A).** Point the controller along the direction that should mean "arm forward"
    and press A. The horizontal projection of the pointing axis becomes `xarm_link_base` +x; the
@@ -195,6 +195,12 @@ ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:=<recording.js
 3. **Clutch (grip).** While the grip is held the tool follows the hand, relative to where both
    were when the grip closed. Release holds. Any gate condition (below) also releases, and the
    grip then has to be released and pressed again.
+4. **Scale (thumbstick click).** Switches between the fine and the coarse translation scale,
+   while armed; every arming starts at fine. Hand translation is multiplied by the scale,
+   rotation never. A click during a stroke does not move the target: the mapping restarts at
+   that point and only the motion after it is scaled anew. `translation_scale` in
+   `/teleop/state` shows the scale in use (or the one the next engagement uses) and the log
+   says `translation scale: coarse (2.00)`.
 
 `ros2 topic echo /teleop/state` shows why the arm is not moving (`hold_reason`), which bound is
 shaping the target or the joint command (`active_limit`), the owner of the arm, the calibration
@@ -203,9 +209,16 @@ in use, the measured input age, the measured tool pose, and the solver: `conditi
 
 ### Mapping
 
-Clutch-relative in a fixed frame: `p_now - p_clutch` and `q_now * inverse(q_clutch)` in
-`quest_world`, rotated into `xarm_link_base` by the calibration heading, applied to the tool
-pose measured at engagement. How the controller is held when the grip closes does not change
+Clutch-relative in a fixed frame: `scale * (p_now - p_clutch)` and `q_now * inverse(q_clutch)`
+in `quest_world`, rotated into `xarm_link_base` by the calibration heading, applied to the tool
+pose measured at engagement. `scale` is `translation_scale_fine` or
+`translation_scale_coarse` (both default 1, so the switch does nothing until a coarse value is
+set); each must be positive and at most the required `max_translation_scale`, or the node
+refuses to start. The raw-input check (G-5) stays on the unscaled hand; the step check of the
+final target, the offset limit, the lead limit and the speed caps all act on the scaled
+target, so at scale 2 a hand faster than half the per-cycle limit is rejected, and hand motion
+beyond the speed cap is absorbed by the lead limit as at scale 1. How the controller is held
+when the grip closes does not change
 the mapping. `wrist_pivot_offset` (controller frame, default zero) moves the tracked point from
 the grip origin to the operator's wrist pivot. `tool_frame` (default `xarm_link_tcp`) is the
 frame the target is for. The solver works on the chain from `base_frame` to `servo_tip_frame`
@@ -282,7 +295,8 @@ Each cycle the solver turns the target into joint velocities:
 | self-collision, scene collision; a joint inside MoveIt Servo's own margin (a backstop) | MoveIt Servo slows (`active_limit` 4, `servo_status`); when it halts, the clutch is released (`hold_reason` 19) so the target cannot run on ahead of a standing arm |
 
 **The limit values have no defaults.** Maximum offset, view cone, per-cycle limits, speed
-caps and lead limits are required parameters; the teleop node exits if one is missing. For simulation,
+caps, lead limits and the largest translation scale are required parameters; the teleop node
+exits if one is missing. For simulation,
 `config/SIMULATION_ONLY_limits.yaml` supplies values. That file marks itself simulation-only:
 the node then starts only if every ros2_control hardware plugin in the robot description is a
 simulator, and `teleop_core.launch.py` refuses the file unless called with `simulation:=true`,
@@ -308,7 +322,7 @@ the clutch is released. A refused or failed switch leaves the owner as it was an
 
 ```bash
 ros2 service call /teleop/disarm std_srvs/srv/Trigger           # MoveIt must own the arm, or the goal is rejected
-tools/move_arm.py [--controller xarm_xarm6_traj_controller]      # a posture with room to move (simulation only)
+tools/move_arm.py [--controller NAME]      # a posture with room to move (simulation only)
 tools/replay_measured.sh src/ranger_xarm_teleop_servo/test/fixtures/clutch_circle.jsonl /tmp/run.jsonl
 tools/measure_tracking.py report /tmp/run.jsonl
 ```
@@ -334,13 +348,16 @@ tools/workspace_map.py recordings/NAME.jsonl            # or a URDF file; no ROS
 
 `record` writes `recordings/NAME.jsonl` (git-ignored): teleop state, tool target, controller
 and headset poses, buttons (`/teleop/input/joy`), input status, the joint command, joint
-states, MoveIt Servo's status, the arm owner and the robot description. It only listens. It refuses to start while the clutch is engaged, and after Ctrl-C it keeps recording
+states, MoveIt Servo's status, the arm owner and the robot description; each state row carries
+the translation scale (`scale`). It only listens. It refuses to start while the clutch is
+engaged, and after Ctrl-C it keeps recording
 until the clutch is released (see the timing note below). `halts` prints, per halt, MoveIt
 Servo's status, the hold reason, the joint angles, the condition number and its trend over the
 second before, the nearest joint limit, the singularity the posture resembles (wrist, elbow,
 shoulder) and what was being commanded; then counts by reason, every clutch release by its
-hold reason, and the distribution of the condition number over the engaged time (labelled as
-the old rule's when the recording comes from the joint-space solver). `workspace_map.py` reports the condition number along
+hold reason, the share of the engaged time at each translation scale, and the distribution of
+the condition number over the engaged time (labelled as the old rule's when the recording comes
+from the joint-space solver). `workspace_map.py` reports the condition number along
 tool motions from a posture: how far the tool gets in each direction before each threshold.
 
 After a collision halt MoveIt Servo refuses motion in every direction: the arm has to be moved
@@ -353,15 +370,20 @@ tools/recover_arm.py          # disarm, wait until MoveIt owns the arm, plan to 
 When the arm is in contact, MoveIt refuses to plan from that start state
 (`start state in collision`) and `recover_arm.py` moves nothing.
 
-(simulation only, like `tools/move_arm.py`, which now prints why a goal was rejected).
+(simulation only, like `tools/move_arm.py`, which prints why a goal was rejected). Without
+`--controller`, `move_arm.py` asks the command mux which controller is MoveIt's (failing that,
+it takes the one arm trajectory controller other than teleop's); it never sends to teleop's
+controller, and when it finds none it lists the loaded controllers with their state and
+joints. If teleop re-engages while MoveIt Servo is halted for a collision, the log says so:
+Servo publishes nothing then, and teleop cannot move the arm out of the contact.
 
 For a live session, also run `tools/record_relay.py` from the start. It is one more client of
 the relay (no ROS), and its file replays the session exactly through the bridge
 (`replay_node`), which the ROS-side recording alone cannot.
 
 The teleop node's log helps tell a busy process from missing input:
-- `slow cycle: ...` (throttled), with the parts of the joint command: reference, solve and
-  the two publish calls;
+- `slow cycle: ...` (throttled), with the longest step of the cycle (logging has its own
+  step) and the parts of the joint command: reference, solve and the two publish calls;
 - once a minute, the count of slow cycles and of cycles that started late;
 - `frame seq N incomplete: ...` when a frame that releases the clutch lacks a part (no pose,
   no joy, or the status reporting no pose), with how long the input callbacks had paused.

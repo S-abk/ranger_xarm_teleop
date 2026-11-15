@@ -291,6 +291,25 @@ def clutch_shoulder() -> List[str]:
     return record(12.4, motion, lambda t: GRIP_ON <= t < 6.4 or 7.2 <= t < 11.8, looking_down)
 
 
+def clutch_scale_switch() -> List[str]:
+    """
+    Switch to the coarse translation scale mid-stroke (right thumbstick click).
+
+    Grip 1.2-6.0 s; the hand moves 0.12 m forward at a constant 0.06 m/s from 1.5 s to 3.5 s.
+    The thumbstick is clicked at 2.5 s (held 0.1 s), half way: at the coarse scale 2 the tool
+    moves 0.06 m before the click and 0.12 m after it, 0.18 m in all, slower than the speed
+    cap (0.12 m/s) and inside the offset limit.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        return at_offset(linear(t, 1.5, 2.0, 0.12)), HELD
+
+    def click(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        if 2.5 <= t < 2.6:
+            right['buttons'][3] = {'p': True, 't': True, 'v': 1.0}
+        return line(i, right, viewer())
+    return record(6.4, motion, held_until(6.0), click)
+
+
 def clutch_fast() -> List[str]:
     """Grip 1.2-8.0 s; 0.24 m at 0.6 m/s (2.4 x the speed cap), still for 2 s, then 40 mm back."""
     def motion(t: float) -> Tuple[Vec, Quat]:
@@ -388,7 +407,7 @@ def generate() -> Dict[str, List[str]]:
     makers = [clutch_line, clutch_circle, clutch_rotation, clutch_reengage, clutch_jump,
               clutch_stall, clutch_release_moving, clutch_into_body, clutch_singularity,
               clutch_shoulder, clutch_fast, clutch_step, clutch_joint_limit, clutch_reach,
-              gate_absent,
+              clutch_scale_switch, gate_absent,
               gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
               gate_seq_backwards]
     return {maker.__name__: maker() for maker in makers}

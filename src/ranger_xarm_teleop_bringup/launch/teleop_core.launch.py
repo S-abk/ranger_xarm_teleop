@@ -106,8 +106,12 @@ def launch_setup(context, *args, **kwargs):
                     {'planning_group_name': servo['move_group_name']},
                     robot_description, semantic, kinematics, joint_limits, sim_time])
 
+    # No ``name=`` for the two nodes of this package: a launch name becomes a ``__node``
+    # remap, which renames every node of the process, so the helper nodes inside would
+    # share the main node's name (and its parameter services). Their own names are
+    # arm_mux and teleop_servo.
     mux = Node(
-        package='ranger_xarm_teleop_servo', executable='arm_mux_node', name='arm_mux',
+        package='ranger_xarm_teleop_servo', executable='arm_mux_node',
         output='screen',
         parameters=[{'moveit_controller': arg('moveit_controller'),
                      'teleop_controller': teleop_controller,
@@ -129,7 +133,7 @@ def launch_setup(context, *args, **kwargs):
     # BLAS worker threads competing with a simulator stretch a cycle past the time a
     # headset frame waits for its parts.
     teleop = Node(
-        package='ranger_xarm_teleop_servo', executable='teleop_node', name='teleop_servo',
+        package='ranger_xarm_teleop_servo', executable='teleop_node',
         output='screen', parameters=teleop_parameters,
         additional_env={'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'})
 

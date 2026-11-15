@@ -36,6 +36,7 @@ from .rotations import Pose
 CLUTCH_BUTTON = BUTTON_NAMES.index('right_grip')
 CALIBRATE_BUTTON = BUTTON_NAMES.index('right_primary')
 ARM_BUTTON = BUTTON_NAMES.index('right_secondary')
+SCALE_BUTTON = BUTTON_NAMES.index('right_thumbstick')    # click: fine <-> coarse translation
 
 
 def frame_from_parsed(parsed: ParsedFrame, arrival: float) -> Frame:
@@ -63,6 +64,7 @@ def frame_from_parsed(parsed: ParsedFrame, arrival: float) -> Frame:
         grip=bool(buttons[CLUTCH_BUTTON]),
         calibrate=bool(buttons[CALIBRATE_BUTTON]),
         arm=bool(buttons[ARM_BUTTON]),
+        scale_toggle=bool(buttons[SCALE_BUTTON]),
     )
 
 

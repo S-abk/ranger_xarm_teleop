@@ -37,6 +37,7 @@ REQUIRED = (
     'angular_speed_cap_rad_s',
     'max_lead_translation_m',       # G-14
     'max_lead_rotation_deg',
+    'max_translation_scale',        # largest fine or coarse translation scale
 )
 
 # Set in the gate document.
@@ -61,6 +62,11 @@ DEFAULTS = {
     # aligned, and 0.2 refuses within about 0.32 rad of the wrist singularity of the ready
     # posture's family; a smaller angular cap raises the conditioning and narrows that band.
     'min_arming_conditioning': 0.2,
+    # Translation scales the operator switches between with the thumbstick click (fine after
+    # every arming). Rotation is never scaled. Each must be positive and at most
+    # max_translation_scale; with both at 1 the switch changes nothing.
+    'translation_scale_fine': 1.0,
+    'translation_scale_coarse': 1.0,
 }
 
 
@@ -101,7 +107,14 @@ class GateParams:
     calibration_min_horizontal: float
     tool_pose_timeout: float
     servo_ready_timeout: float
+    max_translation_scale: float
     min_arming_conditioning: float = DEFAULTS['min_arming_conditioning']
+    translation_scale_fine: float = DEFAULTS['translation_scale_fine']
+    translation_scale_coarse: float = DEFAULTS['translation_scale_coarse']
+
+    def translation_scale(self, coarse: bool) -> float:
+        """Return the coarse or the fine translation scale."""
+        return self.translation_scale_coarse if coarse else self.translation_scale_fine
 
     @property
     def raw_speed_limit(self) -> float:
@@ -176,6 +189,14 @@ def build_params(values: Mapping[str, Any]) -> GateParams:
     arming = float(opt('min_arming_conditioning'))
     if not math.isfinite(arming) or arming < 0.0:
         raise ValueError(f'min_arming_conditioning: expected a number >= 0, got {arming!r}')
+    largest = _positive('max_translation_scale', values['max_translation_scale'])
+    scales = {}
+    for name in ('translation_scale_fine', 'translation_scale_coarse'):
+        scales[name] = _positive(name, opt(name))
+        if scales[name] > largest:
+            # Never clamped into range (G-7): the configuration is wrong, so refuse it.
+            raise ValueError(f'{name}: {scales[name]!r} is above max_translation_scale '
+                             f'{largest!r}')
     cone = math.radians(_positive('view_cone_half_angle_deg', values['view_cone_half_angle_deg']))
     if cone > math.pi:
         raise ValueError('view_cone_half_angle_deg: expected at most 180')
@@ -209,6 +230,9 @@ def build_params(values: Mapping[str, Any]) -> GateParams:
         tool_pose_timeout=_positive('tool_pose_timeout_s', opt('tool_pose_timeout_s')),
         servo_ready_timeout=_positive('servo_ready_timeout_s', opt('servo_ready_timeout_s')),
         min_arming_conditioning=arming,
+        max_translation_scale=largest,
+        translation_scale_fine=scales['translation_scale_fine'],
+        translation_scale_coarse=scales['translation_scale_coarse'],
     )
 
 

@@ -11,7 +11,10 @@
 /**:
   ros__parameters:
     limits_are_simulation_only: true
-    max_offset_translation_m: 0.30     # from the tool pose at clutch engagement
+    # From the tool pose at clutch engagement. 0.60 so that at the coarse scale (2) one hand
+    # stroke of 0.30 m reaches it, as at scale 1 with the earlier 0.30 m; recorded strokes per
+    # clutch were 0.11-0.17 m (median) and up to 0.65 m of hand travel.
+    max_offset_translation_m: 0.60
     max_offset_rotation_deg: 60.0
     view_cone_half_angle_deg: 65.0     # cone axis (headset forward, see view_cone_tilt_deg) to the controller
     step_translation_limit_m: 0.030    # per 20 ms target cycle (1.5 m/s)
@@ -23,3 +26,7 @@
     # at the caps above; 20 % added.
     max_lead_translation_m: 0.050
     max_lead_rotation_deg: 12.0
+    # Largest translation scale the operator may select (thumbstick click: fine <-> coarse).
+    max_translation_scale: 2.0
+    # Not a limit: the coarse scale itself, kept beside the limit it must not exceed.
+    translation_scale_coarse: 2.0
