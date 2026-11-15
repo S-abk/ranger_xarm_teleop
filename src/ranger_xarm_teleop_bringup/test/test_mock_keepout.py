@@ -24,15 +24,13 @@ import os
 import sys
 import time
 
-from control_msgs.msg import JointJog
 from moveit_msgs.msg import RobotState, ServoStatus
-from moveit_msgs.srv import GetStateValidity, ServoCommandType
+from moveit_msgs.srv import GetStateValidity
 import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from stack_helpers import (ARM_JOINTS, child_environment, Probe, Process, READY,
                            replay_with_clean_input, SERVO_FIXTURES)
-from std_srvs.srv import SetBool
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -162,56 +160,23 @@ def _contact_paths():
         return [json.loads(line) for line in handle if line.strip()]
 
 
-def _servo_call(probe, service, request):
-    client = probe.node.create_client(service, f'/servo_node/{_SERVO_SERVICES[service]}')
-    assert client.wait_for_service(timeout_sec=10.0)
-    future = client.call_async(request)
-    probe.wait_for(future.done, 10.0, f'/servo_node/{_SERVO_SERVICES[service]}')
-    return future.result()
-
-
-_SERVO_SERVICES = {SetBool: 'pause_servo', ServoCommandType: 'switch_command_type'}
-
-
 def _drive_into_contact(probe, path):
     """
-    Stand in for the teleop node: drive MoveIt Servo along a recorded path into contact.
+    Stand in for teleop and MoveIt Servo: drive the arm along a recorded path into contact.
 
-    Teleop is armed (so the node records the measured path, and teleop's controller is
-    the one Servo feeds) with the clutch released, when the node sends Servo nothing; this
-    publisher is then the only one on Servo's command topic. Servo halts at the contact,
-    as it did live.
+    Teleop is armed, so the teleop node records the measured path and teleop's controller
+    is active; the clutch is released and MoveIt Servo paused, so nothing else commands it.
+    The recorded path is sent to that controller as Servo's output would be. (Driving Servo
+    itself there ends in its distance-only slow-down short of the contact, the trap found
+    in session 2, instead of the halt that ended the live engagements.)
     """
-    statuses = []
-    sub = probe.node.create_subscription(ServoStatus, '/servo_node/status',
-                                         lambda msg: statuses.append(msg.code), 10)
-    pub = probe.node.create_publisher(JointJog, '/servo_node/delta_joint_cmds', 10)
-    _servo_call(probe, ServoCommandType,
-                ServoCommandType.Request(command_type=ServoCommandType.Request.JOINT_JOG))
-    _servo_call(probe, SetBool, SetBool.Request(data=False))
-    times = np.array(path['times'])
     positions = np.array(path['positions'])
-    began = time.monotonic()
-    halted = False
-    try:
-        while time.monotonic() - began < times[-1] + 3.0:
-            t = time.monotonic() - began
-            goal = np.array([np.interp(t, times, positions[:, j]) for j in range(6)])
-            q = np.array(probe.joint_positions())
-            msg = JointJog()
-            msg.header.stamp = probe.node.get_clock().now().to_msg()
-            msg.joint_names = ARM_JOINTS
-            msg.velocities = [float(v) for v in np.clip((goal - q) * 5.0, -0.8, 0.8)]
-            pub.publish(msg)
-            if statuses and statuses[-1] == ServoStatus.HALT_FOR_COLLISION:
-                halted = True
-                break
-            time.sleep(0.02)
-    finally:
-        _servo_call(probe, SetBool, SetBool.Request(data=True))
-        probe.node.destroy_subscription(sub)
-        probe.node.destroy_publisher(pub)
-    return halted
+    probe.publish_path(positions, path['times'])
+    time.sleep(path['times'][-1] + 2.0)
+    q = np.array(probe.joint_positions())
+    off = float(np.max(np.abs(q - positions[-1])))
+    print(f"{path['name']}: {off:.4f} rad from the recorded contact posture")
+    return off < 0.01
 
 
 def _valid(probe, q, extra):
@@ -231,8 +196,8 @@ def test_retreat_frees_the_arm_from_each_recorded_contact(stack, index):
     INV-7, INV-8: from each of the three session 3 halts, as it happens live.
 
     The arm is put at the start of the recorded path on MoveIt's controller, teleop is
-    armed, MoveIt Servo is driven along the recorded measured path until it halts for the
-    collision (``_drive_into_contact``), then ``retreat_arm.py`` alone: the arm ends clear by
+    armed, the arm is driven along the recorded measured path into the contact
+    (``_drive_into_contact``), then ``retreat_arm.py`` alone: the arm ends clear by
     the margin in the model, valid for move_group, plannable again, and teleop drives again.
     """
     probe, env, logs, _, model, arm = stack
@@ -249,7 +214,7 @@ def test_retreat_frees_the_arm_from_each_recorded_contact(stack, index):
     finally:
         arming.stop()
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 10.0, 'teleop owning')
-    assert _drive_into_contact(probe, path), 'MoveIt Servo did not halt at the contact'
+    assert _drive_into_contact(probe, path), 'the arm did not reach the recorded contact'
     halted_at = probe.joint_positions()
     assert model.clearance(halted_at, extra)[0] < MARGIN
     assert not _valid(probe, halted_at, extra)                # move_group: in collision

@@ -257,6 +257,7 @@ def _solver_summary(states: _Series) -> Dict[str, Any]:
     damped = lowest = None
     total = damped_time = 0.0
     scales: Dict[float, float] = {}
+    keepout_time, nearest, keepout_rows = 0.0, None, False
     for row, following in zip(states.rows, states.rows[1:] + [None]):
         if not row.get('engaged') or row.get('conditioning') is None:
             continue
@@ -267,6 +268,11 @@ def _solver_summary(states: _Series) -> Dict[str, Any]:
         lowest = row['conditioning'] if lowest is None else min(lowest, row['conditioning'])
         if row.get('scale') is not None:
             scales[float(row['scale'])] = scales.get(float(row['scale']), 0.0) + step
+        if 'keepout_bound' in row:
+            keepout_rows = True
+            keepout_time += step if row['keepout_bound'] else 0.0
+            if row.get('keepout') is not None:
+                nearest = row['keepout'] if nearest is None else min(nearest, row['keepout'])
     if total <= 0.0:
         return {}
     damped = damped_time / total
@@ -274,6 +280,11 @@ def _solver_summary(states: _Series) -> Dict[str, Any]:
     if scales:
         # Share of the engaged time at each translation scale (recordings that store it).
         summary['share_by_scale'] = {scale: time / total for scale, time in sorted(scales.items())}
+    if keepout_rows:
+        # The link keep-out (recordings that store it): engaged time it shaped the command,
+        # and the smallest clearance seen while engaged.
+        summary['share_keepout'] = keepout_time / total
+        summary['keepout_min'] = nearest
     return summary
 
 
@@ -418,6 +429,12 @@ def format_report(result: Dict[str, Any]) -> str:
         lines.append(f"solver: damped {summary['share_damped'] * 100:.1f} % of the engaged time, "
                      f"minimum conditioning {summary['conditioning_min']:.3f} "
                      '(normalised: 1 and above unrestricted, 0 singular)')
+        if 'share_keepout' in summary:
+            nearest = summary['keepout_min']
+            share = summary['share_keepout'] * 100.0
+            lines.append(f'link keep-out: shaped the command {share:.1f} % of the engaged '
+                         'time; smallest clearance while engaged '
+                         + ('unknown' if nearest is None else f'{nearest * 1000.0:.1f} mm'))
         if summary.get('share_by_scale'):
             lines.append('translation scale while engaged: ' + ', '.join(
                 f'{scale:g}: {share * 100:.1f} %'

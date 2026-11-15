@@ -107,15 +107,18 @@ def test_state_reports_the_clearance_when_idle(node):
     clearance, pair = n.idle_clearance()
     assert 0.03 < clearance < 0.30 and pair[0] and pair[1]
     _joints(n, [0.0, -1.35, -0.3, 0.0, 1.6, 0.0])           # into the screen
+    n._idle_clearance = None                                # (it is refreshed at 10 Hz)
     clearance, pair = n.idle_clearance()
     assert clearance < 0.0 and pair == ('l2', 'screen')
     n.joint_state = None
+    n._idle_clearance = None
     assert math.isnan(n.idle_clearance()[0])
 
 
 def test_a_missing_gripper_joint_state_makes_the_clearance_unknown(node):
     n = node(robot_urdf())
     n.joint_state = (n.mono(), n.get_clock().now().nanoseconds, dict(zip(JOINTS, READY)))
+    n._idle_clearance = None
     assert math.isnan(n.idle_clearance()[0])
     with pytest.raises(teleop_node.ko.ModelError, match='finger'):
         n.keepout_extra()

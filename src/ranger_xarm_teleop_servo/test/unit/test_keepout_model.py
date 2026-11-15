@@ -132,3 +132,30 @@ def test_far_from_the_structure_the_driving_path_is_unchanged(robot):
     assert not any(s.solution is not None and s.solution.keepout_bound for s in with_model)
     for a, b in zip(with_model, plain):
         assert np.array_equal(a.qdot, b.qdot)
+
+
+def test_recorded_rows_and_the_halts_summary_carry_the_keep_out():
+    """The recorder stores the clearance and the binding; ``halts`` sums them up."""
+    from types import SimpleNamespace as NS
+    from ranger_xarm_teleop_servo import halts, session
+    header = NS(stamp=NS(sec=5, nanosec=7), frame_id='base')
+    tool = NS(position=NS(x=0.3, y=0.0, z=0.3), orientation=NS(x=0.0, y=0.0, z=0.0, w=1.0))
+    rows = []
+    for k in range(10):
+        msg = NS(header=header, motion_enabled=True, armed=True, clutch_engaged=True, owner=2,
+                 mux_status=0, hold_reason=0, active_limit=9, servo_status=0, calibrated=True,
+                 input_age=0.01, input_seq=k, measured_tool_pose_valid=True,
+                 measured_tool_pose=tool, conditioning=0.8, damped=False, damping=0.0,
+                 solver_error_translation=0.0, solver_error_rotation=0.0,
+                 lead_translation=0.0, lead_rotation=0.0, commanded_linear_speed=0.1,
+                 commanded_angular_speed=0.0, translation_scale=1.0,
+                 keepout_clearance=0.03 - 0.0005 * k if k else float('nan'),
+                 keepout_link='l2', keepout_obstacle='screen', keepout_bound=k >= 5)
+        row = session.state_row(msg)
+        row['t'] = 100.0 + 0.02 * k
+        rows.append(row)
+    assert rows[0]['keepout'] is None and rows[3]['keepout'] == pytest.approx(0.0285)
+    assert rows[3]['keepout_pair'] == ['l2', 'screen'] and rows[7]['keepout_bound']
+    summary = halts._solver_summary(halts._Series(rows))
+    assert summary['share_keepout'] == pytest.approx(0.5)
+    assert summary['keepout_min'] == pytest.approx(0.0255)

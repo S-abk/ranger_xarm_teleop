@@ -387,6 +387,18 @@ class Probe:
         assert future.result().success, 'the planning scene change was refused'
         time.sleep(1.0)             # Servo's scene follows move_group's monitored scene
 
+    def publish_path(self, positions, times, lead=0.5):
+        """Publish a timed joint path on the teleop controller's command topic (as Servo does)."""
+        msg = JointTrajectory()
+        msg.joint_names = ARM_JOINTS
+        for q, t in zip(positions, times):
+            t = float(t) + lead
+            whole = int(t)
+            msg.points.append(JointTrajectoryPoint(
+                positions=[float(p) for p in q],
+                time_from_start=Duration(sec=whole, nanosec=int((t - whole) * 1e9))))
+        self.trajectory_pub.publish(msg)
+
     def publish_trajectory(self, positions, seconds=0.5):
         """Publish a trajectory on the teleop controller's command topic (as Servo does)."""
         msg = JointTrajectory()

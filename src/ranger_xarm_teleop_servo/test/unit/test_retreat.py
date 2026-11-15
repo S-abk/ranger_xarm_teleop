@@ -81,10 +81,9 @@ def test_retreat_follows_the_path_back_to_the_first_clear_point(robot, turned):
     stop = plan.postures[-1]
     assert model.clearance(stop, extra)[0] >= MARGIN
     assert model.clearance(stop, extra)[0] > PADDING
-    assert sv.levels(arm, stop, PARAMS).orientation >= 0.2
+    assert plan.armable == (sv.levels(arm, stop, PARAMS).orientation >= 0.2)
     for q in plan.postures[1:-1]:
-        assert not (model.clearance(q, extra)[0] >= MARGIN
-                    and sv.levels(arm, q, PARAMS).orientation >= 0.2)
+        assert not model.clearance(q, extra)[0] >= MARGIN
     assert plan.tool_travel <= retreat.MAX_TOOL_TRAVEL
     assert plan.joint_travel <= retreat.MAX_JOINT_TRAVEL
     # Slowly.
@@ -133,8 +132,15 @@ def test_no_clear_point_within_the_bounds_moves_nothing_and_gives_the_best(robot
     times, postures, halted = _into_contact(arm, model, extra, READY, -0.30)
     plan = _plan(robot, times, postures, halted, max_tool_travel=0.003)
     assert not plan.ok and plan.postures is None
-    assert 'the best is' in plan.message and 'Nothing moved' in plan.message
+    assert 'the best clearance is' in plan.message and 'Nothing moved' in plan.message
     assert 'Next:' in plan.message
+
+
+def test_a_stop_near_the_wrist_singularity_says_to_move_to_ready_first(robot):
+    arm, model, extra = robot
+    times, postures, halted = _into_contact(arm, model, extra, READY, -0.30)
+    plan = _plan(robot, times, postures, halted, min_conditioning=10.0)   # nothing armable
+    assert plan.ok and not plan.armable and 'recover_arm.py' in plan.message
 
 
 def test_already_clear_moves_nothing(robot):

@@ -20,9 +20,13 @@ back to go: from the arm's posture, which must be the newest point of the path, 
 the path backwards and stops at the first point that is
 
 * clear of the robot's fixed structure by the clearance asked for (at least the link
-  keep-out margin) according to the keep-out model,
-* valid for MoveIt (``valid``, the tool asks move_group, whose padding is included), and
-* away from the wrist singularity (the arming check), so teleop can be armed there again.
+  keep-out margin) according to the keep-out model, and
+* valid for MoveIt (``valid``, the tool asks move_group, whose padding is included), so
+  MoveIt plans from there again.
+
+Whether teleop can be armed there (the arming check refuses postures near the wrist
+singularity) is reported with the plan; where it cannot, the message says to move to the
+ready posture with MoveIt first.
 
 It never leaves the recorded path, never goes past ``max_tool_travel`` of tool path or
 ``max_joint_travel`` on any joint, and moves nothing at all (no partial move) when the path
@@ -91,6 +95,7 @@ class Plan:
     stop_clearance: float = math.nan
     tool_travel: float = 0.0           # m along the path to the stop
     joint_travel: float = 0.0          # rad, largest on any joint
+    armable: bool = True               # the stop passes teleop's arming check
 
 
 NEXT_STEP = ('Next: tools/move_arm.py <six joint values> moves the arm directly on '
@@ -124,7 +129,7 @@ def plan(times: np.ndarray, postures: np.ndarray, measured: Sequence[float],
         return Plan(False, f'the arm is {off:.3f} rad from the end of the recorded path: it '
                     'has moved since teleop moved it. Nothing moved. ' + NEXT_STEP)
     start = clearance(measured)
-    if start >= wanted and valid(measured) and conditioning(measured) >= min_conditioning:
+    if start >= wanted and valid(measured):
         return Plan(False, f'already clear: clearance {start * 1000.0:.1f} mm, valid for '
                     'MoveIt. Nothing to do.', start_clearance=start)
     tool_travel, best = 0.0, (start, 0.0)
@@ -144,19 +149,23 @@ def plan(times: np.ndarray, postures: np.ndarray, measured: Sequence[float],
                         'Nothing moved. ' + NEXT_STEP, start_clearance=start)
         if c > best[0]:
             best = (c, tool_travel)
-        if c >= wanted and conditioning(q) >= min_conditioning and valid(q):
+        if c >= wanted and valid(q):
             path = np.vstack([measured, postures[i:][::-1]])
             keep = np.concatenate([[True], np.max(np.abs(np.diff(path, axis=0)), axis=1)
                                    > 1e-9])
             path = path[keep]
-            return Plan(True, f'back {tool_travel * 1000.0:.0f} mm of tool path along the '
-                        f'recorded path to clearance {c * 1000.0:.1f} mm '
-                        f'(from {start * 1000.0:.1f} mm)', path,
-                        timing(path, tool_point), start, c, tool_travel, joint_travel)
+            armable = conditioning(q) >= min_conditioning
+            message = (f'back {tool_travel * 1000.0:.0f} mm of tool path along the recorded '
+                       f'path to clearance {c * 1000.0:.1f} mm (from {start * 1000.0:.1f} mm)')
+            if not armable:
+                message += ('; teleop arming is refused there (the wrist is near alignment): '
+                            'move to the ready posture with tools/recover_arm.py first')
+            return Plan(True, message, path, timing(path, tool_point), start, c, tool_travel,
+                        joint_travel, armable)
     return Plan(False, f'no point on the recorded path within {max_tool_travel * 1000.0:.0f} '
                 f'mm of tool path and {max_joint_travel:.2f} rad per joint is clear by '
-                f'{wanted * 1000.0:.1f} mm, valid for MoveIt and away from the wrist '
-                f'singularity; the best is {best[0] * 1000.0:.1f} mm, at '
+                f'{wanted * 1000.0:.1f} mm and valid for MoveIt; the best clearance is '
+                f'{best[0] * 1000.0:.1f} mm, at '
                 f'{best[1] * 1000.0:.0f} mm of tool path. Nothing moved. ' + NEXT_STEP,
                 start_clearance=start)
 

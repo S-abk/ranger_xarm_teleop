@@ -56,12 +56,14 @@ sys.path.insert(0, TOOLS)
 from ranger_xarm_teleop_servo import keepout as ko  # noqa: E402
 from ranger_xarm_teleop_servo import retreat  # noqa: E402
 from ranger_xarm_teleop_servo import solver as dls  # noqa: E402
+from ranger_xarm_teleop_servo.params import DEFAULTS  # noqa: E402
 from ranger_xarm_teleop_servo.session import (choose_arm_controller, may_recover,  # noqa: E402
                                               STATE_FRESH_S, TELEOP_CONTROLLER)
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
 
 LEAVES_PATH = 0.02          # rad: the arm this far from the path stops the motion
 TELEOP_NODE = '/teleop_servo'
+DEFAULT_MIN_ARMING_CONDITIONING = DEFAULTS['min_arming_conditioning']
 
 
 def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it runs
@@ -158,9 +160,9 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         # 2. The teleop node's settings and its recorded path.
         names = ['base_frame', 'servo_tip_frame', 'link_keepout_cell_m',
                  'joint_velocity_limit_names', 'joint_velocity_limits',
-                 'min_arming_conditioning', 'linear_speed_cap_m_s', 'angular_speed_cap_rad_s']
-        values = call(node.create_client(GetParameters, f'{TELEOP_NODE}/get_parameters'),
-                      GetParameters.Request(names=names))
+                 'linear_speed_cap_m_s', 'angular_speed_cap_rad_s']
+        parameters = node.create_client(GetParameters, f'{TELEOP_NODE}/get_parameters')
+        values = call(parameters, GetParameters.Request(names=names))
         if values is None or len(values.values) != len(names) or seen['margin'] is None:
             print('MISSING, nothing moved: the teleop node did not report its settings')
             return 2
@@ -168,7 +170,11 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         base, tip = v[0].string_value, v[1].string_value
         cell = v[2].double_value or ko.DEFAULT_CELL
         limits = dict(zip(v[3].string_array_value, v[4].double_array_value))
-        min_conditioning = v[5].double_value if v[5].type == 3 else 0.2
+        # Optional, without a value unless set (then the service answers nothing for it).
+        optional = call(parameters, GetParameters.Request(names=['min_arming_conditioning']))
+        min_conditioning = (optional.values[0].double_value
+                            if optional is not None and len(optional.values) == 1
+                            else DEFAULT_MIN_ARMING_CONDITIONING)
         margin = seen['margin']
         wanted = max(margin, args.clearance)
         reply = call(node.create_client(GetJointPath, '/teleop/joint_path'),
@@ -188,8 +194,8 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         model = ko.build(urdf, ko.make_resolver(get_package_share_directory), base, tip,
                          margin, cell=cell)
         arm = dls.arm_from_urdf(urdf, base, tip, velocity_limits=limits)
-        params = dls.SolverParams(linear_speed_cap=v[6].double_value,
-                                  angular_speed_cap=v[7].double_value)
+        params = dls.SolverParams(linear_speed_cap=v[5].double_value,
+                                  angular_speed_cap=v[6].double_value)
         spin(2.0, lambda: seen['joints'] is not None)
         if seen['joints'] is None:
             print('MISSING, nothing moved: no /joint_states')
@@ -213,7 +219,8 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
 
         plan = retreat.plan(
             times, postures, measured,
-            clearance=lambda q: model.clearance(q, extra)[0],
+            clearance=lambda q: model.clearance(q, extra, within=max(model.influence,
+                                                                     wanted + 0.01))[0],
             tool_point=lambda q: dls.tool_pose(arm, q)[:3, 3],
             valid=valid,
             conditioning=lambda q: dls.levels(arm, q, params).orientation,

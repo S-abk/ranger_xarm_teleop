@@ -782,8 +782,13 @@ class Model:
 
     def clearance(self, q: Sequence[float],
                   extra: Optional[Mapping[str, float]] = None,
-                  within: float = 0.30) -> Tuple[float, Tuple[str, str]]:
-        """Return the smallest clearance (exact up to ``within``) and the pair."""
+                  within: Optional[float] = None) -> Tuple[float, Tuple[str, str]]:
+        """
+        Return the smallest clearance and the pair.
+
+        Exact up to ``within`` (default: the influence distance); beyond, a lower bound
+        and no pair. A larger ``within`` costs much more where many spheres are near.
+        """
         rows = self.evaluate(q, extra, influence=within, per_pair=1)
         return rows.clearance, rows.nearest
 

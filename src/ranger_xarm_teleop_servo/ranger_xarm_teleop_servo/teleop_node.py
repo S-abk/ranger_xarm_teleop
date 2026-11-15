@@ -108,6 +108,7 @@ JOINT_PATH_SERVICE = '/teleop/joint_path'
 KEEPOUT_INFO_SERVICE = '/teleop/keepout_info'
 KEEPOUT_SLOW_S = 0.002      # a keep-out step longer than this is reported
 KEEPOUT_FLOOR_SLACK = 1e-4  # m: the clearance falling more below its floor is reported
+IDLE_CLEARANCE_CYCLES = 5   # the clearance while not engaged is computed this seldom
 
 # Poses and joy are published best effort, depth 1; a little depth here lets the pose, joy
 # and status of one frame be paired by stamp whatever order they arrive in, and keeps them
@@ -369,6 +370,8 @@ class TeleopNode(Node):
         self.keepout_floor = math.inf       # clearance the next cycle may not fall below
         self.servo_description_compared = False
         self.path = PathRecorder()
+        self._idle_count = 0
+        self._idle_clearance = None
         # Joint states and MoveIt Servo's output arrive at the controller rate. A second
         # node on its own executor thread receives both, so they never queue in front of
         # the headset input in this node's executor. Each callback stores one tuple (a
@@ -1255,19 +1258,28 @@ class TeleopNode(Node):
         return msg
 
     def idle_clearance(self):
-        """Return the keep-out clearance and pair at the measured joints (NaN if unknown)."""
+        """
+        Return the keep-out clearance and pair at the measured joints (NaN if unknown).
+
+        Computed every IDLE_CLEARANCE_CYCLES cycles (the arm is not driven by teleop then)
+        and exact within the model's influence distance only, which keeps it cheap.
+        """
+        self._idle_count = (self._idle_count + 1) % IDLE_CLEARANCE_CYCLES
+        if self._idle_count and self._idle_clearance is not None:
+            return self._idle_clearance
+        self._idle_clearance = (math.nan, ('', ''))
         if self.keepout is None or self.arm is None or self.joint_state is None:
-            return math.nan, ('', '')
+            return self._idle_clearance
         positions = self.joint_state[2]
         try:
             q = [positions[name] for name in self.arm.joint_names]
             started = time.perf_counter()
-            rows = self.keepout.evaluate(q, self.keepout.extra_values(positions),
-                                         influence=0.30, per_pair=1)
+            rows = self.keepout.evaluate(q, self.keepout.extra_values(positions), per_pair=1)
             self._cycles.keepout_step(time.perf_counter() - started)
         except (KeyError, ko.ModelError, ValueError):
-            return math.nan, ('', '')
-        return rows.clearance, rows.nearest
+            return self._idle_clearance
+        self._idle_clearance = (rows.clearance, rows.nearest)
+        return self._idle_clearance
 
     # ---- MoveIt Servo ----
 
