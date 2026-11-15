@@ -223,6 +223,20 @@ def test_clutch_releases_are_listed_by_hold_reason():
     assert 'clutch releases: 4' in text and '2  POSE_ABSENT' in text
 
 
+def test_engaged_time_is_split_by_translation_scale():
+    rows = _releases_session()
+    states = [row for row in rows if row['k'] == 'state']
+    assert 'translation scale' not in halts.format_report(halts.analyze(rows))   # not stored
+    for i, row in enumerate(states):
+        row['scale'] = 2.0 if i >= 8 else 1.0
+    result = halts.analyze(rows)
+    shares = result['summary']['share_by_scale']
+    # Engaged rows, 0.1 s each: 5 at scale 1, then 5 + 5 + 2 at scale 2.
+    assert set(shares) == {1.0, 2.0}
+    assert shares[1.0] == pytest.approx(0.5 / 1.7, abs=1e-9)
+    assert 'translation scale while engaged: 1: 29.4 %, 2: 70.6 %' in halts.format_report(result)
+
+
 def test_old_rule_lines_are_labelled_when_the_recording_is_from_the_solver():
     rows = wrist_session()
     text = halts.format_report(halts.analyze(rows))

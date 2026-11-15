@@ -467,6 +467,31 @@ def test_arming_is_refused_at_the_spawn_pose(stack):
         probe.move_to(READY)
 
 
+def test_coarse_scale_switch_mid_stroke_keeps_the_target_continuous(stack):
+    """
+    clutch_scale_switch: thumbstick click half way through a 0.12 m stroke at 0.06 m/s.
+
+    The simulation-only file sets the coarse scale to 2: the target does not jump at the
+    click, moves about twice as far after it, and the state reports the scale.
+    """
+    probe, env, logs, launch = stack
+    timed, start = _clean_run(probe, env, logs, 'clutch_scale_switch', engaged_s=4.0)
+    engaged = [(t, s) for t, s in timed if s.clutch_engaged]
+    assert {s.translation_scale for _, s in engaged} == {1.0, 2.0}
+    assert 'translation scale: coarse (2.00)' in launch.output()
+    switched = next(t for t, s in engaged if s.translation_scale == 2.0)
+    targets = [(t, np.array(p)) for t, p in probe.targets_since(start)]
+    steps = [np.linalg.norm(b - a) for (_, a), (_, b) in zip(targets, targets[1:])]
+    # 0.12 m/s of target after the click; a cycle can take in two 90 Hz frames: 2.7 mm.
+    assert max(steps) < 0.004
+    at_switch = min(targets, key=lambda item: abs(item[0] - switched))[1]
+    before = np.linalg.norm(at_switch - targets[0][1])
+    after = np.linalg.norm(targets[-1][1] - at_switch)
+    assert before == pytest.approx(0.06, abs=0.01)
+    assert after == pytest.approx(0.12, abs=0.01)
+    probe.disarm()
+
+
 def test_log_has_no_errors(stack):
     _, _, _, launch = stack
     output = launch.output()

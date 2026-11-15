@@ -166,6 +166,10 @@ def test_solver_figures_cover_the_engaged_time_only():
     assert run['damped_share'] == pytest.approx(math.ceil(count / 4) / count)
     assert run['conditioning_min'] == pytest.approx(1.0 - 0.01 * (count - 1))
     assert run['servo_halts'] == 0
+    assert math.isnan(run['scale_max'])             # no scale stored
+    set_state(rows, scale=lambda i: 2.0 if i == 3 else 1.0)
+    assert only(rows)['scale_max'] == 2.0
+    assert 'largest translation scale 2' in tracking.format_report(tracking.analyze(rows))
 
 
 def test_servo_halts_count_entries_into_a_halt_status():

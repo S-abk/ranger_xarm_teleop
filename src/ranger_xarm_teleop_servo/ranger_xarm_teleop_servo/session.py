@@ -43,10 +43,67 @@ def rejection_reason(owner: Optional[int]) -> str:
                 'check the controller manager')
     if owner == OWNER_MOVEIT:
         return ('MoveIt owns the arm, so ownership is not the reason: check --controller '
-                '(mock: xarm6_traj_controller, simulator: xarm_xarm6_traj_controller) '
-                'and the controller log')
+                "(without it the command mux is asked for MoveIt's controller) and the "
+                'controller log')
     return ('the command mux reports no owner (is the teleop stack running?): check '
             '--controller and that the controller is active')
+
+
+TELEOP_CONTROLLER = 'teleop_arm_controller'     # the command mux's default for teleop
+
+
+def choose_arm_controller(controllers: Optional[Sequence[Tuple[str, str, str, Sequence[str]]]],
+                          moveit: Optional[str] = None, teleop: Optional[str] = None,
+                          joints: Sequence[str] = ARM_JOINTS) -> Tuple[Optional[str], str]:
+    """
+    Pick MoveIt's arm trajectory controller for a direct joint goal; never teleop's.
+
+    ``controllers`` holds ``(name, type, state, required command interfaces)`` of every
+    controller the controller manager has loaded (None: it did not answer). ``moveit`` and
+    ``teleop`` are the command mux's controller names (None: the mux did not answer).
+    Return ``(name, '')`` or ``(None, why)``. The mux's choice wins; it is returned even
+    while inactive, so that a goal sent to it is rejected for the real reason (teleop owns
+    the arm). Without the mux, only a single joint trajectory controller for the arm joints
+    other than teleop's default one is taken: teleop's controller may have been given
+    another name, so with two candidates neither is chosen. Teleop's own controller is never
+    chosen knowingly: goals to it would bypass the command mux (G-9).
+    """
+    teleop = teleop or TELEOP_CONTROLLER
+    names = None if controllers is None else [c[0] for c in controllers]
+    if moveit is not None:
+        if moveit == teleop:
+            return None, f'the command mux names {moveit} for both MoveIt and teleop'
+        if names is not None and moveit not in names:
+            return None, (f'the command mux names {moveit} for MoveIt, but the controller '
+                          'manager has no such controller')
+        return moveit, ''
+    if controllers is None:
+        return None, 'neither the command mux nor the controller manager answered'
+    wanted = [f'{joint}/position' for joint in joints]
+    found = [c for c in controllers
+             if c[0] != teleop and c[1].endswith('JointTrajectoryController')
+             and all(interface in c[3] for interface in wanted)]
+    if len(found) == 1:
+        return found[0][0], ''
+    if not found:
+        return None, ('no joint trajectory controller for the arm joints besides '
+                      f"{teleop} (teleop's own, never used here)")
+    return None, ('several joint trajectory controllers drive the arm joints and the command '
+                  "mux did not say which is MoveIt's: choose one with --controller")
+
+
+def describe_controllers(controllers: Optional[Sequence[Tuple[str, str, str, Sequence[str]]]]
+                         ) -> str:
+    """Return one line per controller: name, state, type and the joints it commands."""
+    if controllers is None:
+        return '  (the controller manager did not answer)'
+    if not controllers:
+        return '  (no controllers loaded)'
+    lines = []
+    for name, kind, state, interfaces in controllers:
+        joints = sorted({interface.split('/')[0] for interface in interfaces})
+        lines.append(f'  {name}: {state}, {kind}, joints {", ".join(joints) or "none"}')
+    return '\n'.join(lines)
 
 
 def may_recover(owner: Optional[int], armed: Optional[bool]) -> Tuple[bool, str]:
@@ -126,7 +183,9 @@ def state_row(msg: Any) -> Dict[str, Any]:
         'lead_translation': float(msg.lead_translation),
         'lead_rotation': float(msg.lead_rotation),
         'commanded_linear_speed': float(msg.commanded_linear_speed),
-        'commanded_angular_speed': float(msg.commanded_angular_speed)}
+        'commanded_angular_speed': float(msg.commanded_angular_speed),
+        # Translation scale selected by the operator (1 = hand motion 1:1).
+        'scale': float(msg.translation_scale)}
 
 
 def pose_row(kind: str, msg: Any) -> Dict[str, Any]:

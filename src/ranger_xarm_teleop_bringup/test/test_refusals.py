@@ -38,7 +38,8 @@ SHARE = get_package_share_directory('ranger_xarm_teleop_bringup')
 SIM_LIMITS = os.path.join(SHARE, 'config', 'SIMULATION_ONLY_limits.yaml')
 REQUIRED = ['max_offset_translation_m', 'max_offset_rotation_deg', 'view_cone_half_angle_deg',
             'step_translation_limit_m', 'step_rotation_limit_deg', 'linear_speed_cap_m_s',
-            'angular_speed_cap_rad_s', 'max_lead_translation_m', 'max_lead_rotation_deg']
+            'angular_speed_cap_rad_s', 'max_lead_translation_m', 'max_lead_rotation_deg',
+            'max_translation_scale']
 
 
 def teleop_node(env, log, *ros_args):
@@ -80,7 +81,8 @@ def test_node_exits_without_the_pending_values(env, tmp_path):
 
 
 @pytest.mark.parametrize('missing', ['view_cone_half_angle_deg', 'linear_speed_cap_m_s',
-                                     'max_lead_translation_m', 'max_lead_rotation_deg'])
+                                     'max_lead_translation_m', 'max_lead_rotation_deg',
+                                     'max_translation_scale'])
 def test_node_exits_when_one_pending_value_is_missing(env, tmp_path, missing):
     values = {k: v for k, v in load_limits(SIM_LIMITS).items() if k != missing}
     path = tmp_path / 'limits.yaml'
@@ -167,6 +169,15 @@ def test_limits_file_without_speed_caps_is_refused(tmp_path):
     path.write_text(yaml.safe_dump({'/**': {'ros__parameters': {
         'max_offset_translation_m': 0.1}}}), encoding='utf-8')
     with pytest.raises(ValueError, match='linear_speed_cap_m_s'):
+        check_limits_file(str(path), simulation=False)
+
+
+def test_limits_file_without_the_largest_translation_scale_is_refused(tmp_path):
+    values = {k: v for k, v in load_limits(SIM_LIMITS).items()
+              if k not in ('max_translation_scale', 'limits_are_simulation_only')}
+    path = tmp_path / 'limits.yaml'
+    path.write_text(yaml.safe_dump({'/**': {'ros__parameters': values}}), encoding='utf-8')
+    with pytest.raises(ValueError, match='max_translation_scale'):
         check_limits_file(str(path), simulation=False)
 
 

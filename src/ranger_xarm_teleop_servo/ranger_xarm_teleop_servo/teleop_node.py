@@ -66,7 +66,8 @@ from ranger_xarm_teleop_interfaces.msg import ArmOwner, InputStatus, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
 from ranger_xarm_teleop_servo import params as gate_params
 from ranger_xarm_teleop_servo import solver as dls
-from ranger_xarm_teleop_servo.frames import ARM_BUTTON, CALIBRATE_BUTTON, CLUTCH_BUTTON
+from ranger_xarm_teleop_servo.frames import (ARM_BUTTON, CALIBRATE_BUTTON, CLUTCH_BUTTON,
+                                             SCALE_BUTTON)
 from ranger_xarm_teleop_servo.gate import Env, Frame, GateState, Limit, on_frame, tick
 from ranger_xarm_teleop_servo.kinematics import ChainError
 from ranger_xarm_teleop_servo.rotations import (inverse, Pose, pose_from_matrix, pose_to_matrix,
@@ -175,6 +176,8 @@ _OPTIONAL = {
     'tool_pose_timeout_s': Parameter.Type.DOUBLE,
     'servo_ready_timeout_s': Parameter.Type.DOUBLE,
     'min_arming_conditioning': Parameter.Type.DOUBLE,
+    'translation_scale_fine': Parameter.Type.DOUBLE,
+    'translation_scale_coarse': Parameter.Type.DOUBLE,
 }
 
 
@@ -409,7 +412,10 @@ class TeleopNode(Node):
         self.get_logger().info(
             f'motion_enabled={self.params.motion_enabled} '
             f'simulation_only_limits={self.simulation_only} tool_frame={self.tool_frame} '
-            f'servo tip={self.tip_frame} base={self.base_frame}')
+            f'servo tip={self.tip_frame} base={self.base_frame} translation scale '
+            f'fine {self.params.translation_scale_fine:g} coarse '
+            f'{self.params.translation_scale_coarse:g} (largest allowed '
+            f'{self.params.max_translation_scale:g})')
         if not self.params.motion_enabled:
             self.get_logger().warning('motion_enabled is false: no target will be published')
 
@@ -512,7 +518,8 @@ class TeleopNode(Node):
         key = stamp_key(status.header.stamp)
         joy = self._joys.get(key)
         buttons = list(joy.buttons) if joy is not None else []
-        have_buttons = len(buttons) > max(CLUTCH_BUTTON, CALIBRATE_BUTTON, ARM_BUTTON)
+        have_buttons = len(buttons) > max(CLUTCH_BUTTON, CALIBRATE_BUTTON, ARM_BUTTON,
+                                          SCALE_BUTTON)
         controller = self._poses.get(key) if have_buttons else None
         head = self._heads.get(key)
         return Frame(
@@ -530,6 +537,7 @@ class TeleopNode(Node):
             grip=have_buttons and bool(buttons[CLUTCH_BUTTON]),
             calibrate=have_buttons and bool(buttons[CALIBRATE_BUTTON]),
             arm=have_buttons and bool(buttons[ARM_BUTTON]),
+            scale_toggle=have_buttons and bool(buttons[SCALE_BUTTON]),
         )
 
     # ---- robot side ----
@@ -707,9 +715,18 @@ class TeleopNode(Node):
                                     throttle_duration_sec=1.0)
             return False, True
         if reference is None:
-            self.get_logger().error(
-                'MoveIt Servo output stopped following the joint commands (last status '
-                f'{self.servo_status}); clutch released', throttle_duration_sec=1.0)
+            if self.servo_status == ServoStatus.HALT_FOR_COLLISION:
+                # Servo publishes nothing while it is halted for a collision: re-engaging
+                # cannot move the arm out of the contact it stopped in.
+                self.get_logger().error(
+                    f'MoveIt Servo is halted for a collision (status {self.servo_status}) and '
+                    'publishes nothing for the joint commands: teleop cannot move the arm out '
+                    'of the contact; it has to be moved out directly; clutch released',
+                    throttle_duration_sec=1.0)
+            else:
+                self.get_logger().error(
+                    'MoveIt Servo output stopped following the joint commands (last status '
+                    f'{self.servo_status}); clutch released', throttle_duration_sec=1.0)
             return ready, False
         if tool is not None:
             commanded = pose_from_matrix(dls.tool_pose(self.arm, reference))
@@ -850,6 +867,7 @@ class TeleopNode(Node):
                 + (f' and -> {self.wrist_frame}' if self.wrist_frame else '')
                 + ' and the robot description with the chain '
                 + f'{self.base_frame} -> {self.tip_frame}', throttle_duration_sec=5.0)
+        marks.append(('log', self.mono()))
 
         stamp = self.get_clock().now().to_msg()
         self._command_steps = []
@@ -1014,6 +1032,7 @@ class TeleopNode(Node):
             msg.commanded_linear_speed = float(solution.linear_speed)
             msg.commanded_angular_speed = float(solution.angular_speed)
         msg.servo_status = self.servo_status
+        msg.translation_scale = float(self.params.translation_scale(self.state.coarse))
         calibration = self.state.calibration
         frame = self.state.frame
         msg.calibrated = (calibration is not None and frame is not None
@@ -1221,7 +1240,7 @@ class TeleopNode(Node):
     def _disarm(self, why: str) -> None:
         if self.state.want_armed:
             self.get_logger().warning(f'disarmed: {why}')
-            self.state = replace(self.state, want_armed=False, arm_pending=False)
+            self.state = replace(self.state, want_armed=False, arm_pending=False, coarse=False)
 
 
 def main(args=None) -> None:

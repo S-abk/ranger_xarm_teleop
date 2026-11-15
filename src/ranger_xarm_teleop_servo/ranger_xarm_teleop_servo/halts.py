@@ -256,6 +256,7 @@ def _solver_summary(states: _Series) -> Dict[str, Any]:
     """
     damped = lowest = None
     total = damped_time = 0.0
+    scales: Dict[float, float] = {}
     for row, following in zip(states.rows, states.rows[1:] + [None]):
         if not row.get('engaged') or row.get('conditioning') is None:
             continue
@@ -264,10 +265,16 @@ def _solver_summary(states: _Series) -> Dict[str, Any]:
         if row.get('damped'):
             damped_time += step
         lowest = row['conditioning'] if lowest is None else min(lowest, row['conditioning'])
+        if row.get('scale') is not None:
+            scales[float(row['scale'])] = scales.get(float(row['scale']), 0.0) + step
     if total <= 0.0:
         return {}
     damped = damped_time / total
-    return {'share_damped': damped, 'conditioning_min': lowest}
+    summary = {'share_damped': damped, 'conditioning_min': lowest}
+    if scales:
+        # Share of the engaged time at each translation scale (recordings that store it).
+        summary['share_by_scale'] = {scale: time / total for scale, time in sorted(scales.items())}
+    return summary
 
 
 def _releases(states: _Series, servo: _Series) -> List[Dict[str, Any]]:
@@ -411,6 +418,10 @@ def format_report(result: Dict[str, Any]) -> str:
         lines.append(f"solver: damped {summary['share_damped'] * 100:.1f} % of the engaged time, "
                      f"minimum conditioning {summary['conditioning_min']:.3f} "
                      '(normalised: 1 and above unrestricted, 0 singular)')
+        if summary.get('share_by_scale'):
+            lines.append('translation scale while engaged: ' + ', '.join(
+                f'{scale:g}: {share * 100:.1f} %'
+                for scale, share in summary['share_by_scale'].items()))
     measure = summary.get('condition_number')
     if measure:
         # With the joint-space solver MoveIt Servo runs in joint-jog mode and never applies

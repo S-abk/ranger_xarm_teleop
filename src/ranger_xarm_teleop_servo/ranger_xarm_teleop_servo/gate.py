@@ -48,6 +48,13 @@ Rules, by ID:
   does a solver that cannot run (no chain or joint state, commanded and measured apart).
 * G-13 a calibration made under another (session id, reset count) is not used.
 
+Translation scale: the right thumbstick click switches between the fine and the coarse
+translation scale while armed; every arming starts at fine. Hand translation is
+multiplied by the scale, rotation never. A switch while engaged re-anchors the mapping
+at the controller pose of that cycle, so the target does not move at the switch. The
+raw-input check (G-5) stays on the unscaled hand; every later check sees the scaled
+target.
+
 A release caused by anything but the grip latches: the clutch engages again only
 after the grip was seen released.
 """
@@ -58,7 +65,7 @@ import math
 from typing import Optional, Tuple
 
 from .calibration import calibrate, Calibration
-from .mapping import apply_pivot, clutch_relative
+from .mapping import apply_pivot, clutch_relative, rescale
 from .params import GateParams
 from .rotations import (IDENTITY_Q, Pose, q_between, q_conj, q_mul, q_normalize, q_rotate,
                         q_slerp, q_to_rotvec, Quat, v_add, v_dot, v_norm, v_scale, v_sub)
@@ -126,6 +133,7 @@ class Frame:
     grip: bool
     calibrate: bool
     arm: bool
+    scale_toggle: bool = False        # right thumbstick click: fine <-> coarse translation scale
 
 
 @dataclass(frozen=True)
@@ -154,9 +162,9 @@ class GateState:
     arm_pending: bool = False         # armed by the button, the posture not yet checked
     calibration: Optional[Calibration] = None
     frame: Optional[Frame] = None
-    # Buttons of the newest frame that had a controller: (grip, calibrate, arm). An
-    # absent controller reports no buttons, which is not a release.
-    buttons: Optional[Tuple[bool, bool, bool]] = None
+    # Buttons of the newest frame that had a controller: (grip, calibrate, arm, scale
+    # toggle). An absent controller reports no buttons, which is not a release.
+    buttons: Optional[Tuple[bool, bool, bool, bool]] = None
     trip: Hold = Hold.NONE            # set by on_frame, consumed by the next tick
     latched: Hold = Hold.NONE         # cleared when the grip is seen released
     engaged: bool = False
@@ -165,6 +173,8 @@ class GateState:
     tool0: Optional[Pose] = None      # measured tool pose at engagement (G-6 offset limit)
     anchor: Optional[Pose] = None     # origin of the mapping: tool0 plus the absorbed lead
     heading: float = 0.0              # calibration heading captured at engagement
+    coarse: bool = False              # the operator selected the coarse translation scale
+    scale: float = 1.0                # translation scale the engagement's anchor is built for
     filtered: Optional[Pose] = None
     last_target: Optional[Pose] = None
     events: Tuple[str, ...] = ()
@@ -280,6 +290,7 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
     trip = state.trip
     want_armed = state.want_armed
     arm_pending = state.arm_pending
+    coarse = state.coarse
     calibration = state.calibration
     if prev is not None:
         tripped, text = _between_frames(prev, frame, params)
@@ -309,15 +320,25 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
             if frame.arm and not buttons[2]:
                 want_armed = not want_armed
                 arm_pending = want_armed
+                coarse = False              # every arming starts at the fine scale
                 events.append('arm requested' if want_armed else 'disarm requested')
+            # Only once the arming has been accepted: a click on the frame that arms, or while
+            # the arm request still waits for its posture check, must not start it at coarse.
+            if (frame.scale_toggle and not buttons[3] and want_armed and state.want_armed
+                    and not state.arm_pending):
+                coarse = not coarse
+                scale = params.translation_scale(coarse)
+                events.append(f'translation scale: {"coarse" if coarse else "fine"} '
+                              f'({scale:.2f})')
             if frame.calibrate and not buttons[1]:
                 result, text = _try_calibrate(state, frame, params)
                 events.append(text)
                 if result is not None:
                     calibration = result
-        buttons = (frame.grip, frame.calibrate, frame.arm)
+        buttons = (frame.grip, frame.calibrate, frame.arm, frame.scale_toggle)
     return replace(state, frame=frame, buttons=buttons, trip=trip, want_armed=want_armed,
-                   arm_pending=arm_pending, calibration=calibration, events=tuple(events))
+                   arm_pending=arm_pending, coarse=coarse, calibration=calibration,
+                   events=tuple(events))
 
 
 def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Hold:
@@ -509,6 +530,8 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
     """Run one target cycle; return the new state and what to publish."""
     events = list(state.events)
     state = _check_arming(state, env, params, events)
+    if state.coarse and not state.want_armed:
+        state = replace(state, coarse=False)    # disarmed by any path: the next arming is fine
     frame = state.frame
     age = env.now - frame.arrival if frame is not None else math.inf
     seq = frame.seq if frame is not None else 0
@@ -557,11 +580,19 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
                         clutch=apply_pivot(frame.controller, params.pivot_offset),
                         tool0=env.tool_pose, anchor=env.tool_pose,
                         heading=state.calibration.heading,
+                        scale=params.translation_scale(state.coarse),
                         filtered=env.tool_pose, last_target=env.tool_pose)
         events.append(f'clutch engaged at seq {frame.seq}')
 
     controller = apply_pivot(frame.controller, params.pivot_offset)
-    raw = clutch_relative(controller, state.clutch, state.heading, state.anchor)
+    scale = params.translation_scale(state.coarse)
+    if scale != state.scale:
+        # Switched while engaged: move the anchor so this cycle's controller pose maps to
+        # the same target at the new scale; only motion from here on is scaled anew.
+        state = replace(state, scale=scale,
+                        anchor=rescale(state.anchor, controller, state.clutch, state.heading,
+                                       state.scale, scale))
+    raw = clutch_relative(controller, state.clutch, state.heading, state.anchor, state.scale)
     filtered = low_pass(state.filtered, raw, params)
     target, limit = bound(filtered, state.tool0, state.last_target, params)
     step = v_norm(v_sub(target.p, state.last_target.p))
