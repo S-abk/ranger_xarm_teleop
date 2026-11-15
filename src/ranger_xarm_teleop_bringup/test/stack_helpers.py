@@ -47,8 +47,8 @@ INTO_BODY_START = [0.0, 0.2, -1.4, 0.0, 1.2, 0.0]
 BODY_OBSTACLE = ('into_body_obstacle', (0.37, 0.0, 0.26), (0.02, 0.30, 0.20))
 # The shoulder tests: pulled back over joint 1's axis. From the ready posture the link
 # keep-out stops link 2 before the laptop behind the arm, short of the shoulder region;
-# from here (the tool 0.15 m higher) the same hand motion crosses it with link 2 clear.
-SHOULDER_START = [0.0, -0.4, -1.3, 0.0, 1.7, 0.0]
+# from here (the tool 0.1 m higher) the same hand motion crosses it with link 2 clear.
+SHOULDER_START = [0.0, -0.5, -1.1, 0.0, 1.6, 0.0]
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVO_FIXTURES = os.path.join(os.path.dirname(os.path.dirname(HERE)), 'ranger_xarm_teleop_servo',
                               'test', 'fixtures')

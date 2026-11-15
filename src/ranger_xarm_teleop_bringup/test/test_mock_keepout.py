@@ -179,6 +179,46 @@ def _drive_into_contact(probe, path):
     return off < 0.01
 
 
+def _arm_teleop(probe, env, logs, index):
+    """Arm teleop from a recording that presses calibrate and arm only (no grip)."""
+    for attempt in range(2):
+        arming = Process(['ros2', 'run', 'ranger_xarm_teleop_bridge', 'replay_node',
+                          '--ros-args', '-p',
+                          f'file:={os.path.join(SERVO_FIXTURES, "arm_only.jsonl")}',
+                          '-p', 'wait_for_subscriber_s:=15.0', '-p', 'start_delay_s:=3.0'],
+                         env, str(logs / f'arm_{index}.{attempt}.log'))
+        try:
+            assert arming.wait(60.0) == 0, arming.output()
+        finally:
+            arming.stop()
+        try:
+            probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 10.0,
+                           'teleop owning')
+            return
+        except AssertionError:
+            # The button presses of a replay sometimes do not reach the node while the
+            # new publisher is being discovered (see replay_with_clean_input).
+            print(f'arming {index}: attempt {attempt} did not arm; repeated')
+    raise AssertionError('teleop was not armed')
+
+
+def _recover(env, logs, index):
+    """Run recover_arm.py (MoveIt plans to the ready posture); again if not handed back."""
+    for attempt in range(2):
+        recover = Process(['python3', os.path.join(TOOLS, 'recover_arm.py')], env,
+                          str(logs / f'recover_{index}.{attempt}.log'))
+        try:
+            code = recover.wait(180.0)
+        finally:
+            recover.stop()
+        if code == 0:
+            return
+        # Exit 4: the owner report was not fresh (nothing moved); seen at the baseline too.
+        assert code == 4, recover.output()
+        print(f'recover {index}: {recover.output()}; repeated')
+    raise AssertionError('recover_arm.py did not recover')
+
+
 def _valid(probe, q, extra):
     client = probe.node.create_client(GetStateValidity, '/check_state_validity')
     assert client.wait_for_service(timeout_sec=10.0)
@@ -205,15 +245,7 @@ def test_retreat_frees_the_arm_from_each_recorded_contact(stack, index):
     extra = _extra(model)
     probe.disarm()
     probe.move_to(path['positions'][0], seconds=4.0)
-    arming = Process(['ros2', 'run', 'ranger_xarm_teleop_bridge', 'replay_node', '--ros-args',
-                      '-p', f'file:={os.path.join(SERVO_FIXTURES, "arm_only.jsonl")}',
-                      '-p', 'wait_for_subscriber_s:=15.0', '-p', 'start_delay_s:=1.0'],
-                     env, str(logs / f'arm_{index}.log'))
-    try:
-        assert arming.wait(60.0) == 0, arming.output()
-    finally:
-        arming.stop()
-    probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 10.0, 'teleop owning')
+    _arm_teleop(probe, env, logs, index)
     assert _drive_into_contact(probe, path), 'the arm did not reach the recorded contact'
     halted_at = probe.joint_positions()
     assert model.clearance(halted_at, extra)[0] < MARGIN
@@ -231,12 +263,7 @@ def test_retreat_frees_the_arm_from_each_recorded_contact(stack, index):
     assert model.clearance(freed, extra)[0] >= MARGIN - 1e-3
     assert _valid(probe, freed, extra)
     # MoveIt plans from there again.
-    recover = Process(['python3', os.path.join(TOOLS, 'recover_arm.py')], env,
-                      str(logs / f'recover_{index}.log'))
-    try:
-        assert recover.wait(180.0) == 0, recover.output()
-    finally:
-        recover.stop()
+    _recover(env, logs, index)
     assert probe.joint_positions() == pytest.approx(READY, abs=5e-3)
     # And teleop drives again.
     before = _tool(arm, probe.joint_positions())

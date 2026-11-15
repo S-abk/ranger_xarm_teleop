@@ -25,9 +25,10 @@ import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from stack_helpers import (child_environment, kill_gz_partition, Probe, Process, READY,
-                           replay_with_clean_input, SERVO_FIXTURES)
-from test_mock_keepout import (_contact_paths, _drive_into_contact, _extra, _tool,  # noqa
-                               _valid, dls, ko, MARGIN, SERVO_HALT_CODES, TOOLS)
+                           replay_with_clean_input)
+from test_mock_keepout import (_arm_teleop, _contact_paths, _drive_into_contact,  # noqa
+                               _extra, _recover, _tool, _valid, dls, ko, MARGIN,
+                               SERVO_HALT_CODES, TOOLS)
 
 pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
                                 reason='set TELEOP_TEST_GAZEBO=1 to run the Gazebo tests')
@@ -141,15 +142,7 @@ def test_retreat_frees_the_arm_from_each_recorded_contact(stack, index):
     probe.disarm()
     probe.move_to(path['positions'][0], seconds=5.0)
     time.sleep(1.0)
-    arming = Process(['ros2', 'run', 'ranger_xarm_teleop_bridge', 'replay_node', '--ros-args',
-                      '-p', f'file:={os.path.join(SERVO_FIXTURES, "arm_only.jsonl")}',
-                      '-p', 'wait_for_subscriber_s:=15.0', '-p', 'start_delay_s:=1.0'],
-                     env, str(logs / f'arm_{index}.log'))
-    try:
-        assert arming.wait(60.0) == 0, arming.output()
-    finally:
-        arming.stop()
-    probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 15.0, 'teleop owning')
+    _arm_teleop(probe, env, logs, index)
     reached = _drive_into_contact(probe, path)
     halted_at = probe.joint_positions()
     print(f'gazebo {path["name"]}: model clearance at the contact '
@@ -168,12 +161,7 @@ def test_retreat_frees_the_arm_from_each_recorded_contact(stack, index):
     freed = probe.joint_positions()
     assert model.clearance(freed, extra)[0] >= MARGIN - 2e-3
     assert _valid(probe, freed, extra)
-    recover = Process(['python3', os.path.join(TOOLS, 'recover_arm.py')], env,
-                      str(logs / f'recover_{index}.log'))
-    try:
-        assert recover.wait(180.0) == 0, recover.output()
-    finally:
-        recover.stop()
+    _recover(env, logs, index)
     before = _tool(arm, probe.joint_positions())
     start, _ = replay_with_clean_input(probe, env, str(logs / f'replay_after_{index}.log'),
                                        'clutch_line', expected_engaged_s=2.8)
