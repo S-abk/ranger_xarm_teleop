@@ -38,6 +38,13 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ARM_JOINTS = [f'xarm_joint{i}' for i in range(1, 7)]
 READY = [0.0, -0.6, -0.7, 0.0, 1.3, 0.0]
+# The into-the-body tests (MoveIt Servo's collision halt, the backstop): the arm leans
+# forward so that pulling the tool 0.28 m back does not bring it near the robot's fixed
+# structure, where the link keep-out would stop it first; a box in the planning scene,
+# which the keep-out does not know, is in the way instead (Servo follows move_group's
+# scene). The tool starts at x 0.53 m and meets the box after about 0.12 m.
+INTO_BODY_START = [0.0, 0.2, -1.4, 0.0, 1.2, 0.0]
+BODY_OBSTACLE = ('into_body_obstacle', (0.37, 0.0, 0.26), (0.02, 0.30, 0.20))
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVO_FIXTURES = os.path.join(os.path.dirname(os.path.dirname(HERE)), 'ranger_xarm_teleop_servo',
                               'test', 'fixtures')
@@ -338,6 +345,47 @@ class Probe:
         self.wait_for(result.done, seconds + 20.0, 'the goal result')
         assert result.result().status == GoalStatus.STATUS_SUCCEEDED
         time.sleep(0.6)             # let "stopped" be established for the mux
+
+    def scene_box(self, name, centre, size, frame='xarm_link_base'):
+        """
+        Add a box to move_group's planning scene, which MoveIt Servo follows.
+
+        An obstacle the link keep-out does not know (it covers the robot description
+        only): Servo's collision check is then the only layer that sees it.
+        """
+        from moveit_msgs.msg import CollisionObject, PlanningScene
+        from moveit_msgs.srv import ApplyPlanningScene
+        from shape_msgs.msg import SolidPrimitive
+        from geometry_msgs.msg import Pose as PoseMsg
+        box = CollisionObject()
+        box.header.frame_id = frame
+        box.id = name
+        box.primitives = [SolidPrimitive(type=SolidPrimitive.BOX, dimensions=list(size))]
+        pose = PoseMsg()
+        pose.position.x, pose.position.y, pose.position.z = centre
+        pose.orientation.w = 1.0
+        box.primitive_poses = [pose]
+        box.operation = CollisionObject.ADD
+        self._apply_scene(PlanningScene(is_diff=True), box, ApplyPlanningScene)
+
+    def remove_scene_box(self, name, frame='xarm_link_base'):
+        """Remove a box added with ``scene_box``."""
+        from moveit_msgs.msg import CollisionObject, PlanningScene
+        from moveit_msgs.srv import ApplyPlanningScene
+        box = CollisionObject()
+        box.header.frame_id = frame
+        box.id = name
+        box.operation = CollisionObject.REMOVE
+        self._apply_scene(PlanningScene(is_diff=True), box, ApplyPlanningScene)
+
+    def _apply_scene(self, scene, box, service):
+        scene.world.collision_objects = [box]
+        client = self.node.create_client(service, '/apply_planning_scene')
+        assert client.wait_for_service(timeout_sec=10.0), 'no /apply_planning_scene'
+        future = client.call_async(service.Request(scene=scene))
+        self.wait_for(future.done, 10.0, 'the planning scene change')
+        assert future.result().success, 'the planning scene change was refused'
+        time.sleep(1.0)             # Servo's scene follows move_group's monitored scene
 
     def publish_trajectory(self, positions, seconds=0.5):
         """Publish a trajectory on the teleop controller's command topic (as Servo does)."""

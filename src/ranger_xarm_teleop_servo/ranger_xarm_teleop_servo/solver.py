@@ -446,8 +446,16 @@ def _constrained(arm: Arm, jn: np.ndarray, yn: np.ndarray, low_n: np.ndarray,
     if not np.any(lower - a @ z > 1e-9 * (1.0 + np.linalg.norm(a, axis=1))):
         return z, z_first, first_levels, fixed, False, False
     # min (z - z*)^T H (z - z*)  s.t.  a z >= lower,  low <= z <= high.
-    weights = np.array([1.0] * 3 + [KEEPOUT_ORIENTATION_WEIGHT] * 3)
-    h = (jn * weights[:, None] ** 2).T @ jn + KEEPOUT_REGULARISATION * np.eye(n)
+    # Tool motion across the commanded direction costs more than along it: where the
+    # command cannot be followed, the tool slows on the hand's line rather than leave it.
+    w = np.zeros((6, 6))
+    w[:3, :3] = np.eye(3)
+    speed = float(np.linalg.norm(yn[:3]))
+    if speed > 1e-9:
+        u = yn[:3] / speed
+        w[:3, :3] += KEEPOUT_ACROSS_WEIGHT * (np.eye(3) - np.outer(u, u))
+    w[3:, 3:] = KEEPOUT_ORIENTATION_WEIGHT ** 2 * np.eye(3)
+    h = jn.T @ w @ jn + KEEPOUT_REGULARISATION * np.eye(n)
     g = np.vstack([a, np.eye(n), -np.eye(n)])
     bound = np.concatenate([lower, low_n, -high_n])
     finite = np.isfinite(bound)
@@ -457,6 +465,7 @@ def _constrained(arm: Arm, jn: np.ndarray, yn: np.ndarray, low_n: np.ndarray,
     return solved, z_first, first_levels, fixed, True, False
 
 
+KEEPOUT_ACROSS_WEIGHT = 10.0         # tool motion across the commanded direction, extra
 KEEPOUT_ORIENTATION_WEIGHT = 0.3     # orientation yields to position in the correction
 KEEPOUT_REGULARISATION = 0.05       # weight of joint motion itself (normalised): keeps the
 #                                      correction from trading large joint swings for tool motion

@@ -36,8 +36,8 @@ from ranger_xarm_teleop_servo.rotations import (pose_from_matrix, q_between, v_n
                                                 v_sub)
 import rclpy
 
-from stack_helpers import (child_environment, Probe, Process, READY, replay,
-                           replay_with_clean_input)
+from stack_helpers import (BODY_OBSTACLE, child_environment, INTO_BODY_START, Probe, Process,
+                           READY, replay, replay_with_clean_input)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -186,7 +186,8 @@ def test_after_a_collision_halt_recovery_is_refused_and_teleop_works_again(stack
     probe, env, logs, _ = stack
 
     def ready():
-        probe.move_to(READY)
+        probe.move_to(INTO_BODY_START)
+        probe.scene_box(*BODY_OBSTACLE)
     start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_into_body.log'),
                                        'clutch_into_body', expected_engaged_s=1.0,
                                        before=ready)
@@ -206,6 +207,7 @@ def test_after_a_collision_halt_recovery_is_refused_and_teleop_works_again(stack
     assert code != 0 and 'start state in collision' in output, output
     assert probe.joint_positions() == pytest.approx(halted_at, abs=1e-4)
     probe.move_to(READY)                    # straight to the controller: test only
+    probe.remove_scene_box(BODY_OBSTACLE[0])
     assert probe.joint_positions() == pytest.approx(READY, abs=5e-3)
     # Teleop again, from the recovered posture: the arm follows the line.
     before = probe.tool_position()
