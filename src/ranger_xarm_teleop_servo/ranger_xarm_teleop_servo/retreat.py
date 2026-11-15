@@ -146,6 +146,9 @@ def plan(times: np.ndarray, postures: np.ndarray, measured: Sequence[float],
             best = (c, tool_travel)
         if c >= wanted and conditioning(q) >= min_conditioning and valid(q):
             path = np.vstack([measured, postures[i:][::-1]])
+            keep = np.concatenate([[True], np.max(np.abs(np.diff(path, axis=0)), axis=1)
+                                   > 1e-9])
+            path = path[keep]
             return Plan(True, f'back {tool_travel * 1000.0:.0f} mm of tool path along the '
                         f'recorded path to clearance {c * 1000.0:.1f} mm '
                         f'(from {start * 1000.0:.1f} mm)', path,
