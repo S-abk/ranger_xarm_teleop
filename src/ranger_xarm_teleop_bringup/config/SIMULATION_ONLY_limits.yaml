@@ -30,3 +30,10 @@
     max_translation_scale: 2.0
     # Not a limit: the coarse scale itself, kept beside the limit it must not exceed.
     translation_scale_coarse: 2.0
+    # G-15: the arm's links (and the tool) keep this far from the robot's fixed structure,
+    # by the keep-out model (which itself never reports more clearance than the collision
+    # geometry has). Above MoveIt Servo's 10 mm self-collision threshold, so its slow-down
+    # is not reached; above move_group's 2 x 5 mm planning padding, so a posture the
+    # retreat leaves the arm in can be planned from; 5 mm more for the simulated
+    # controller's overshoot.
+    link_keepout_margin_m: 0.025

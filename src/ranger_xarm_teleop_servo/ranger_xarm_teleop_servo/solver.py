@@ -69,6 +69,7 @@ One call of ``solve`` turns the tool target of a cycle into the joint velocity c
 
 from dataclasses import dataclass
 import math
+import time
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -325,6 +326,7 @@ class Solution:
     # m/s, base frame: tool velocity the position-type constraints (joint position bounds,
     # keep-out) took out of the command, before the speed scaling. Zero when none bound.
     blocked: np.ndarray = None
+    keepout_seconds: float = 0.0        # time spent on the keep-out this cycle (model and fix)
 
     @property
     def damped(self) -> bool:
@@ -368,13 +370,17 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
 
     rows = None
     clearance, pair = math.inf, ('', '')
+    began = time.perf_counter()
     if keepout is not None:
         if list(keepout.joint_names) != list(arm.joint_names):
             raise ValueError("the keep-out model is not on the arm's joints")
         rows = keepout.evaluate(q, extra)
         clearance, pair = rows.clearance, rows.nearest
+    model_seconds = time.perf_counter() - began
+    began = time.perf_counter()
     result = _constrained(arm, jn, yn, low_n, high_n, rows, keepout, params)
     z, z_first, first_levels, fixed, bound, infeasible = result
+    fix_seconds = time.perf_counter() - began if bound else 0.0
     if infeasible:
         qdot, scale, limit, linear, angular = np.zeros_like(q), 0.0, LIMIT_LINK_KEEPOUT, 0.0, 0.0
     else:
@@ -388,7 +394,9 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
                     linear_speed=linear, angular_speed=angular,
                     scale=scale, limit=limit, fixed=fixed,
                     keepout_clearance=clearance, keepout_pair=pair, keepout_bound=bound,
-                    blocked=blocked)
+                    blocked=blocked,
+                    keepout_seconds=(model_seconds + fix_seconds) if keepout is not None
+                    else 0.0)
 
 
 def _rows_normalised(arm: Arm, rows, keepout, params: SolverParams):

@@ -113,6 +113,7 @@ class Limit(IntEnum):
     TOOL_SPEED = 6
     JOINT_VELOCITY = 7
     JOINT_POSITION = 8
+    LINK_KEEPOUT = 9
 
 
 # Slack for the re-check of a pose that was just clamped onto a bound.

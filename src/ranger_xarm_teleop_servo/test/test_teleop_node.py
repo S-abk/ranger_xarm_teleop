@@ -66,6 +66,7 @@ LIMITS = {
     'max_lead_translation_m': 0.05,
     'max_lead_rotation_deg': 12.0,
     'max_translation_scale': 2.0,
+    'link_keepout_margin_m': 0.025,
 }
 TIP_IN_TOOL = Pose((0.0, 0.0, -0.10), (0.0, 0.0, 0.0, 1.0))
 TCP_START = pose_from_matrix(dls.tool_pose(
