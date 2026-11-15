@@ -269,7 +269,7 @@ def test_contradictory_rows_give_zero_velocity_and_the_keepout_limit(robot):
 
 
 def _between_robot():
-    """The test robot with a ceiling over the forearm: the arm between two obstacles."""
+    """Return the test robot with a ceiling over the forearm: between two obstacles."""
     ceiling = ('<link name="ceiling"><collision><geometry><box size="0.40 0.40 0.03"/>'
                '</geometry></collision></link><joint name="base_to_ceiling" type="fixed">'
                '<parent link="xarm_link_base"/><child link="ceiling"/>'

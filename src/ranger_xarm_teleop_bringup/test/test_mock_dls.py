@@ -37,7 +37,7 @@ from ranger_xarm_teleop_servo.rotations import (pose_from_matrix, q_between, v_n
 import rclpy
 
 from stack_helpers import (BODY_OBSTACLE, child_environment, INTO_BODY_START, Probe, Process,
-                           READY, replay, replay_with_clean_input)
+                           READY, replay, replay_with_clean_input, SHOULDER_START)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -289,7 +289,7 @@ def _tool_between(timed, t0, t1):
 def test_shoulder_region_is_crossed_without_a_halt(stack):
     """INV-5 (shoulder): pulled back over joint 1's axis, damped, never halted."""
     probe, env, logs, _ = stack
-    timed, _ = _clean_run(probe, env, logs, 'clutch_shoulder', 1.0)
+    timed, _ = _clean_run(probe, env, logs, 'clutch_shoulder', 1.0, posture=SHOULDER_START)
     engaged = [s for _, s in timed if s.clutch_engaged]
     assert min(s.conditioning for s in engaged) < 0.2
     assert any(s.damped for s in engaged)

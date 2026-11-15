@@ -750,10 +750,14 @@ class Model:
         ``influence`` (default: the model's). The clearance is exact when it is within
         ``influence``; otherwise it is a lower bound (``Rows.exact`` False).
         """
+        n = len(self.joint_names)
+        if not self.pair_list:
+            # Nothing to keep apart (no collision geometry on one side).
+            return Rows(np.zeros((0, n)), np.zeros(0), np.zeros(0, dtype=int), math.inf,
+                        ('', ''), False)
         frames = self._frames(np.asarray(q, dtype=float), extra)
         reach = self.influence if influence is None else influence
         pair, d, normal, point, other, lower = self._compute(frames, reach)
-        n = len(self.joint_names)
         if len(d) and d.min() <= reach:
             k = int(np.argmin(d))
             best, nearest, exact = float(d[k]), self.pairs[pair[k]], True
@@ -795,9 +799,11 @@ class Model:
     def pair_minima(self, q: Sequence[float], extra: Optional[Mapping[str, float]] = None,
                     limit: float = math.inf) -> np.ndarray:
         """Return each pair's clearance, or ``limit`` when it is certainly not below it."""
+        out = np.full(len(self.pair_list), limit if math.isfinite(limit) else math.inf)
+        if not self.pair_list:
+            return out
         frames = self._frames(np.asarray(q, dtype=float), extra)
         pair, d, _, _, _, _ = self._compute(frames, limit)
-        out = np.full(len(self.pair_list), limit if math.isfinite(limit) else math.inf)
         if len(d):
             np.minimum.at(out, pair, d)
         return out
@@ -815,8 +821,8 @@ class Model:
         return float(self.pair_minima(q, extra, limit)[index])
 
     def pair_clearances(self, q: Sequence[float],
-                        extra: Optional[Mapping[str, float]] = None) -> Dict[Tuple[str, str],
-                                                                           float]:
+                        extra: Optional[Mapping[str, float]] = None
+                        ) -> Dict[Tuple[str, str], float]:
         """Return the clearance of every included pair of bodies (m)."""
         return {self.pairs[i]: self.pair_clearance(i, q, extra)
                 for i in range(len(self.pair_list))}
@@ -887,7 +893,8 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
         by_child[joint.child] = joint
     links = {link.get('name'): link for link in root.findall('link')}
     hasher = hashlib.sha256()
-    hasher.update(f'{base}|{tip}|{arm_names}|{cell}|{fixed_cell}|{spacing}|{TOOL_ARM_JOINTS}'.encode())
+    hasher.update(f'{base}|{tip}|{arm_names}|{cell}|{fixed_cell}|{spacing}|'
+                  f'{TOOL_ARM_JOINTS}'.encode())
     for seg in chain.segments:
         hasher.update(joints[seg.name].text.encode())
 
@@ -1042,7 +1049,7 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
                 excluded.append(Excluded(moving_name, other, 'structurally near',
                                          float(values[:, column].min()),
                                          float(values[:, column].max())))
-        drop = set(int(i) for i in candidates)
+        drop = {int(i) for i in candidates}
         model.pair_list = [p for i, p in enumerate(pair_list) if i not in drop]
         model._index()
     hasher.update(f'{sorted(extra_joints.items())}'.encode())

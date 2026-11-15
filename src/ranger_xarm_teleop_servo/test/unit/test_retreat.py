@@ -51,7 +51,7 @@ def _into_contact(arm, model, extra, start, dx, dy=0.0, dz=0.0):
 
 def _plan(robot, times, postures, measured, **kwargs):
     arm, model, extra = robot
-    options = dict(wanted=MARGIN, min_conditioning=0.2)
+    options = {'wanted': MARGIN, 'min_conditioning': 0.2}
     options.update(kwargs)
     return retreat.plan(times, postures, measured,
                         clearance=lambda q: model.clearance(q, extra)[0],

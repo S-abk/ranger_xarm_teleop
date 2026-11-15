@@ -252,8 +252,8 @@ def test_clearance_is_the_brute_force_minimum_over_every_sphere(model, extra):
         brute = min(model.pair_minima(q, extra).min(), math.inf)
         if brute <= model.influence:
             assert rows.exact and rows.clearance == pytest.approx(brute, abs=1e-12)
-            assert model.pairs.index(rows.nearest) == int(np.argmin(model.pair_minima(q,
-                                                                                     extra)))
+            minima = model.pair_minima(q, extra)
+            assert model.pairs.index(rows.nearest) == int(np.argmin(minima))
         else:
             assert not rows.exact and rows.clearance <= brute + 1e-12
 
@@ -278,3 +278,12 @@ def test_row_gradients_are_the_derivative_of_the_distance(model, extra):
             assert rows.grad[i] @ step == pytest.approx(numeric, abs=2e-9)
             checked += 1
     assert checked > 10
+
+
+def test_a_description_without_collision_geometry_keeps_nothing_out():
+    from arm_urdf import arm_urdf
+    model = ko.build(arm_urdf(), resolve, 'xarm_link_base', 'xarm_link_tcp', MARGIN)
+    assert not model.pairs and model.sphere_count == 0
+    rows = model.evaluate(READY)
+    assert len(rows.distance) == 0 and rows.clearance == math.inf
+    assert len(model.pair_minima(READY)) == 0

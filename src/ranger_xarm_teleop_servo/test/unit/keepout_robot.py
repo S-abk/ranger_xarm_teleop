@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-A made-up robot for the keep-out tests: the six-joint chain of ``arm_urdf`` with collision
-shapes, on a mobile base with a pedestal, a screen box behind the arm, a sensor mast, a
-mesh sensor, a two-finger gripper (one driven joint, one mimic) and a wrist camera.
+A made-up robot for the keep-out tests.
+
+The six-joint chain of ``arm_urdf`` with collision shapes, on a mobile base with a
+pedestal, a screen box behind the arm, a sensor mast, a mesh sensor, a two-finger gripper
+(one driven joint, one mimic) and a wrist camera.
 
 Nothing here is the real robot's geometry; it only has the same kinds of parts.
 """

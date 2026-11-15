@@ -438,7 +438,8 @@ def generate() -> Dict[str, List[str]]:
     makers = [clutch_line, clutch_circle, clutch_rotation, clutch_reengage, clutch_jump,
               clutch_stall, clutch_release_moving, clutch_into_body, clutch_singularity,
               clutch_shoulder, clutch_fast, clutch_step, clutch_joint_limit, clutch_reach,
-              clutch_scale_switch, clutch_keepout_slide, clutch_keepout_reverse, arm_only, gate_absent,
+              clutch_scale_switch, clutch_keepout_slide, clutch_keepout_reverse, arm_only,
+              gate_absent,
               gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
               gate_seq_backwards]
     return {maker.__name__: maker() for maker in makers}

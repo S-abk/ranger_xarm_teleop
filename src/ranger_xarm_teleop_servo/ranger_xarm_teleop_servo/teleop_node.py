@@ -367,6 +367,7 @@ class TeleopNode(Node):
         # Link keep-out (G-15): the model, what it was built from, and why it cannot be used.
         self.keepout: Optional[ko.Model] = None
         self.keepout_fault = ''
+        self._keepout_tried = False
         self.keepout_floor = math.inf       # clearance the next cycle may not fall below
         self.servo_description_compared = False
         self.path = PathRecorder()
@@ -625,12 +626,17 @@ class TeleopNode(Node):
 
     def _build_keepout(self) -> None:
         """Build the link keep-out model from the robot description (refuses the start)."""
+        self._keepout_tried = True
         started = time.perf_counter()
         try:
             self.keepout = ko.build(self.urdf, self._resolver(), self.base_frame,
                                     self.tip_frame, self.keepout_margin,
                                     cell=self.keepout_cell)
-        except (ko.ModelError, ChainError, ValueError) as err:
+        except ChainError as err:
+            # No arm chain: the solver has none either and teleop stays not ready.
+            self.get_logger().error(f'no link keep-out model: {err}')
+            return
+        except (ko.ModelError, ValueError) as err:
             raise StartupRefused(f'link keep-out: {err}') from err
         took = time.perf_counter() - started
         model = self.keepout
@@ -674,6 +680,8 @@ class TeleopNode(Node):
 
     def _build_arm(self) -> None:
         """Build the solver's arm once the robot description and the tool offset are known."""
+        if self.urdf is not None and self.keepout is None and not self._keepout_tried:
+            self._build_keepout()
         if self.arm is not None or self.urdf is None or self.tool_to_tip is None:
             return
         try:
@@ -715,20 +723,19 @@ class TeleopNode(Node):
             self.servo_output = (self.mono(), dict(zip(msg.joint_names, msg.points[-1].positions)))
 
     def _on_robot_description(self, msg: String) -> None:
+        if self.simulation_only and not self.robot_description_checked:
+            try:
+                plugins = require_simulator(msg.data)
+            except NotASimulator as err:
+                raise StartupRefused(str(err)) from err
+            self.robot_description_checked = True
+            self.get_logger().info(
+                f'simulation-only limits accepted: hardware {sorted(set(plugins))}')
         if self.urdf is None:
             self.urdf = msg.data
-            self._build_keepout()
             self._build_arm()
         elif msg.data != self.urdf and self.keepout is not None:
             self._compare_description(msg.data, 'a later /robot_description')
-        if not self.simulation_only or self.robot_description_checked:
-            return
-        try:
-            plugins = require_simulator(msg.data)
-        except NotASimulator as err:
-            raise StartupRefused(str(err)) from err
-        self.robot_description_checked = True
-        self.get_logger().info(f'simulation-only limits accepted: hardware {sorted(set(plugins))}')
 
     def _on_owner(self, msg: ArmOwner) -> None:
         self.owner = msg.owner
@@ -814,7 +821,8 @@ class TeleopNode(Node):
         grace after the first one, then never older than the timeout), and the tool at
         Servo's commanded state must agree with the measured one.
         """
-        ready = self.arm is not None and not self.solver_fault and not self.keepout_fault
+        ready = (self.arm is not None and self.keepout is not None and not self.solver_fault
+                 and not self.keepout_fault)
         if not self.state.engaged or self.first_command_at is None:
             return ready, True
         reference = self.reference(now)
@@ -1218,8 +1226,10 @@ class TeleopNode(Node):
         solution = self.solution if output.target is not None else None
         if limit == Limit.NONE and solution is not None:
             limit = SOLVER_LIMITS.get(solution.limit, Limit.NONE)
-        if (output.engaged and limit == Limit.NONE and self.servo_status_current()
-                and self.servo_status > 0):
+        # MoveIt Servo slowing or halting the arm outranks this node's own solver limits:
+        # it is the collision backstop, and the operator has to know it is acting.
+        if (output.engaged and (limit == Limit.NONE or limit in SOLVER_LIMITS.values())
+                and self.servo_status_current() and self.servo_status > 0):
             limit = Limit.SERVO
         msg.active_limit = int(limit)
         if solution is not None:
