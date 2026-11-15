@@ -1076,9 +1076,9 @@ class TeleopNode(Node):
             reference = joints
         else:
             reference = self.reference(now)
-            output = self.servo_output
-            if reference is not None and self.output_confirmed and output is not None:
-                self._cycles.reference_age(now - output[0])
+            newest = self.servo_output
+            if reference is not None and self.output_confirmed and newest is not None:
+                self._cycles.reference_age(now - newest[0])
         solving = self.mono()
         self._command_steps.append(('reference', solving - started))
         why = ''
