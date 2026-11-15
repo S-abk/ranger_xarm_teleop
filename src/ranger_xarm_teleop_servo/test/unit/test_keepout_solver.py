@@ -123,7 +123,8 @@ def test_inv1_pulling_back_into_the_screen_stops_at_the_margin_and_slides(robot)
     assert _floor_kept(model, extra, history) <= 1e-9
     assert any(s.limit == sv.LIMIT_LINK_KEEPOUT for s in solutions)
     clearance, _ = model.clearance(history[-1], extra)
-    assert clearance == pytest.approx(MARGIN, abs=2e-4)          # it got there
+    # It got there: the damper aims 0.5 mm outside the margin.
+    assert clearance == pytest.approx(MARGIN + sv.KEEPOUT_TARGET_INSIDE, abs=2e-4)
     # ... and the tool still went back by other joints (the hand's direction is kept).
     tool = sv.tool_pose(arm, history[-1])[:3, 3]
     assert tool[0] < sv.tool_pose(arm, start)[0, 3] - 0.15
@@ -131,12 +132,18 @@ def test_inv1_pulling_back_into_the_screen_stops_at_the_margin_and_slides(robot)
 
 # --- INV-2 along the boundary ------------------------------------------------------------------
 
+def _against_the_screen(arm, model, extra):
+    """Return a posture with link 2 held at the margin by the screen, the tool high."""
+    start = np.array(NEAR_SCREEN)
+    history, _, solutions = _drive(arm, model, extra, start,
+                                   _moved(sv.tool_pose(arm, start), dx=-0.15, dz=0.15), 250)
+    assert solutions[-1].keepout_bound and solutions[-1].keepout_pair == ('l2', 'screen')
+    return history[-1]
+
+
 def test_inv2_motion_along_the_boundary_keeps_its_speed(robot):
     arm, model, extra = robot
-    start = np.array(READY)
-    target = _moved(sv.tool_pose(arm, start), dx=-0.25)
-    history, _, _ = _drive(arm, model, extra, start, target, 300)
-    q = history[-1]
+    q = _against_the_screen(arm, model, extra)
     tool = sv.tool_pose(arm, q)
     for dy in (0.05, -0.05):
         sideways = _moved(tool, dy=dy)
@@ -241,22 +248,33 @@ def test_contradictory_rows_give_zero_velocity_and_the_keepout_limit(robot):
     contradictory = ko.Rows(np.vstack([rows.grad[:1], -rows.grad[:1]]),
                             np.array([0.0, 0.0]), np.array([rows.pair[0]] * 2), 0.0,
                             rows.nearest)
-    bias = np.array([0.05, 0.05])
+    # Both at once ask every row to move away: impossible.
+    contradictory = ko.Rows(contradictory.grad, np.array([-0.5, -0.5]), contradictory.pair,
+                            -0.5, rows.nearest)
     jn = sv._normalised(arm, sv.tool_jacobian(arm, q), PARAMS)
     low, high = sv.position_bounds(arm, q, PARAMS)
-    z, _, _, _, bound, infeasible = sv._constrained(
-        arm, jn, np.array([0.5, 0, 0, 0, 0, 0]), low / arm.velocity, high / arm.velocity,
-        contradictory, bias, model, PARAMS)
+    original = sv._rows_normalised
+
+    def pushing(arm_, rows_, keepout_, params_):
+        a, lower = original(arm_, rows_, keepout_, params_)
+        return a, np.full(len(lower), 0.05)
+    sv._rows_normalised = pushing
+    try:
+        z, _, _, _, bound, infeasible = sv._constrained(
+            arm, jn, np.array([0.5, 0, 0, 0, 0, 0]), low / arm.velocity, high / arm.velocity,
+            contradictory, model, PARAMS)
+    finally:
+        sv._rows_normalised = original
     assert infeasible and bound and np.array_equal(z, np.zeros(6))
 
 
 def _between_robot():
-    """The test robot with a second box in front of link 2: link 2 between two obstacles."""
-    wall = ('<link name="front_wall"><collision><geometry><box size="0.03 0.40 0.30"/>'
-            '</geometry></collision></link><joint name="base_to_front_wall" type="fixed">'
-            '<parent link="xarm_link_base"/><child link="front_wall"/>'
-            '<origin xyz="0.075 0 0.40"/></joint></robot>')
-    urdf = robot_urdf().replace('</robot>', wall)
+    """The test robot with a ceiling over the forearm: the arm between two obstacles."""
+    ceiling = ('<link name="ceiling"><collision><geometry><box size="0.40 0.40 0.03"/>'
+               '</geometry></collision></link><joint name="base_to_ceiling" type="fixed">'
+               '<parent link="xarm_link_base"/><child link="ceiling"/>'
+               '<origin xyz="-0.05 0 0.655"/></joint></robot>')
+    urdf = robot_urdf().replace('</robot>', ceiling)
     model = ko.build(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', MARGIN)
     return sv.arm_from_urdf(urdf, 'xarm_link_base', 'xarm_link_tcp'), model
 
@@ -264,19 +282,33 @@ def _between_robot():
 def test_between_two_obstacles_neither_is_approached_and_the_free_direction_is_open():
     arm, model = _between_robot()
     extra = model.extra_values({'finger_left_joint': 0.02})
-    # Lean back until link 2 is held off the screen behind, with the wall just in front.
+    # Link 2 near the screen behind, the forearm under the ceiling.
     q = np.array([0.0, -1.0, -0.6, 0.0, 1.5, 0.0])
     pairs = model.pair_clearances(q, extra)
-    assert pairs[('l2', 'front_wall')] < MARGIN + 0.06
-    for dx in (-0.2, 0.2):                    # toward either obstacle
-        target = _moved(sv.tool_pose(arm, q), dx=dx)
-        history, _, solutions = _drive(arm, model, extra, q, target, 100)
+    assert MARGIN < min(v for k, v in pairs.items() if k[1] == 'ceiling') < MARGIN + 0.06
+    assert MARGIN < pairs[('l2', 'screen')] < MARGIN + 0.06
+    for move in ({'dx': -0.2}, {'dz': 0.2}, {'dx': -0.2, 'dz': 0.2}):     # into either, both
+        target = _moved(sv.tool_pose(arm, q), **move)
+        history, commands, _ = _drive(arm, model, extra, q, target, 100)
+        assert np.all(np.isfinite(commands))
         assert _floor_kept(model, extra, history) <= 1e-9
-    # Sideways, along both: free, at speed.
-    target = _moved(sv.tool_pose(arm, q), dy=0.3)
-    history, commands, _ = _drive(arm, model, extra, q, target, 50)
+    # Down, away from the ceiling (the screen is not approached faster than allowed):
+    # free, unslowed, and the arm leaves the ceiling.
+    start = sv.tool_pose(arm, q)
+    target = _moved(start, dz=-0.10)
+    history, commands, solutions = _drive(arm, model, extra, q, target, 25)
+    assert not any(s.keepout_bound for s in solutions)
+    plain_history, _, _ = _drive(arm, None, None, q, target, 25)
+    assert np.allclose(history[-1], plain_history[-1], atol=1e-12)
+    after = model.pair_clearances(history[-1], extra)
+    assert min(v for k, v in after.items() if k[1] == 'ceiling') > \
+        min(v for k, v in pairs.items() if k[1] == 'ceiling') + 0.03
+    # Forward, away from the screen: it slides under the ceiling and leaves the screen.
+    history, _, _ = _drive(arm, model, extra, q, _moved(start, dx=0.10), 25)
     assert _floor_kept(model, extra, history) <= 1e-9
-    assert abs(sv.tool_pose(arm, history[-1])[1, 3] - sv.tool_pose(arm, q)[1, 3]) > 0.15
+    assert model.pair_clearances(history[-1], extra)[('l2', 'screen')] > \
+        pairs[('l2', 'screen')] + 0.01
+    assert sv.tool_pose(arm, history[-1])[0, 3] - start[0, 3] > 0.07
 
 
 def test_command_is_finite_and_never_breaks_a_row_at_contact(robot):
