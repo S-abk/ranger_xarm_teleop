@@ -33,16 +33,21 @@ uint8 HOLD_SEQ_BACKWARDS = 14      # G-4: sequence number or headset time went b
 uint8 HOLD_INPUT_JUMP = 15         # G-5: raw controller motion between two headset frames too fast
 uint8 HOLD_STEP_REJECTED = 16      # G-5: target step beyond the per-cycle limit
 uint8 HOLD_TOOL_POSE_STALE = 17    # G-11: measured tool pose too old or unavailable
-uint8 HOLD_SERVO_NOT_READY = 18    # MoveIt Servo did not confirm it is running in pose mode
-uint8 HOLD_SERVO_HALTED = 19       # MoveIt Servo halted (collision or singularity), see servo_status
+uint8 HOLD_SERVO_NOT_READY = 18    # MoveIt Servo not verified, not in joint-jog mode, or its output stopped
+uint8 HOLD_SERVO_HALTED = 19       # MoveIt Servo halted (collision or joint bound), see servo_status
+uint8 HOLD_SOLVER = 20             # no kinematic chain or joint state, or commanded and measured disagree
 uint8 hold_reason
 
-# Bound that shaped the target of this cycle (G-6, G-8).
+# Bound that shaped the target or the joint command of this cycle (G-6, G-8, G-14).
 uint8 LIMIT_NONE = 0
 uint8 LIMIT_OFFSET_TRANSLATION = 1
 uint8 LIMIT_OFFSET_ROTATION = 2
 uint8 LIMIT_KEEP_OUT = 3
 uint8 LIMIT_SERVO = 4              # MoveIt Servo is slowing or halting, see servo_status
+uint8 LIMIT_LEAD = 5               # G-14: target clamped to the lead limit, excess absorbed
+uint8 LIMIT_TOOL_SPEED = 6         # G-8: joint command scaled to the tool speed caps
+uint8 LIMIT_JOINT_VELOCITY = 7     # G-8: joint command scaled to the joint velocity limits
+uint8 LIMIT_JOINT_POSITION = 8     # G-8: a joint held at its position bound, the rest re-solved
 uint8 active_limit
 
 # Latest moveit_msgs/ServoStatus code; -1 when none was received.
@@ -60,6 +65,27 @@ float64 input_age
 uint64 input_seq
 
 # G-12: measured tool pose (tool_frame in the arm base frame), separate from the commanded
-# target on /teleop/target_pose. Valid only when measured_tool_pose_valid is true.
+# target on /teleop/target_pose: forward kinematics of the newest /joint_states.
+# Valid only when measured_tool_pose_valid is true.
 bool measured_tool_pose_valid
 geometry_msgs/Pose measured_tool_pose
+
+# G-8: the damped least-squares solver. Valid while the clutch is engaged, else 0 / false.
+# Conditioning: the smaller of the solver's two levels (position, then orientation given
+# position) as the smallest singular value of the speed-normalised Jacobian: the share of
+# the speed cap the tool reaches in its weakest direction with every joint at its velocity
+# limit. >= 1 unrestricted, 0 singular. The same units for translation and rotation.
+float64 conditioning
+# Damping is in use (reduced accuracy near a singularity), and its normalised value.
+bool damped
+float64 damping
+# Target vs the tool pose of the solver's reference (MoveIt Servo's commanded state):
+# accuracy lost to damping and limits, without the lag. m and rad.
+float64 solver_error_translation
+float64 solver_error_rotation
+# G-14: target vs the measured tool pose (includes the lag). m and rad.
+float64 lead_translation
+float64 lead_rotation
+# Tool speed of the joint command sent this cycle, m/s and rad/s (G-8 caps).
+float64 commanded_linear_speed
+float64 commanded_angular_speed

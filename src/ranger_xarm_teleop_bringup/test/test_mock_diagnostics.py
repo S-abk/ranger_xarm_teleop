@@ -14,11 +14,11 @@
 """
 Session recorder, halt table and recovery against the teleop stack in mock execution.
 
-Covers: the recorder never starts or stops while the clutch is engaged; a recorded
-singularity halt comes out of the halt table with the measure MoveIt Servo acted on;
-re-engaging beyond the hard stop cannot move the arm; ``move_arm.py`` says why a goal
-was rejected; ``recover_arm.py`` disarms, waits for MoveIt and moves, and moves nothing
-while teleop keeps the arm. One mock stack for the module, on its own ROS domain.
+Covers: the recorder never starts or stops while the clutch is engaged; a session that
+used to halt for a singularity (pose commands) is recorded without any halt and its halt
+table is empty; ``move_arm.py`` says why a goal was rejected; ``recover_arm.py`` disarms,
+waits for MoveIt and moves, and moves nothing while teleop keeps the arm. One mock stack
+for the module, on its own ROS domain.
 """
 
 import json
@@ -34,7 +34,8 @@ from stack_helpers import child_environment, Probe, Process, READY, replay
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
-# Wrist 0.05 rad from aligned: MoveIt Servo's measure is 34.6 there, beyond its hard stop.
+# Wrist 0.05 rad from aligned: MoveIt Servo's measure is 34.6 there, beyond its hard stop;
+# with pose commands every engagement from here halted at once.
 BEYOND_HARD_STOP = [0.0, -0.6, -0.7, 0.0, 0.05, 0.0]
 pytestmark = pytest.mark.skipif(not os.path.exists(os.path.join(TOOLS, 'record_session.py')),
                                 reason='tools/ is not next to the source tree')
@@ -146,11 +147,11 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
     probe.disarm()
 
 
-def test_singularity_halt_is_recorded_and_re_engaging_cannot_move_away(stack):
+def test_session_that_used_to_halt_is_recorded_without_a_halt(stack):
+    """Replaces the pose-mode test (two singularity halts in the table, the arm still)."""
     probe, env, logs, _ = stack
     probe.disarm()
     probe.move_to(BEYOND_HARD_STOP)
-    before = probe.joint_positions()
     start = time.monotonic()
     recorder, path = start_recorder(env, logs, 'singularity')
     player = replay(env, 'clutch_singularity', str(logs / 'replay_singularity.log'))
@@ -163,24 +164,17 @@ def test_singularity_halt_is_recorded_and_re_engaging_cannot_move_away(stack):
         player.stop()
         recorder.stop()
     states = probe.states_since(start)
-    halted = [s for s in states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
-    assert halted and all(s.servo_status == ServoStatus.HALT_FOR_SINGULARITY for s in halted)
-    # Two engagements (tilt further in, then tilt back out): the arm moved in neither.
-    assert probe.max_joint_change(start, before) < 2e-3
+    assert any(s.clutch_engaged for s in states)
+    assert not any(s.hold_reason == TeleopState.HOLD_SERVO_HALTED for s in states)
+    assert not any(s.servo_status == ServoStatus.HALT_FOR_SINGULARITY for s in states)
+    assert probe.max_joint_change(start, BEYOND_HARD_STOP) > 0.2      # it moved
     report = Process(tool('record_session.py', 'halts', path, '--json'), env,
                      str(logs / 'halts.json'))
     assert report.wait(60.0) == 0, report.output()
     result = json.loads(report.output())
     report.stop()
-    assert len(result['halts']) == 2
-    for halt in result['halts']:
-        assert halt['servo_code'] == 2 and halt['hold_reason'] == 'SERVO_HALTED'
-        assert halt['servo_message'] == 'Very close to a singularity, emergency stop'
-        assert 34.0 < halt['condition_number'] < 35.5
-        assert halt['resembles'] == 'wrist'
-        assert halt['joints'] == pytest.approx(BEYOND_HARD_STOP, abs=2e-3)
-        assert halt['nearest_limit']['joint'] == 'xarm_joint3'
-    assert result['summary']['by_reason'] == {'HALT_FOR_SINGULARITY / wrist': 2}
+    assert result['halts'] == [] and result['summary']['by_reason'] == {}
+    assert result['summary']['engaged_s'] > 2.0
 
 
 def test_move_arm_says_why_the_goal_was_rejected(stack):

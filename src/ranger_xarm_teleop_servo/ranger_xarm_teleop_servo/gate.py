@@ -38,8 +38,14 @@ Rules, by ID:
 * G-6  offset limit and keep-out planes are applied after the filter and re-checked on
   the final pose; a pose that fails the re-check is replaced by the last accepted one.
 * G-10 filter and limiter state restart from the measured tool pose at every engagement.
-* While engaged, MoveIt Servo no longer running, or reporting a halt, releases the
-  clutch: a target must not move on while the arm stands still.
+* G-14 the target may not lead the measured tool pose by more than the lead limits. The
+  excess is clamped away and absorbed: the mapping's anchor and the filter state move by
+  the same amount, so the hand's lead is not stored and the arm never catches up later.
+  Order: map, filter, G-6 bounds, G-5 step check (a jump is rejected, never clipped),
+  G-14 lead clamp, G-6 re-check. The speed caps (G-8) act on the joint command (solver).
+* While engaged, MoveIt Servo no longer running (or no longer following), or reporting a
+  halt, releases the clutch: a target must not move on while the arm stands still. So
+  does a solver that cannot run (no chain or joint state, commanded and measured apart).
 * G-13 a calibration made under another (session id, reset count) is not used.
 
 A release caused by anything but the grip latches: the clutch engages again only
@@ -54,8 +60,8 @@ from typing import Optional, Tuple
 from .calibration import calibrate, Calibration
 from .mapping import apply_pivot, clutch_relative
 from .params import GateParams
-from .rotations import (Pose, q_between, q_rotate, q_slerp, v_add, v_dot, v_norm, v_scale,
-                        v_sub)
+from .rotations import (IDENTITY_Q, Pose, q_between, q_conj, q_mul, q_normalize, q_rotate,
+                        q_slerp, q_to_rotvec, Quat, v_add, v_dot, v_norm, v_scale, v_sub)
 
 
 class Hold(IntEnum):
@@ -81,6 +87,7 @@ class Hold(IntEnum):
     TOOL_POSE_STALE = 17
     SERVO_NOT_READY = 18
     SERVO_HALTED = 19
+    SOLVER = 20
 
 
 class Limit(IntEnum):
@@ -91,6 +98,10 @@ class Limit(IntEnum):
     OFFSET_ROTATION = 2
     KEEP_OUT = 3
     SERVO = 4
+    LEAD = 5
+    TOOL_SPEED = 6
+    JOINT_VELOCITY = 7
+    JOINT_POSITION = 8
 
 
 # Slack for the re-check of a pose that was just clamped onto a bound.
@@ -125,8 +136,14 @@ class Env:
     owner_is_teleop: bool
     tool_pose: Optional[Pose]         # measured tool pose in the arm base frame
     tool_pose_age: float              # seconds; inf when unknown
-    servo_active: bool                # MoveIt Servo confirmed running in pose mode
-    servo_halted: bool = False        # MoveIt Servo reports a halt (collision, singularity)
+    servo_active: bool                # MoveIt Servo verified, running in joint-jog mode
+    servo_halted: bool = False        # MoveIt Servo reports a halt (collision, joint bound)
+    # The solver can run: kinematic chain and joint state known, and the commanded state
+    # agrees with the measured one.
+    solver_ready: bool = True
+    # Orientation conditioning of the solver at the measured joints (NaN: unknown). Read
+    # only when an arm request waits for it; the default leaves arming unchecked.
+    arming_conditioning: float = math.inf
 
 
 @dataclass(frozen=True)
@@ -134,6 +151,7 @@ class GateState:
     """Everything the gate remembers between calls."""
 
     want_armed: bool = False
+    arm_pending: bool = False         # armed by the button, the posture not yet checked
     calibration: Optional[Calibration] = None
     frame: Optional[Frame] = None
     # Buttons of the newest frame that had a controller: (grip, calibrate, arm). An
@@ -144,7 +162,8 @@ class GateState:
     engaged: bool = False
     waiting_since: Optional[float] = None
     clutch: Optional[Pose] = None     # controller pose (pivot applied) at engagement
-    tool0: Optional[Pose] = None      # measured tool pose at engagement
+    tool0: Optional[Pose] = None      # measured tool pose at engagement (G-6 offset limit)
+    anchor: Optional[Pose] = None     # origin of the mapping: tool0 plus the absorbed lead
     heading: float = 0.0              # calibration heading captured at engagement
     filtered: Optional[Pose] = None
     last_target: Optional[Pose] = None
@@ -163,6 +182,10 @@ class Output:
     input_age: float
     input_seq: int
     events: Tuple[str, ...]
+    # Twist of the target before the lead clamp, (vx, vy, vz, wx, wy, wz) in m/s and rad/s
+    # in the arm base frame: the hand's motion after filter and bounds, without any
+    # measured motion in it. None when no target is published.
+    feedforward: Optional[Tuple[float, ...]] = None
 
 
 def controller_valid(frame: Frame) -> bool:
@@ -256,6 +279,7 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
     prev = state.frame
     trip = state.trip
     want_armed = state.want_armed
+    arm_pending = state.arm_pending
     calibration = state.calibration
     if prev is not None:
         tripped, text = _between_frames(prev, frame, params)
@@ -284,6 +308,7 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
         if buttons is not None:
             if frame.arm and not buttons[2]:
                 want_armed = not want_armed
+                arm_pending = want_armed
                 events.append('arm requested' if want_armed else 'disarm requested')
             if frame.calibrate and not buttons[1]:
                 result, text = _try_calibrate(state, frame, params)
@@ -292,7 +317,7 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
                     calibration = result
         buttons = (frame.grip, frame.calibrate, frame.arm)
     return replace(state, frame=frame, buttons=buttons, trip=trip, want_armed=want_armed,
-                   calibration=calibration, events=tuple(events))
+                   arm_pending=arm_pending, calibration=calibration, events=tuple(events))
 
 
 def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Hold:
@@ -316,6 +341,8 @@ def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Ho
         return Hold.NOT_CALIBRATED
     if env.tool_pose is None or not env.tool_pose_age <= params.tool_pose_timeout:
         return Hold.TOOL_POSE_STALE
+    if not env.solver_ready:
+        return Hold.SOLVER
     if state.engaged and not env.servo_active:
         return Hold.SERVO_NOT_READY         # MoveIt Servo stopped running under the clutch
     if state.engaged and env.servo_halted:
@@ -332,21 +359,70 @@ def low_pass(previous: Pose, raw: Pose, params: GateParams) -> Pose:
     return Pose(position, q_slerp(previous.q, raw.q, alpha))
 
 
+def clamp_around(pose: Pose, centre: Pose, max_translation: float,
+                 max_rotation: float) -> Tuple[Pose, bool, bool]:
+    """
+    Clamp ``pose`` to within a distance and an angle of ``centre``.
+
+    Return the pose and whether the translation and the rotation were clamped. Position
+    and orientation are clamped independently, each along its own straight path.
+    """
+    position, orientation = pose.p, pose.q
+    offset = v_sub(position, centre.p)
+    distance = v_norm(offset)
+    moved = distance > max_translation
+    if moved:
+        position = v_add(centre.p, v_scale(offset, max_translation / distance))
+    angle = q_between(centre.q, orientation)
+    turned = angle > max_rotation
+    if turned:
+        orientation = q_slerp(centre.q, orientation, max_rotation / angle)
+    return Pose(position, orientation), moved, turned
+
+
 def clamp_offset(pose: Pose, tool0: Pose, params: GateParams) -> Tuple[Pose, Limit]:
     """Clamp ``pose`` onto the per-clutch offset limit around ``tool0`` (G-6, layer 2)."""
-    limit = Limit.NONE
-    position, orientation = pose.p, pose.q
-    offset = v_sub(position, tool0.p)
-    distance = v_norm(offset)
-    if distance > params.max_offset_translation:
-        position = v_add(tool0.p, v_scale(offset, params.max_offset_translation / distance))
-        limit = Limit.OFFSET_TRANSLATION
-    angle = q_between(tool0.q, orientation)
-    if angle > params.max_offset_rotation:
-        orientation = q_slerp(tool0.q, orientation, params.max_offset_rotation / angle)
-        if limit == Limit.NONE:
-            limit = Limit.OFFSET_ROTATION
-    return Pose(position, orientation), limit
+    clamped, moved, turned = clamp_around(pose, tool0, params.max_offset_translation,
+                                          params.max_offset_rotation)
+    limit = (Limit.OFFSET_TRANSLATION if moved else
+             Limit.OFFSET_ROTATION if turned else Limit.NONE)
+    return clamped, limit
+
+
+def clamp_lead(pose: Pose, measured: Pose, params: GateParams) -> Tuple[Pose, bool]:
+    """Clamp ``pose`` to within the lead limits of the measured tool pose (G-14)."""
+    clamped, moved, turned = clamp_around(pose, measured, params.max_lead_translation,
+                                          params.max_lead_rotation)
+    return clamped, moved or turned
+
+
+def absorb(anchor: Pose, filtered: Pose, mapped_turn: Quat, before: Pose,
+           after: Pose) -> Tuple[Pose, Pose]:
+    """
+    Move the mapping anchor and the filter state by the clamped-away lead (G-14).
+
+    Afterwards the mapping yields ``after`` for the controller pose that yielded
+    ``before``: the lead is absorbed, not stored.
+
+    The mapping gives ``(anchor.p + dp, dq * anchor.q)``, where ``dq`` (``mapped_turn``) is
+    the controller's rotation since engagement in the base frame. For the world-frame
+    correction ``turn = after.q * before.q^-1`` the anchor rotation becomes
+    ``dq^-1 * turn * dq * anchor.q``; the filter state is a world pose and takes ``turn``
+    directly. Positions shift by ``after.p - before.p``.
+    """
+    shift = v_sub(after.p, before.p)
+    turn = q_mul(after.q, q_conj(before.q))
+    anchor_q = q_normalize(q_mul(q_mul(q_mul(q_conj(mapped_turn), turn), mapped_turn),
+                                 anchor.q))
+    return (Pose(v_add(anchor.p, shift), anchor_q),
+            Pose(v_add(filtered.p, shift), q_normalize(q_mul(turn, filtered.q))))
+
+
+def twist(previous: Pose, current: Pose, period: float) -> Tuple[float, ...]:
+    """Return the twist taking ``previous`` to ``current`` in ``period`` (base frame)."""
+    v = v_scale(v_sub(current.p, previous.p), 1.0 / period)
+    w = v_scale(q_to_rotvec(q_mul(current.q, q_conj(previous.q))), 1.0 / period)
+    return v + w
 
 
 def _plane_depth(pose: Pose, plane, params: GateParams) -> float:
@@ -401,14 +477,39 @@ def bound(pose: Pose, tool0: Pose, fallback: Pose,
 def _released(state: GateState, latched: Hold) -> GateState:
     """Return the state with the clutch disengaged and its per-engagement data cleared."""
     return replace(state, engaged=False, waiting_since=None, clutch=None, tool0=None,
-                   filtered=None, last_target=None, trip=Hold.NONE, latched=latched,
+                   anchor=None, filtered=None, last_target=None, trip=Hold.NONE, latched=latched,
                    events=())
+
+
+def _check_arming(state: GateState, env: Env, params: GateParams,
+                  events: list) -> GateState:
+    """
+    Keep or refuse a pending arm request by the posture the arm is in.
+
+    Near the wrist singularity the solver damps orientation and the wrist joints can take
+    a branch the operator did not mean; teleop starts from a posture with room to move.
+    Only the request is checked: once armed, the arm may go anywhere.
+    """
+    if not state.arm_pending:
+        return state
+    measure = env.arming_conditioning
+    if params.min_arming_conditioning <= 0.0 or measure >= params.min_arming_conditioning:
+        # The check is off, or the posture has room (NaN, unknown, fails the comparison).
+        return replace(state, arm_pending=False)
+    if math.isnan(measure):
+        why = 'the posture is unknown (no joint state or kinematic chain yet)'
+    else:
+        why = (f'orientation conditioning {measure:.2f} is below '
+               f'{params.min_arming_conditioning:.2f} (the wrist is near alignment)')
+    events.append(f'arm refused: {why}; move the arm to the ready posture first')
+    return replace(state, want_armed=False, arm_pending=False)
 
 
 def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Output]:
     """Run one target cycle; return the new state and what to publish."""
-    frame = state.frame
     events = list(state.events)
+    state = _check_arming(state, env, params, events)
+    frame = state.frame
     age = env.now - frame.arrival if frame is not None else math.inf
     seq = frame.seq if frame is not None else 0
     grip = frame is not None and frame.grip
@@ -419,9 +520,9 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
         latched = Hold.NONE
 
     def out(new_state: GateState, target: Optional[Pose], hold: Hold, limit: Limit,
-            want_servo: bool) -> Tuple[GateState, Output]:
+            want_servo: bool, feedforward=None) -> Tuple[GateState, Output]:
         return new_state, Output(target, new_state.engaged, hold, limit, want_servo, age, seq,
-                                 tuple(events))
+                                 tuple(events), feedforward)
 
     reason = _condition(state, env, params, age)
     if reason == Hold.CLUTCH_RELEASED:
@@ -454,12 +555,13 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
         # Engagement: every per-engagement quantity restarts here (G-10).
         state = replace(state, engaged=True, waiting_since=None,
                         clutch=apply_pivot(frame.controller, params.pivot_offset),
-                        tool0=env.tool_pose, heading=state.calibration.heading,
+                        tool0=env.tool_pose, anchor=env.tool_pose,
+                        heading=state.calibration.heading,
                         filtered=env.tool_pose, last_target=env.tool_pose)
         events.append(f'clutch engaged at seq {frame.seq}')
 
-    raw = clutch_relative(apply_pivot(frame.controller, params.pivot_offset), state.clutch,
-                          state.heading, state.tool0)
+    controller = apply_pivot(frame.controller, params.pivot_offset)
+    raw = clutch_relative(controller, state.clutch, state.heading, state.anchor)
     filtered = low_pass(state.filtered, raw, params)
     target, limit = bound(filtered, state.tool0, state.last_target, params)
     step = v_norm(v_sub(target.p, state.last_target.p))
@@ -469,5 +571,19 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
                       f'{math.degrees(turn):.1f} deg beyond the per-cycle limit')
         return out(_released(state, Hold.STEP_REJECTED), None, Hold.STEP_REJECTED,
                    Limit.NONE, False)
-    state = replace(state, filtered=filtered, last_target=target, latched=Hold.NONE, events=())
-    return out(state, target, Hold.NONE, limit, True)
+    feedforward = twist(state.last_target, target, params.target_period)
+    final, leading = clamp_lead(target, env.tool_pose, params)
+    if leading:
+        limit = Limit.LEAD
+        if not within_bounds(final, state.tool0, params):
+            # G-6 outranks: the last accepted target is kept, and so is the arm.
+            final, limit = state.last_target, Limit.KEEP_OUT
+            feedforward = (0.0,) * 6
+    anchor, filtered = state.anchor, filtered
+    if final != target:
+        mapped_turn = clutch_relative(controller, state.clutch, state.heading,
+                                      Pose(state.anchor.p, IDENTITY_Q)).q
+        anchor, filtered = absorb(state.anchor, filtered, mapped_turn, target, final)
+    state = replace(state, anchor=anchor, filtered=filtered, last_target=final,
+                    latched=Hold.NONE, events=())
+    return out(state, final, Hold.NONE, limit, True, feedforward)

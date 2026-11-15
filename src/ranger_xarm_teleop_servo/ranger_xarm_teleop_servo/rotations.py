@@ -154,3 +154,66 @@ def inverse(a: Pose) -> Pose:
     """Return the inverse transform of ``a``."""
     qi = q_conj(a.q)
     return Pose(v_scale(q_rotate(qi, a.p), -1.0), qi)
+
+
+def q_to_rotvec(q: Sequence[float]) -> Vec3:
+    """Return the rotation vector (axis times angle, angle in ``[0, pi]``) of ``q``."""
+    x, y, z, w = q
+    if w < 0.0:
+        x, y, z, w = -x, -y, -z, -w
+    s = math.sqrt(x * x + y * y + z * z)
+    if s < 1e-12:
+        return (2.0 * x, 2.0 * y, 2.0 * z)
+    angle = 2.0 * math.atan2(s, w)
+    return (x / s * angle, y / s * angle, z / s * angle)
+
+
+def q_from_rotvec(v: Sequence[float]) -> Quat:
+    """Return the quaternion of rotation vector ``v``."""
+    angle = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+    if angle < 1e-12:
+        return q_normalize((0.5 * v[0], 0.5 * v[1], 0.5 * v[2], 1.0))
+    return q_from_axis_angle(v, angle)
+
+
+def q_to_matrix(q: Sequence[float]) -> np.ndarray:
+    """Return the 3 x 3 rotation matrix of unit quaternion ``q``."""
+    x, y, z, w = q
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def q_from_matrix(m) -> Quat:
+    """Return the unit quaternion of a 3 x 3 rotation matrix (w >= 0)."""
+    m = np.asarray(m, dtype=float)
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+    if trace > 0.0:
+        s = 2.0 * math.sqrt(trace + 1.0)
+        q = ((m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s, 0.25 * s)
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = 2.0 * math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2])
+        q = (0.25 * s, (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s, (m[2, 1] - m[1, 2]) / s)
+    elif m[1, 1] > m[2, 2]:
+        s = 2.0 * math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2])
+        q = ((m[0, 1] + m[1, 0]) / s, 0.25 * s, (m[1, 2] + m[2, 1]) / s, (m[0, 2] - m[2, 0]) / s)
+    else:
+        s = 2.0 * math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1])
+        q = ((m[0, 2] + m[2, 0]) / s, (m[1, 2] + m[2, 1]) / s, 0.25 * s, (m[1, 0] - m[0, 1]) / s)
+    q = q_normalize(q)
+    return q if q[3] >= 0.0 else (-q[0], -q[1], -q[2], -q[3])
+
+
+def pose_to_matrix(pose: Pose) -> np.ndarray:
+    """Return the 4 x 4 homogeneous matrix of ``pose``."""
+    out = np.eye(4)
+    out[:3, :3] = q_to_matrix(pose.q)
+    out[:3, 3] = pose.p
+    return out
+
+
+def pose_from_matrix(m) -> Pose:
+    """Return the pose of a 4 x 4 homogeneous matrix."""
+    m = np.asarray(m, dtype=float)
+    return Pose(vec(m[:3, 3]), q_from_matrix(m[:3, :3]))

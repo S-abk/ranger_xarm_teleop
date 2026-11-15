@@ -117,11 +117,20 @@ def state_row(msg: Any) -> Dict[str, Any]:
         'limit': int(msg.active_limit), 'servo': int(msg.servo_status),
         'calibrated': bool(msg.calibrated), 'age': float(msg.input_age),
         'seq': int(msg.input_seq),
-        'tool': _pose(msg.measured_tool_pose) if msg.measured_tool_pose_valid else None}
+        'tool': _pose(msg.measured_tool_pose) if msg.measured_tool_pose_valid else None,
+        # The joint-space solver (G-8) and the lead limit (G-14).
+        'conditioning': float(msg.conditioning), 'damped': bool(msg.damped),
+        'damping': float(msg.damping),
+        'solver_error_translation': float(msg.solver_error_translation),
+        'solver_error_rotation': float(msg.solver_error_rotation),
+        'lead_translation': float(msg.lead_translation),
+        'lead_rotation': float(msg.lead_rotation),
+        'commanded_linear_speed': float(msg.commanded_linear_speed),
+        'commanded_angular_speed': float(msg.commanded_angular_speed)}
 
 
 def pose_row(kind: str, msg: Any) -> Dict[str, Any]:
-    """Row for a ``PoseStamped`` (kind ``target`` or ``input``)."""
+    """Row for a ``PoseStamped`` (kind ``target``, ``input`` or ``head``)."""
     p, q = _pose(msg.pose)
     return {'k': kind, 'stamp': _stamp(msg), 'frame': str(msg.header.frame_id), 'p': p, 'q': q}
 
@@ -135,6 +144,35 @@ def joints_row(msg: Any, names: Sequence[str] = ARM_JOINTS) -> Optional[Dict[str
                 if len(msg.velocity) == len(msg.name) else None)
     return {'k': 'joints', 'stamp': _stamp(msg),
             'q': [float(msg.position[index[name]]) for name in names], 'v': velocity}
+
+
+def command_row(msg: Any) -> Dict[str, Any]:
+    """Row for the node's joint command, a ``control_msgs/JointJog``: names and rad/s."""
+    return {'k': 'command', 'stamp': _stamp(msg), 'names': [str(n) for n in msg.joint_names],
+            'v': [float(v) for v in msg.velocities]}
+
+
+def joy_row(msg: Any) -> Dict[str, Any]:
+    """Row for the input buttons and axes, a ``sensor_msgs/Joy`` (bridge index order)."""
+    return {'k': 'joy', 'stamp': _stamp(msg), 'buttons': [int(b) for b in msg.buttons],
+            'axes': [float(a) for a in msg.axes]}
+
+
+def _hand(hand: Any) -> Dict[str, bool]:
+    return {'pose_present': bool(hand.pose_present), 'hand_tracked': bool(hand.hand_tracked),
+            'emulated_position': bool(hand.emulated_position)}
+
+
+def status_row(msg: Any) -> Dict[str, Any]:
+    """Row for an ``InputStatus``: everything but the source label."""
+    return {'k': 'status', 'stamp': _stamp(msg), 'session_id': int(msg.session_id),
+            'seq': int(msg.seq), 'xr_time_ms': float(msg.xr_time_ms),
+            'client_time_ms': float(msg.client_time_ms), 'reset_count': int(msg.reset_count),
+            'left': _hand(msg.left), 'right': _hand(msg.right),
+            'viewer_present': bool(msg.viewer_present),
+            'viewer_emulated_position': bool(msg.viewer_emulated_position),
+            'malformed_count': int(msg.malformed_count),
+            'ignored_count': int(msg.ignored_count)}
 
 
 def servo_row(msg: Any) -> Dict[str, Any]:
