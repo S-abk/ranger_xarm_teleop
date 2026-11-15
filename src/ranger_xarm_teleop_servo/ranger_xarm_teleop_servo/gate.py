@@ -41,6 +41,10 @@ Rules, by ID:
 * G-14 the target may not lead the measured tool pose by more than the lead limits. The
   excess is clamped away and absorbed: the mapping's anchor and the filter state move by
   the same amount, so the hand's lead is not stored and the arm never catches up later.
+  Where the solver reports that a position-type constraint (link keep-out, G-15, or a
+  joint position bound) took tool motion out of its last command, the target's
+  translation lead along that direction is absorbed as well: a target held inside the
+  blocked direction would make a reversal of the hand wait until it has come back.
   Order: map, filter, G-6 bounds, G-5 step check (a jump is rejected, never clipped),
   G-14 lead clamp, G-6 re-check. The speed caps (G-8) act on the joint command (solver).
 * While engaged, MoveIt Servo no longer running (or no longer following), or reporting a
@@ -62,7 +66,7 @@ after the grip was seen released.
 from dataclasses import dataclass, replace
 from enum import IntEnum
 import math
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 from .calibration import calibrate, Calibration
 from .mapping import apply_pivot, clutch_relative, rescale
@@ -152,6 +156,9 @@ class Env:
     # Orientation conditioning of the solver at the measured joints (NaN: unknown). Read
     # only when an arm request waits for it; the default leaves arming unchecked.
     arming_conditioning: float = math.inf
+    # Tool velocity (m/s, base frame) that the solver's position-type constraints took out
+    # of its last command; zero when none bound. The lead along it is absorbed (G-14).
+    blocked: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -417,6 +424,28 @@ def clamp_lead(pose: Pose, measured: Pose, params: GateParams) -> Tuple[Pose, bo
     return clamped, moved or turned
 
 
+BLOCKED_FLOOR = 1e-4      # m/s: a smaller blocked tool velocity is not acted on
+
+
+def absorb_blocked(pose: Pose, measured: Pose,
+                   blocked: Sequence[float]) -> Tuple[Pose, bool]:
+    """
+    Remove the translation lead of ``pose`` over ``measured`` along ``blocked`` (G-14).
+
+    Only a lead into the blocked direction is removed; a lead out of it, and every lead
+    across it, is kept.
+    """
+    size = v_norm(tuple(blocked))
+    if size <= BLOCKED_FLOOR:
+        return pose, False
+    unit = v_scale(tuple(blocked), 1.0 / size)
+    lead = v_sub(pose.p, measured.p)
+    along = v_dot(lead, unit)
+    if along <= 0.0:
+        return pose, False
+    return Pose(v_sub(pose.p, v_scale(unit, along)), pose.q), True
+
+
 def absorb(anchor: Pose, filtered: Pose, mapped_turn: Quat, before: Pose,
            after: Pose) -> Tuple[Pose, Pose]:
     """
@@ -604,6 +633,8 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
                    Limit.NONE, False)
     feedforward = twist(state.last_target, target, params.target_period)
     final, leading = clamp_lead(target, env.tool_pose, params)
+    final, absorbed = absorb_blocked(final, env.tool_pose, env.blocked)
+    leading = leading or absorbed
     if leading:
         limit = Limit.LEAD
         if not within_bounds(final, state.tool0, params):
