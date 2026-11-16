@@ -263,9 +263,13 @@ class CycleCounter:
         if took > self.slowest[0]:
             self.slowest = (took, slowest, parts)
 
-    def report(self, now: float) -> str:
-        """Return the summary when one is due and anything was counted, then start again."""
-        if self.since is None or now - self.since < CYCLE_REPORT_S:
+    def report(self, now: float, final: bool = False) -> str:
+        """
+        Return the summary when one is due and anything was counted, then start again.
+
+        ``final``: at shutdown, whatever was counted since the last summary.
+        """
+        if self.since is None or (now - self.since < CYCLE_REPORT_S and not final):
             return ''
         text = ''
         if self.keepout:
@@ -726,7 +730,10 @@ class TeleopNode(Node):
             f'velocity limits {[round(v, 3) for v in self.arm.velocity]} rad/s')
 
     def close(self) -> None:
-        """Stop the watcher thread (joint states and transforms) and its node."""
+        """Log the cycle summary since the last one; stop the watcher thread and its node."""
+        summary = self._cycles.report(self.mono(), final=True)
+        if summary:
+            self.get_logger().info(f'at shutdown: {summary}')
         try:
             self._watch_executor.shutdown(timeout_sec=1.0)
         except Exception:  # noqa: B902 - already shut down with the context
