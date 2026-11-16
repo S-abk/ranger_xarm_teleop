@@ -100,8 +100,8 @@ def main() -> int:
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         node.create_subscription(String, '/robot_description',
                                  lambda msg: seen.update(description=msg.data), latched)
-        node.create_subscription(ArmOwner, '/teleop/mux/owner', on_owner, 10)
-        node.create_subscription(TeleopState, '/teleop/state', on_state, 10)
+        node.create_subscription(ArmOwner, '/teleop/mux/owner', on_owner, 1)   # newest only
+        node.create_subscription(TeleopState, '/teleop/state', on_state, 1)   # newest only
         disarm = node.create_client(Trigger, args.disarm_service)
         move = ActionClient(node, MoveGroup, '/move_action')
         spin(10.0, lambda: seen['description'] is not None)

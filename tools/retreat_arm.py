@@ -137,8 +137,8 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         node.create_subscription(String, '/robot_description',
                                  lambda msg: seen.update(description=msg.data), latched)
         node.create_subscription(ArmOwner, '/teleop/mux/owner', lambda msg: seen.update(
-            owner=int(msg.owner), owner_at=time.monotonic()), 10)
-        node.create_subscription(TeleopState, '/teleop/state', on_state, 10)
+            owner=int(msg.owner), owner_at=time.monotonic()), 1)   # newest only
+        node.create_subscription(TeleopState, '/teleop/state', on_state, 1)   # newest only
         node.create_subscription(JointState, '/joint_states', lambda msg: seen.update(
             joints=dict(zip(msg.name, msg.position)), joints_at=time.monotonic()), 10)
         spin(10.0, lambda: seen['description'] is not None)
