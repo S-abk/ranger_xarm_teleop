@@ -1148,7 +1148,8 @@ class TeleopNode(Node):
         clearance = solution.keepout_clearance
         if not engaged_before:
             self.keepout_floor = math.inf
-        if clearance < self.keepout_floor - KEEPOUT_FLOOR_SLACK:
+        if (math.isfinite(self.keepout_floor)
+                and clearance < self.keepout_floor - KEEPOUT_FLOOR_SLACK):
             self.get_logger().error(
                 f'link keep-out: clearance {clearance * 1000.0:.2f} mm '
                 f'({solution.keepout_pair[0]} - {solution.keepout_pair[1]}) is below the '

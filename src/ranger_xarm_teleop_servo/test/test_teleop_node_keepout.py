@@ -218,3 +218,22 @@ def test_teleop_waits_for_servos_robot_description_once_asked(node):
     assert not n.solver_checks(0.0, None)[0]
     n.servo_description_pending = False
     assert n.solver_checks(0.0, None)[0] or n.arm is None
+
+
+def test_the_floor_monitor_reports_only_a_real_drop(node):
+    from types import SimpleNamespace as NS
+    n = node(robot_urdf())
+    errors = []
+    n.get_logger = lambda: NS(error=lambda text, **_: errors.append(text),
+                              warning=lambda *a, **k: None, info=lambda *a, **k: None)
+
+    def cycle(clearance, engaged_before=True):
+        n.keepout_watch(NS(keepout_seconds=0.0005, keepout_clearance=clearance,
+                           keepout_pair=('l2', 'screen')), engaged_before)
+    cycle(0.052, engaged_before=False)          # first cycle of an engagement
+    cycle(0.040)
+    cycle(0.030)
+    cycle(0.026)
+    assert not errors
+    cycle(0.020)                                # below the margin floor
+    assert len(errors) == 1 and 'below the floor' in errors[0]
