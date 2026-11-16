@@ -210,8 +210,12 @@ def test_after_a_collision_halt_recovery_is_refused_and_teleop_works_again(stack
         assert probe.joint_positions() == pytest.approx(halted_at, abs=1e-4)
         probe.move_to(READY)                    # straight to the controller: test only
     finally:
-        # Also when an assertion above fails: the box would halt every later test.
-        probe.remove_scene_box(BODY_OBSTACLE[0])
+        # Also when an assertion above fails: the box would halt every later test. A failure
+        # to remove it must not hide the first failure.
+        try:
+            probe.remove_scene_box(BODY_OBSTACLE[0])
+        except Exception as err:  # noqa: B902
+            print(f'could not remove the scene box: {err}')
     assert probe.joint_positions() == pytest.approx(READY, abs=5e-3)
     # Teleop again, from the recovered posture: the arm follows the line.
     before = probe.tool_position()
