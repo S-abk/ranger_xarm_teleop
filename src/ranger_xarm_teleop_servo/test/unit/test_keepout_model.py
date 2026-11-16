@@ -161,3 +161,6 @@ def test_recorded_rows_and_the_halts_summary_carry_the_keep_out():
     assert summary['share_keepout'] == pytest.approx(0.5)
     assert summary['keepout_min'] == pytest.approx(0.0255)
     assert summary['keepout_commanded_min'] == pytest.approx(0.0261)
+    for row in rows:                    # a recording from before the commanded field
+        row.pop('keepout_commanded')
+    assert halts._solver_summary(halts._Series(rows))['keepout_commanded_min'] is None

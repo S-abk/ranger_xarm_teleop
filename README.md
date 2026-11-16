@@ -328,9 +328,10 @@ MoveIt Servo's collision halt. The model is built from `/robot_description` when
 - **The model never reports more clearance than the geometry has.** Moving links are covered
   by spheres (25 mm cells) that contain every triangle; fixed boxes, cylinders and spheres are
   used exactly. Only STL collision meshes are supported; other formats refuse the start.
-- **In the solver.** Within 40 mm of the margin, a pair's clearance `d` may fall at most at
-  `(d - margin) / 0.2 s`: 0.2 m/s at 40 mm, nothing at the margin. Motion toward the structure
-  slows there and stops at the margin; motion along or away from it keeps its speed. Where the command breaks that, it is replaced by the nearest
+- **In the solver.** Within 60 mm of the margin, a pair's clearance `d` may fall at most at
+  `(d - margin) / 0.2 s`: 0.3 m/s at 60 mm, nothing at the margin, so at 0.25 m/s motion toward
+  the structure slows from about 50 mm and stops at the margin; motion along or away from it
+  keeps its speed. Where the command breaks that, it is replaced by the nearest
   command that does not (in tool motion; motion across the hand's direction costs more than
   slowing along it).
 - **Checks.** A later `/robot_description`, or MoveIt Servo's robot description, with other

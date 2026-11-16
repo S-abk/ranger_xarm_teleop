@@ -288,7 +288,7 @@ def _solver_summary(states: _Series) -> Dict[str, Any]:
     if keepout_rows:
         # The link keep-out (recordings that store it): engaged time it shaped the command,
         # and the smallest clearance seen while engaged: at the solver's reference (every
-        # cycle) and at the measured joints (computed every 25th cycle while engaged, so a
+        # cycle) and at the measured joints (computed every few cycles while engaged, so a
         # short dip between two of those is not seen).
         summary['share_keepout'] = keepout_time / total
         summary['keepout_min'] = nearest
@@ -443,8 +443,8 @@ def format_report(result: Dict[str, Any]) -> str:
             share = summary['share_keepout'] * 100.0
             lines.append(f'link keep-out: shaped the command {share:.1f} % of the engaged '
                          'time; smallest clearance while engaged: commanded (every cycle) '
-                         f"{mm(summary.get('keepout_commanded_min'))}, measured (every 25th "
-                         f"cycle) {mm(summary['keepout_min'])}")
+                         f"{mm(summary.get('keepout_commanded_min'))}, measured (sampled) "
+                         f"{mm(summary['keepout_min'])}")
         if summary.get('share_by_scale'):
             lines.append('translation scale while engaged: ' + ', '.join(
                 f'{scale:g}: {share * 100:.1f} %'

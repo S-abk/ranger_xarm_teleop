@@ -42,6 +42,19 @@ def _moved(pose, dx=0.0, dy=0.0, dz=0.0):
     return out
 
 
+def _turned(pose, rotvec):
+    """Return ``pose`` with its orientation turned by ``rotvec`` (rad, base frame)."""
+    angle = float(np.linalg.norm(rotvec))
+    out = np.array(pose, dtype=float)
+    if angle < 1e-12:
+        return out
+    k = np.asarray(rotvec, dtype=float) / angle
+    cross = np.array([[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]])
+    turn = np.eye(3) + math.sin(angle) * cross + (1.0 - math.cos(angle)) * cross @ cross
+    out[:3, :3] = turn @ out[:3, :3]
+    return out
+
+
 def _drive(arm, model, extra, q, target, cycles, delay=0, params=PARAMS):
     """Integrate the solver ``cycles`` times; return postures, commands and solutions."""
     history = [np.array(q, dtype=float)]
@@ -115,13 +128,16 @@ def test_inv1_no_pair_falls_below_the_margin_for_random_motions(robot, delay):
             q = rng.uniform(lower, upper)
             if model.clearance(q, extra)[0] > MARGIN + 0.005:
                 break
-        target = _moved(sv.tool_pose(arm, q), *rng.normal(0.0, 0.25, 3))
+        # Translation and turning: the angular cap moves the gripper's far points too.
+        target = _turned(_moved(sv.tool_pose(arm, q), *rng.normal(0.0, 0.25, 3)),
+                         rng.normal(0.0, 0.8, 3))
         history, _, solutions = _drive(arm, model, extra, q, target, 120, delay=delay)
         assert _floor_kept(model, extra, history) <= 1e-9
         bound_runs += any(s.keepout_bound for s in solutions)
         minima = np.array([model.pair_minima(h, extra) for h in history])
+        assert np.isfinite(minima).all()
         fastest = max(fastest, float(np.max(minima[:-1] - minima[1:])))
-    assert bound_runs >= 4
+    assert bound_runs >= 4 and fastest > 0.002
     zone = model.influence - model.margin - sv.KEEPOUT_TARGET_INSIDE
     assert (1 + delay) * fastest < zone, fastest
 

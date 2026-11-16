@@ -731,9 +731,12 @@ class TeleopNode(Node):
 
     def close(self) -> None:
         """Log the cycle summary since the last one; stop the watcher thread and its node."""
-        summary = self._cycles.report(self.mono(), final=True)
-        if summary:
-            self.get_logger().info(f'at shutdown: {summary}')
+        try:
+            summary = self._cycles.report(self.mono(), final=True)
+            if summary:
+                self.get_logger().info(f'at shutdown: {summary}')
+        except Exception:  # noqa: B902 - a log line must not stop the shutdown
+            pass
         try:
             self._watch_executor.shutdown(timeout_sec=1.0)
         except Exception:  # noqa: B902 - already shut down with the context

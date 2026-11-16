@@ -874,7 +874,7 @@ BOX, CYLINDER, SPHERE = 0, 1, 2
 
 
 def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margin: float,
-          influence_extra: float = 0.04, cell: float = DEFAULT_CELL,
+          influence_extra: float = 0.06, cell: float = DEFAULT_CELL,
           fixed_cell: Optional[float] = None,
           spacing: float = DEFAULT_SPACING, near_samples: int = NEAR_SAMPLES,
           seed: int = 0) -> Model:
