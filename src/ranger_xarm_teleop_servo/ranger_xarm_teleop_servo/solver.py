@@ -327,6 +327,7 @@ class Solution:
     # keep-out) took out of the command, before the speed scaling. Zero when none bound.
     blocked: np.ndarray = field(default_factory=lambda: np.zeros(3))
     keepout_seconds: float = 0.0        # time spent on the keep-out this cycle (model and fix)
+    keepout_cpu_seconds: float = 0.0    # the same, CPU time of the calling thread only
 
     @property
     def damped(self) -> bool:
@@ -370,17 +371,19 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
 
     rows = None
     clearance, pair = math.inf, ('', '')
-    began = time.perf_counter()
+    began, began_cpu = time.perf_counter(), time.thread_time()
     if keepout is not None:
         if list(keepout.joint_names) != list(arm.joint_names):
             raise ValueError("the keep-out model is not on the arm's joints")
         rows = keepout.evaluate(q, extra)
         clearance, pair = rows.clearance, rows.nearest
     model_seconds = time.perf_counter() - began
-    began = time.perf_counter()
+    model_cpu = time.thread_time() - began_cpu
+    began, began_cpu = time.perf_counter(), time.thread_time()
     result = _constrained(arm, jn, yn, low_n, high_n, rows, keepout, params)
     z, z_first, first_levels, fixed, bound, infeasible = result
     fix_seconds = time.perf_counter() - began if bound else 0.0
+    fix_cpu = time.thread_time() - began_cpu if bound else 0.0
     if infeasible:
         qdot, scale, limit, linear, angular = np.zeros_like(q), 0.0, LIMIT_LINK_KEEPOUT, 0.0, 0.0
     else:
@@ -396,6 +399,8 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
                     keepout_clearance=clearance, keepout_pair=pair, keepout_bound=bound,
                     blocked=blocked,
                     keepout_seconds=(model_seconds + fix_seconds) if keepout is not None
+                    else 0.0,
+                    keepout_cpu_seconds=(model_cpu + fix_cpu) if keepout is not None
                     else 0.0)
 
 

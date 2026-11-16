@@ -231,16 +231,23 @@ class CycleCounter:
         self.slowest = (0.0, '', '')        # seconds, longest step, joint command parts
         self.late_count = 0
         self.latest = 0.0                   # longest interval between cycle starts
-        self.keepout = []                   # seconds of each keep-out step
+        self.keepout = []                   # seconds of each solver keep-out step (wall)
+        self.keepout_cpu = []               # the same, CPU time of the node's thread
+        self.measured_clearance = []        # seconds of each clearance at the measured joints
         self.reference_ages = []            # seconds: MoveIt Servo's output at each solve
 
     def reference_age(self, age: float) -> None:
         """Record how old MoveIt Servo's newest output was when the solver used it."""
         self.reference_ages.append(age)
 
-    def keepout_step(self, took: float) -> None:
-        """Record one link keep-out step (model evaluation and, if bound, the fix)."""
+    def keepout_step(self, took: float, cpu: float) -> None:
+        """Record one solver keep-out step (model and, if bound, the fix): wall and CPU s."""
         self.keepout.append(took)
+        self.keepout_cpu.append(cpu)
+
+    def measured_clearance_step(self, took: float) -> None:
+        """Record one keep-out clearance computed at the measured joints (s)."""
+        self.measured_clearance.append(took)
 
     def started(self, now: float, interval: float) -> None:
         """Count a cycle that started ``interval`` seconds after the previous one."""
@@ -263,8 +270,15 @@ class CycleCounter:
         text = ''
         if self.keepout:
             steps = np.array(self.keepout) * 1000.0
+            cpu = np.array(self.keepout_cpu) * 1000.0
             text = (f'link keep-out: {len(steps)} steps, median {np.median(steps):.2f} ms, '
-                    f'p99 {np.percentile(steps, 99):.2f} ms, longest {steps.max():.2f} ms. ')
+                    f'p99 {np.percentile(steps, 99):.2f} ms, longest {steps.max():.2f} ms '
+                    f'(CPU of this thread: median {np.median(cpu):.2f} ms, p99 '
+                    f'{np.percentile(cpu, 99):.2f} ms). ')
+        if self.measured_clearance:
+            steps = np.array(self.measured_clearance) * 1000.0
+            text += (f'clearance at the measured joints: {len(steps)} times, median '
+                     f'{np.median(steps):.2f} ms, p99 {np.percentile(steps, 99):.2f} ms. ')
         if self.reference_ages:
             ages = np.array(self.reference_ages) * 1000.0
             text += (f'solver reference (MoveIt Servo output) age: median {np.median(ages):.0f} '
@@ -1140,7 +1154,7 @@ class TeleopNode(Node):
         if self.keepout is None:
             return
         took = solution.keepout_seconds
-        self._cycles.keepout_step(took)
+        self._cycles.keepout_step(took, solution.keepout_cpu_seconds)
         self._command_steps.append(('link keep-out', took))
         if took > KEEPOUT_SLOW_S:
             self.get_logger().warning(f'link keep-out step took {took * 1000.0:.1f} ms',
@@ -1313,7 +1327,7 @@ class TeleopNode(Node):
             q = [positions[name] for name in self.arm.joint_names]
             started = time.perf_counter()
             rows = self.keepout.evaluate(q, self.keepout.extra_values(positions), per_pair=1)
-            self._cycles.keepout_step(time.perf_counter() - started)
+            self._cycles.measured_clearance_step(time.perf_counter() - started)
         except (KeyError, ko.ModelError, ValueError):
             return self._idle_clearance
         self._idle_clearance = (rows.clearance, rows.nearest)

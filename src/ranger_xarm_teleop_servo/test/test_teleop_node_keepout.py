@@ -228,8 +228,9 @@ def test_the_floor_monitor_reports_only_a_real_drop(node):
                               warning=lambda *a, **k: None, info=lambda *a, **k: None)
 
     def cycle(clearance, engaged_before=True):
-        n.keepout_watch(NS(keepout_seconds=0.0005, keepout_clearance=clearance,
-                           keepout_pair=('l2', 'screen')), engaged_before)
+        n.keepout_watch(NS(keepout_seconds=0.0005, keepout_cpu_seconds=0.0004,
+                           keepout_clearance=clearance, keepout_pair=('l2', 'screen')),
+                        engaged_before)
     cycle(0.052, engaged_before=False)          # first cycle of an engagement
     cycle(0.040)
     cycle(0.030)
