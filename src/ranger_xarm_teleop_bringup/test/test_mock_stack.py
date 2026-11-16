@@ -27,8 +27,8 @@ from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 
-from stack_helpers import (BODY_OBSTACLE, child_environment, INTO_BODY_START, Probe, Process,
-                           READY, replay, replay_with_clean_input)
+from stack_helpers import (BODY_OBSTACLE, BODY_OBSTACLE_LINK, child_environment, INTO_BODY_START,
+                           Probe, Process, READY, replay, replay_with_clean_input)
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
 ELSEWHERE = [0.3, -0.4, -0.9, 0.2, 1.1, -0.3]
@@ -234,12 +234,12 @@ def test_target_into_self_collision_ends_in_a_stop_reported_in_teleop_state(stac
     probe, env, logs, _ = stack
     probe.disarm()
     probe.move_to(INTO_BODY_START)
-    probe.scene_box(*BODY_OBSTACLE)
+    probe.scene_box(*BODY_OBSTACLE, attach_to=BODY_OBSTACLE_LINK)
     start_tool = probe.tool_position()
     try:
         states = run_replay(probe, env, logs, 'clutch_into_body', 10.0)
     finally:
-        probe.remove_scene_box(BODY_OBSTACLE[0])
+        probe.remove_scene_box(BODY_OBSTACLE[0], attach_to=BODY_OBSTACLE_LINK)
     engaged = [s for s in states if s.clutch_engaged]
     assert len(engaged) > 60
     # MoveIt Servo slowed the arm near the collision (reported as the active limit) ...

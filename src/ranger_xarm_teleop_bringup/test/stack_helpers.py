@@ -45,6 +45,7 @@ READY = [0.0, -0.6, -0.7, 0.0, 1.3, 0.0]
 # scene). The tool starts at x 0.53 m and meets the box after about 0.12 m.
 INTO_BODY_START = [0.0, 0.2, -1.4, 0.0, 1.2, 0.0]
 BODY_OBSTACLE = ('into_body_obstacle', (0.37, 0.0, 0.26), (0.02, 0.30, 0.20))
+BODY_OBSTACLE_LINK = 'xarm_link_base'     # attached there: checked as the robot's own body
 # The shoulder tests: pulled back over joint 1's axis. From the ready posture the link
 # keep-out stops link 2 before the structure behind the arm, short of the shoulder region;
 # from here (the tool 0.1 m higher) the same hand motion crosses it with link 2 clear.
@@ -350,14 +351,17 @@ class Probe:
         assert result.result().status == GoalStatus.STATUS_SUCCEEDED
         time.sleep(0.6)             # let "stopped" be established for the mux
 
-    def scene_box(self, name, centre, size, frame='xarm_link_base'):
+    def scene_box(self, name, centre, size, frame='xarm_link_base', attach_to=None):
         """
         Add a box to move_group's planning scene, which MoveIt Servo follows.
 
         An obstacle the link keep-out does not know (it covers the robot description
-        only): Servo's collision check is then the only layer that sees it.
+        only): Servo's collision check is then the only layer that sees it. With
+        ``attach_to`` (a link fixed to the arm base) the box is part of the robot, checked
+        as self-collision like the robot's own structure (Servo's self-collision threshold,
+        not the larger scene one).
         """
-        from moveit_msgs.msg import CollisionObject, PlanningScene
+        from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
         from moveit_msgs.srv import ApplyPlanningScene
         from shape_msgs.msg import SolidPrimitive
         from geometry_msgs.msg import Pose as PoseMsg
@@ -370,20 +374,34 @@ class Probe:
         pose.orientation.w = 1.0
         box.primitive_poses = [pose]
         box.operation = CollisionObject.ADD
-        self._apply_scene(PlanningScene(is_diff=True), box, ApplyPlanningScene)
+        scene = PlanningScene(is_diff=True)
+        if attach_to is None:
+            self._apply_scene(scene, box, ApplyPlanningScene)
+            return
+        scene.robot_state.is_diff = True
+        scene.robot_state.attached_collision_objects = [
+            AttachedCollisionObject(link_name=attach_to, object=box)]
+        self._apply_scene(scene, None, ApplyPlanningScene)
 
-    def remove_scene_box(self, name, frame='xarm_link_base'):
-        """Remove a box added with ``scene_box``."""
-        from moveit_msgs.msg import CollisionObject, PlanningScene
+    def remove_scene_box(self, name, frame='xarm_link_base', attach_to=None):
+        """Remove a box added with ``scene_box`` (detached first if it was attached)."""
+        from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
         from moveit_msgs.srv import ApplyPlanningScene
         box = CollisionObject()
         box.header.frame_id = frame
         box.id = name
         box.operation = CollisionObject.REMOVE
-        self._apply_scene(PlanningScene(is_diff=True), box, ApplyPlanningScene)
+        scene = PlanningScene(is_diff=True)
+        if attach_to is not None:
+            # Detaching puts the object back into the world; the world removal follows.
+            scene.robot_state.is_diff = True
+            scene.robot_state.attached_collision_objects = [
+                AttachedCollisionObject(link_name=attach_to, object=box)]
+        self._apply_scene(scene, box, ApplyPlanningScene)
 
     def _apply_scene(self, scene, box, service):
-        scene.world.collision_objects = [box]
+        if box is not None:
+            scene.world.collision_objects = [box]
         client = self.node.create_client(service, '/apply_planning_scene')
         assert client.wait_for_service(timeout_sec=10.0), 'no /apply_planning_scene'
         future = client.call_async(service.Request(scene=scene))

@@ -36,8 +36,9 @@ from ranger_xarm_teleop_servo.rotations import (pose_from_matrix, q_between, v_n
                                                 v_sub)
 import rclpy
 
-from stack_helpers import (BODY_OBSTACLE, child_environment, INTO_BODY_START, Probe, Process,
-                           READY, replay, replay_with_clean_input, SHOULDER_START)
+from stack_helpers import (BODY_OBSTACLE, BODY_OBSTACLE_LINK, child_environment, INTO_BODY_START,
+                           Probe, Process, READY, replay, replay_with_clean_input,
+                           SHOULDER_START)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -187,7 +188,7 @@ def test_after_a_collision_halt_recovery_is_refused_and_teleop_works_again(stack
 
     def ready():
         probe.move_to(INTO_BODY_START)
-        probe.scene_box(*BODY_OBSTACLE)
+        probe.scene_box(*BODY_OBSTACLE, attach_to=BODY_OBSTACLE_LINK)
     try:
         start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_into_body.log'),
                                            'clutch_into_body', expected_engaged_s=1.0,
@@ -213,7 +214,7 @@ def test_after_a_collision_halt_recovery_is_refused_and_teleop_works_again(stack
         # Also when an assertion above fails: the box would halt every later test. A failure
         # to remove it must not hide the first failure.
         try:
-            probe.remove_scene_box(BODY_OBSTACLE[0])
+            probe.remove_scene_box(BODY_OBSTACLE[0], attach_to=BODY_OBSTACLE_LINK)
         except Exception as err:  # noqa: B902
             print(f'could not remove the scene box: {err}')
     assert probe.joint_positions() == pytest.approx(READY, abs=5e-3)
