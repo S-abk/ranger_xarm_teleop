@@ -235,8 +235,9 @@ def test_model_clearance_is_never_more_than_the_sampled_surface_distance(model, 
         for key, sampled in _true_upper_bounds(model, urdf, q, extra, rng).items():
             if key in model_pairs and sampled < 0.3:
                 assert model_pairs[key] <= sampled + 1e-9, key
-                # ... and gives away at most the largest sphere radius (plus the fixed
-                # mesh cover's, plus the sampling of this test).
+                # ... and here gives away no more than about one largest radius per covered
+                # side (plus the sampling of this test). The proven bound is twice that per
+                # side (module docstring); this checks the covers are as tight as expected.
                 assert model_pairs[key] >= sampled - 2 * model.largest_radius - 0.01, key
                 checked += 1
     assert checked > 50

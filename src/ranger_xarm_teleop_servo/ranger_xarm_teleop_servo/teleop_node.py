@@ -675,8 +675,9 @@ class TeleopNode(Node):
         model = self.keepout
         self.get_logger().info(
             f'link keep-out: margin {model.margin * 1000.0:.1f} mm, {model.sphere_count} '
-            f'spheres on {len(model.bodies)} moving links, inflation at most '
-            f'{model.largest_radius * 1000.0:.1f} mm, {len(model.pair_list)} pairs, fixed '
+            f'spheres on {len(model.bodies)} moving links, largest radius '
+            f'{model.largest_radius * 1000.0:.1f} mm (inflation below twice that per covered '
+            f'side), {len(model.pair_list)} pairs, fixed '
             f'links {model.units.names}, built in {took:.2f} s, fingerprint '
             f'{model.fingerprint[:12]}')
         for item in model.excluded:
@@ -1212,8 +1213,9 @@ class TeleopNode(Node):
             response.message = 'no link keep-out model yet (no robot description)'
             return response
         lines = [f'margin {model.margin * 1000.0:.1f} mm; cell {model.cell * 1000.0:.0f} mm; '
-                 f'{model.sphere_count} spheres; inflation at most '
-                 f'{model.largest_radius * 1000.0:.1f} mm; fingerprint {model.fingerprint}',
+                 f'{model.sphere_count} spheres; largest radius '
+                 f'{model.largest_radius * 1000.0:.1f} mm (inflation below twice that per '
+                 f'covered side); fingerprint {model.fingerprint}',
                  f'fixed links: {model.units.names}',
                  f'pairs: {len(model.pair_list)}']
         for item in model.excluded:

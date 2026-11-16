@@ -40,8 +40,15 @@ samples' centroid, with radius = farthest sample from that centre + ``spacing``.
 point of the surface is inside some sphere, and the distance from the sphere union to any
 fixed shape is at most the distance from the surface to it. A fixed shape is used exactly
 (or, for a mesh, covered the same way). The model's clearance is therefore never larger
-than the true distance between the collision geometries; what it gives away (inflation)
-is at most the largest sphere radius, ``cell * sqrt(3) / 2 + spacing``.
+than the true distance between the collision geometries.
+
+What it gives away (inflation): a sphere of radius ``R`` holds a sample within
+``R - spacing`` of its centre, so the surface is at most ``2 R - spacing`` further from an
+obstacle than the sphere is; per covered side, the inflation is below twice the largest
+radius (``R <= cell * sqrt(3) / 2 + spacing``: each sphere is centred on its samples'
+centroid or its cell's centre, whichever needs less). When both sides are covered (a
+fixed mesh, or the tool against an arm link), the two sides add. Measured on the mock
+robot it is about one radius per side, more where an obstacle faces a concave patch.
 
 STL meshes only (binary or ASCII); any other mesh format refuses the model.
 """
@@ -492,7 +499,7 @@ class Model:
 
     @property
     def largest_radius(self) -> float:
-        """Return the largest sphere radius: the bound on the model's inflation (m)."""
+        """Return the largest sphere radius (m); the inflation is below twice it per side."""
         radii = [b.radii.max() for b in self.bodies if len(b.radii)]
         return float(max(radii)) if radii else 0.0
 
