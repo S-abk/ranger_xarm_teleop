@@ -188,26 +188,30 @@ def test_after_a_collision_halt_recovery_is_refused_and_teleop_works_again(stack
     def ready():
         probe.move_to(INTO_BODY_START)
         probe.scene_box(*BODY_OBSTACLE)
-    start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_into_body.log'),
-                                       'clutch_into_body', expected_engaged_s=1.0,
-                                       before=ready)
-    states = probe.states_since(start)
-    halted = [s for s in states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
-    assert halted and all(s.servo_status == ServoStatus.HALT_FOR_COLLISION for s in halted)
-    assert probe.owner_value() == ArmOwner.OWNER_TELEOP     # still armed after the halt
-    halted_at = probe.joint_positions()
-    process = Process(['python3', os.path.join(TOOLS, 'recover_arm.py')], env,
-                      str(logs / 'recover_collision.log'))
     try:
-        code = process.wait(120.0)
+        start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_into_body.log'),
+                                           'clutch_into_body', expected_engaged_s=1.0,
+                                           before=ready)
+        states = probe.states_since(start)
+        halted = [s for s in states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
+        assert halted and all(s.servo_status == ServoStatus.HALT_FOR_COLLISION
+                              for s in halted)
+        assert probe.owner_value() == ArmOwner.OWNER_TELEOP     # still armed after the halt
+        halted_at = probe.joint_positions()
+        process = Process(['python3', os.path.join(TOOLS, 'recover_arm.py')], env,
+                          str(logs / 'recover_collision.log'))
+        try:
+            code = process.wait(120.0)
+        finally:
+            process.stop()
+        output = process.output()
+        assert 'disarm: disarmed' in output and 'MoveIt owns the arm' in output
+        assert code != 0 and 'start state in collision' in output, output
+        assert probe.joint_positions() == pytest.approx(halted_at, abs=1e-4)
+        probe.move_to(READY)                    # straight to the controller: test only
     finally:
-        process.stop()
-    output = process.output()
-    assert 'disarm: disarmed' in output and 'MoveIt owns the arm' in output
-    assert code != 0 and 'start state in collision' in output, output
-    assert probe.joint_positions() == pytest.approx(halted_at, abs=1e-4)
-    probe.move_to(READY)                    # straight to the controller: test only
-    probe.remove_scene_box(BODY_OBSTACLE[0])
+        # Also when an assertion above fails: the box would halt every later test.
+        probe.remove_scene_box(BODY_OBSTACLE[0])
     assert probe.joint_positions() == pytest.approx(READY, abs=5e-3)
     # Teleop again, from the recovered posture: the arm follows the line.
     before = probe.tool_position()
