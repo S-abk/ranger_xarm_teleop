@@ -67,7 +67,7 @@ One call of ``solve`` turns the tool target of a cycle into the joint velocity c
    actual step of one cycle (forward kinematics), which on a curved path can be longer.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import time
 from typing import Dict, Mapping, Optional, Sequence, Tuple
@@ -325,7 +325,7 @@ class Solution:
     keepout_bound: bool = False         # the keep-out shaped this command
     # m/s, base frame: tool velocity the position-type constraints (joint position bounds,
     # keep-out) took out of the command, before the speed scaling. Zero when none bound.
-    blocked: np.ndarray = None
+    blocked: np.ndarray = field(default_factory=lambda: np.zeros(3))
     keepout_seconds: float = 0.0        # time spent on the keep-out this cycle (model and fix)
 
     @property

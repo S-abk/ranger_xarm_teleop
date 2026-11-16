@@ -173,9 +173,11 @@ def state_row(msg: Any) -> Dict[str, Any]:
         # The link keep-out (G-15): clearance in m (None when unknown), its pair, whether
         # it shaped the command.
         clearance = float(msg.keepout_clearance)
+        commanded = float(getattr(msg, 'keepout_clearance_commanded', math.nan))
         row.update(keepout=clearance if math.isfinite(clearance) else None,
                    keepout_pair=[str(msg.keepout_link), str(msg.keepout_obstacle)],
-                   keepout_bound=bool(msg.keepout_bound))
+                   keepout_bound=bool(msg.keepout_bound),
+                   keepout_commanded=commanded if math.isfinite(commanded) else None)
     return row
 
 

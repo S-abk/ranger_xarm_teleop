@@ -14,8 +14,8 @@
 """
 Link keep-out (G-15) and the retreat on the mock stack (fake hardware, real MoveIt Servo).
 
-The robot description here has a laptop on the base behind the arm: the structure every
-collision halt of the live sessions was against.
+The robot description here has a box-shaped structure on the base behind the arm: what
+every collision halt of the live sessions was against.
 """
 
 import json
@@ -88,7 +88,7 @@ def test_retreat_without_a_recorded_path_moves_nothing(stack):
 
 
 def test_pulled_into_the_structure_the_arm_keeps_the_margin_slides_and_leaves(stack):
-    """G-15: the slide fixture: back into the laptop, sideways along it, away."""
+    """G-15: the slide fixture: back into the structure, sideways along it, away."""
     probe, env, logs, _, model, arm = stack
 
     def ready():
@@ -105,7 +105,7 @@ def test_pulled_into_the_structure_the_arm_keeps_the_margin_slides_and_leaves(st
     assert any(s.keepout_bound for s in engaged)
     assert any(s.active_limit == TeleopState.LIMIT_LINK_KEEPOUT for s in engaged)
     # INV-1 at MoveIt Servo's commanded state (what the node reports) ...
-    assert min(s.keepout_clearance for s in engaged) >= MARGIN - 1e-3
+    assert min(s.keepout_clearance_commanded for s in engaged) >= MARGIN - 1e-3
     # ... and on the measured joints, by the model.
     joints = probe.joints_since(start)
     extra = _extra(model)

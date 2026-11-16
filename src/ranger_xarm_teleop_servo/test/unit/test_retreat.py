@@ -178,3 +178,24 @@ def test_distance_from_path():
     path = np.array([[0.0] * 6, [1.0] + [0.0] * 5])
     assert retreat.distance_from_path(path, [0.5, 0.01, 0, 0, 0, 0]) == pytest.approx(0.01)
     assert retreat.distance_from_path(path, [1.5, 0, 0, 0, 0, 0]) == pytest.approx(0.5)
+
+
+def test_a_path_from_before_the_arm_was_moved_elsewhere_is_dropped():
+    recorder = retreat.PathRecorder()
+    q = np.zeros(6)
+    for k in range(20):
+        q[1] -= 0.003
+        recorder.add(k * 0.02, q)
+    assert not recorder.resume(q + 0.005)            # re-armed where it was: kept
+    assert len(recorder.points) == 20
+    assert recorder.resume(q + np.array([0.0, 0.0, 0.2, 0.0, 0.0, 0.0]))   # moved: dropped
+    assert len(recorder.points) == 0
+
+
+def test_the_walk_back_never_crosses_a_gap_in_the_recorded_path(robot):
+    arm, model, extra = robot
+    times, postures, halted = _into_contact(arm, model, extra, READY, -0.30)
+    gapped = postures.copy()
+    gapped[:-3] += np.array([0.0, 0.0, 0.0, 0.3, 0.0, 0.0])   # a jump 3 points back
+    plan = _plan(robot, times, gapped, halted)
+    assert not plan.ok and plan.postures is None

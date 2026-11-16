@@ -62,6 +62,7 @@ from ranger_xarm_teleop_servo.session import (choose_arm_controller, may_recover
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
 
 LEAVES_PATH = 0.02          # rad: the arm this far from the path stops the motion
+STALE_JOINTS_S = 0.5        # joint states older than this stop the motion
 TELEOP_NODE = '/teleop_servo'
 DEFAULT_MIN_ARMING_CONDITIONING = DEFAULTS['min_arming_conditioning']
 
@@ -104,7 +105,7 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
     rclpy.init()
     node = rclpy.create_node('retreat_arm')
     seen = {'description': None, 'owner': None, 'owner_at': -1e9, 'armed': None,
-            'state_at': -1e9, 'margin': None, 'joints': None}
+            'state_at': -1e9, 'margin': None, 'joints': None, 'joints_at': -1e9}
 
     def spin(seconds: float, until=lambda: False) -> bool:
         end = time.monotonic() + seconds
@@ -139,7 +140,7 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
             owner=int(msg.owner), owner_at=time.monotonic()), 10)
         node.create_subscription(TeleopState, '/teleop/state', on_state, 10)
         node.create_subscription(JointState, '/joint_states', lambda msg: seen.update(
-            joints=dict(zip(msg.name, msg.position))), 10)
+            joints=dict(zip(msg.name, msg.position)), joints_at=time.monotonic()), 10)
         spin(10.0, lambda: seen['description'] is not None)
         try:
             require_simulator(seen['description'] or '')
@@ -268,20 +269,29 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         result = handle.get_result_async()
         stopped = ''
         end = time.monotonic() + plan.times[-1] + 10.0
-        while time.monotonic() < end and not result.done():
-            rclpy.spin_once(node, timeout_sec=0.02)
-            positions = dict(seen['joints'])
-            q = np.array([positions[n] for n in arm.joint_names])
-            off = retreat.distance_from_path(plan.postures, q)
-            if off > LEAVES_PATH:
-                stopped = f'the arm left the path by {off:.3f} rad'
-            elif fresh()[1]:
-                stopped = 'teleop was armed'
-            if stopped:
-                cancel = handle.cancel_goal_async()
-                spin(2.0, cancel.done)
-                print(f'STOPPED: {stopped}; motion cancelled')
-                return 1
+        try:
+            while not result.done():
+                rclpy.spin_once(node, timeout_sec=0.02)
+                positions = dict(seen['joints'])
+                q = np.array([positions[n] for n in arm.joint_names])
+                off = retreat.distance_from_path(plan.postures, q)
+                if time.monotonic() > end:
+                    stopped = 'the motion did not finish in time'
+                elif time.monotonic() - seen['joints_at'] > STALE_JOINTS_S:
+                    stopped = 'no fresh joint states'
+                elif off > LEAVES_PATH:
+                    stopped = f'the arm left the path by {off:.3f} rad'
+                elif fresh()[1]:
+                    stopped = 'teleop was armed'
+                if stopped:
+                    break
+        except KeyboardInterrupt:
+            stopped = 'interrupted'
+        if stopped:
+            cancel = handle.cancel_goal_async()
+            spin(2.0, cancel.done)
+            print(f'STOPPED: {stopped}; motion cancelled')
+            return 1
         spin(1.0)
         done = result.result() if result.done() else None
         if done is None or done.result.error_code != 0:

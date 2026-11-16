@@ -44,6 +44,7 @@ POINT_SPACING = 0.002          # rad: a new point when any joint moved this much
 KEEP_SECONDS = 60.0            # the recorder keeps this much of the path
 KEEP_POINTS = 3000
 ON_PATH = 0.01                 # rad: the arm counts as at the path's newest point
+MAX_GAP = 0.08                 # rad: two recorded points further apart are not one motion
 DEEPER = 0.001                 # m: a point this much less clear than the start is deeper
 MAX_TOOL_TRAVEL = 0.15         # m of tool path, at most
 MAX_JOINT_TRAVEL = 0.5         # rad on any joint, at most
@@ -74,6 +75,19 @@ class PathRecorder:
             self.points.popleft()
             self.dropped_for_age = True
         return True
+
+    def resume(self, q: Sequence[float]) -> bool:
+        """
+        Start recording again after a pause (teleop was disarmed).
+
+        If the arm moved while nothing was recorded, the old path does not lead to where
+        the arm is: it is dropped. Return whether it was.
+        """
+        q = np.asarray(q, dtype=float)
+        if self.points and float(np.max(np.abs(q - self.points[-1][1]))) > ON_PATH:
+            self.points.clear()
+            return True
+        return False
 
     def path(self) -> Tuple[np.ndarray, np.ndarray]:
         """Return ``(times, postures)``, oldest first."""
@@ -136,6 +150,8 @@ def plan(times: np.ndarray, postures: np.ndarray, measured: Sequence[float],
     previous = measured
     for i in range(len(postures) - 1, -1, -1):
         q = postures[i]
+        if float(np.max(np.abs(q - previous))) > MAX_GAP:
+            break                      # not a recorded motion: the walk stops here
         tool_travel += float(np.linalg.norm(tool_point(q) - tool_point(previous)))
         joint_travel = float(np.max(np.abs(q - measured)))
         previous = q

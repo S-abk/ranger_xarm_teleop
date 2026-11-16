@@ -281,6 +281,8 @@ def _groups(centres: np.ndarray, radii: np.ndarray, size: float):
 # --- the model -----------------------------------------------------------------------------
 
 GROUP_SIZE = 0.06               # m: spheres are pruned in groups of about this size
+CRITICAL = 0.010                # m beyond the margin: rows kept beyond per_pair ...
+CRITICAL_ROWS = 48              # ... up to this many per pair
 
 
 @dataclass
@@ -509,6 +511,9 @@ class Model:
                 missing.append(name)
         if missing:
             raise ModelError('no joint state for ' + ', '.join(sorted(missing)))
+        bad = sorted(name for name, value in out.items() if not math.isfinite(value))
+        if bad:
+            raise ModelError('joint state not finite for ' + ', '.join(bad))
         return out
 
     def _frames(self, q: np.ndarray, extra: Optional[Mapping[str, float]]) -> _Frames:
@@ -768,13 +773,16 @@ class Model:
         if len(near) == 0:
             return Rows(np.zeros((0, n)), np.zeros(0), np.zeros(0, dtype=int), best, nearest,
                         exact)
-        # Up to per_pair rows per pair, closest first.
+        # Up to per_pair rows per pair, closest first, and up to CRITICAL_ROWS per pair of
+        # those within CRITICAL of the margin (a farther row can approach faster and bind).
+        # Bounded, so a posture deep in contact does not make the correction large.
         order = near[np.lexsort((d[near], pair[near]))]
         p = pair[order]
         start = np.concatenate([[True], p[1:] != p[:-1]])
         rank = np.arange(len(order)) - np.maximum.accumulate(
             np.where(start, np.arange(len(order)), 0))
-        keep = order[rank < per_pair]
+        keep = order[(rank < per_pair)
+                     | ((d[order] < self.margin + CRITICAL) & (rank < CRITICAL_ROWS))]
         body = np.array([self.pair_list[i][1] for i in pair[keep]], dtype=int)
         jac = self._jacobian(self._depth[body], point[keep], frames)
         tool = ~np.isnan(other[keep, 0])

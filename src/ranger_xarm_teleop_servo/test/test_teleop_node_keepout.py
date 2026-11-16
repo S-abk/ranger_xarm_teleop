@@ -198,3 +198,21 @@ def test_the_cycle_records_the_path_while_teleop_is_armed(node):
         n.owner_arrival = n.mono()
         n._on_timer()
     assert len(n.path.points) == 5
+
+
+def test_arming_is_refused_without_the_joint_states_the_model_needs(node):
+    n = node(robot_urdf())
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    n.joint_state = (n.mono(), n.get_clock().now().nanoseconds, dict(zip(JOINTS, READY)))
+    assert math.isnan(n.arming_conditioning(READY))
+    _joints(n, READY)
+    assert not math.isnan(n.arming_conditioning(READY))
+
+
+def test_teleop_waits_for_servos_robot_description_once_asked(node):
+    n = node(robot_urdf())
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    n.servo_description_pending = True
+    assert not n.solver_checks(0.0, None)[0]
+    n.servo_description_pending = False
+    assert n.solver_checks(0.0, None)[0] or n.arm is None

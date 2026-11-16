@@ -264,16 +264,17 @@ def test_row_gradients_are_the_derivative_of_the_distance(model, extra):
     for _ in range(20):
         q = np.array(READY) + rng.normal(0.0, 0.6, 6)
         rows = model.evaluate(q, extra, per_pair=1)
+        minima = model.pair_minima(q, extra)
         for i in range(len(rows.distance)):
             pair = rows.pair[i]
+            # The row is the nearest sphere of its pair; the pair minimum is smooth unless
+            # another sphere takes over, which a tiny step does not do here.
+            if abs(minima[pair] - rows.distance[i]) > 1e-12:
+                continue
             step = rng.normal(0.0, 1.0, 6)
             step *= 1e-5 / np.linalg.norm(step)
             ahead = model.pair_minima(q + step, extra)[pair]
             behind = model.pair_minima(q - step, extra)[pair]
-            # The row is the nearest sphere of its pair; the pair minimum is smooth unless
-            # another sphere takes over, which a tiny step does not do here.
-            if abs(model.pair_minima(q, extra)[pair] - rows.distance[i]) > 1e-12:
-                continue
             numeric = (ahead - behind) / 2.0
             assert rows.grad[i] @ step == pytest.approx(numeric, abs=2e-9)
             checked += 1
@@ -287,3 +288,9 @@ def test_a_description_without_collision_geometry_keeps_nothing_out():
     rows = model.evaluate(READY)
     assert len(rows.distance) == 0 and rows.clearance == math.inf
     assert len(model.pair_minima(READY)) == 0
+
+
+def test_a_non_finite_joint_state_is_refused(model):
+    """A NaN gripper value would make its rows vanish: it is refused instead."""
+    with pytest.raises(ko.ModelError, match='not finite'):
+        model.extra_values({'finger_left_joint': float('nan')})

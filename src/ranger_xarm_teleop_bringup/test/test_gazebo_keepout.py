@@ -88,7 +88,7 @@ def test_pulled_into_the_structure_the_arm_keeps_the_margin_slides_and_leaves(st
     assert len(engaged) > 300
     assert not any(s.servo_status in SERVO_HALT_CODES for _, s in timed)
     assert any(s.keepout_bound for s in engaged)
-    assert min(s.keepout_clearance for s in engaged) >= MARGIN - 1e-3
+    assert min(s.keepout_clearance_commanded for s in engaged) >= MARGIN - 1e-3
     joints = probe.joints_since(start)
     extra = _extra(model)
     measured = [model.clearance(q, extra)[0] for q in joints[::3]]

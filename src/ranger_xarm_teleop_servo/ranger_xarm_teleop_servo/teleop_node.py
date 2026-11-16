@@ -385,6 +385,8 @@ class TeleopNode(Node):
         self.path = PathRecorder()
         self._idle_count = 0
         self._idle_clearance = None
+        self._recording = False
+        self.servo_description_pending = False
         # Joint states and MoveIt Servo's output arrive at the controller rate. A second
         # node on its own executor thread receives both, so they never queue in front of
         # the headset input in this node's executor. Each callback stores one tuple (a
@@ -679,8 +681,7 @@ class TeleopNode(Node):
                                    self.keepout_margin)
         except (ko.ModelError, ChainError, ValueError) as err:
             other = f'unusable: {err}'
-        if other == ko.fingerprint(self.urdf, self._resolver(), self.base_frame,
-                                   self.tip_frame, self.keepout_margin):
+        if other == self.keepout.fingerprint:
             self.get_logger().info(f'{source} has the same geometry as the link keep-out model')
             return
         fault = (f'{source} does not match the link keep-out model built at start-up '
@@ -834,7 +835,7 @@ class TeleopNode(Node):
         Servo's commanded state must agree with the measured one.
         """
         ready = (self.arm is not None and self.keepout is not None and not self.solver_fault
-                 and not self.keepout_fault)
+                 and not self.keepout_fault and not self.servo_description_pending)
         if not self.state.engaged or self.first_command_at is None:
             return ready, True
         reference = self.reference(now)
@@ -889,6 +890,11 @@ class TeleopNode(Node):
             return math.nan
         if self.keepout_fault:
             self.get_logger().error(f'arm refused: {self.keepout_fault}')
+            return math.nan
+        try:
+            self.keepout_extra()
+        except ko.ModelError as err:
+            self.get_logger().error(f'arm refused: link keep-out: {err}')
             return math.nan
         try:
             return float(dls.levels(self.arm, joints, self.solver_params).orientation)
@@ -976,9 +982,14 @@ class TeleopNode(Node):
                     'until it is activated again')
             self.servo_mode_wrong = True
         stuck = self.stuck_check(now, tool)
-        if (joints is not None and self.state.want_armed and owner == ArmOwner.OWNER_TELEOP
-                and self.joint_state is not None):
+        recording = (joints is not None and self.state.want_armed
+                     and owner == ArmOwner.OWNER_TELEOP and self.joint_state is not None)
+        if recording:
+            if not self._recording and self.path.resume(joints):
+                self.get_logger().info('joint path: the arm moved while teleop was disarmed; '
+                                       'the earlier path was dropped')
             self.path.add(self.joint_state[1] * 1e-9, joints)
+        self._recording = recording
         blocked = (tuple(float(v) for v in self.solution.blocked)
                    if self.solution is not None and self.solution.blocked is not None
                    else (0.0, 0.0, 0.0))
@@ -1272,14 +1283,13 @@ class TeleopNode(Node):
         if tool is not None:
             fill_pose(msg.measured_tool_pose, tool)
         msg.keepout_margin = self.keepout_margin
-        msg.keepout_clearance = math.nan
-        if solution is not None:
-            msg.keepout_bound = bool(solution.keepout_bound)
-            clearance, pair = solution.keepout_clearance, solution.keepout_pair
-        else:
-            clearance, pair = self.idle_clearance()
+        clearance, pair = self.idle_clearance()
         msg.keepout_clearance = float(clearance)
         msg.keepout_link, msg.keepout_obstacle = pair
+        msg.keepout_clearance_commanded = math.nan
+        if solution is not None:
+            msg.keepout_bound = bool(solution.keepout_bound)
+            msg.keepout_clearance_commanded = float(solution.keepout_clearance)
         return msg
 
     def idle_clearance(self):
@@ -1396,10 +1406,12 @@ class TeleopNode(Node):
                 or not self.servo_description_client.service_is_ready()):
             return
         self.servo_description_compared = True
+        self.servo_description_pending = True
         future = self.servo_description_client.call_async(
             GetParameters.Request(names=['robot_description']))
 
         def answered(done) -> None:
+            self.servo_description_pending = False
             try:
                 values = done.result().values
             except Exception as err:  # noqa: B902 - reported; Servo is verified otherwise
