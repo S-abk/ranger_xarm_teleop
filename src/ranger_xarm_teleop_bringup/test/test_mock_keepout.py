@@ -277,6 +277,50 @@ def test_retreat_frees_the_arm_from_each_recorded_contact(stack, index):
     probe.disarm()
 
 
+def _retreat(env, logs, name, *options):
+    process = Process(['python3', os.path.join(TOOLS, 'retreat_arm.py'), *options], env,
+                      str(logs / f'{name}.log'))
+    try:
+        code = process.wait(180.0)
+    finally:
+        process.stop()
+    output = process.output()
+    print(output)
+    return code, output
+
+
+def test_retreat_asked_for_more_clearance_refuses_or_walks_further_back(stack):
+    """
+    Addition 4 and a longer walk-back, from the first session 3 contact.
+
+    ``--clearance 0.08``: no point of the recorded path within the bounds is that clear by
+    the model (link 2 and the arm base read 31-40 mm in this whole region: inflation of the
+    covers), so nothing moves and the message gives the best clearance found and the next
+    step. ``--clearance 0.03`` is reached within the bounds, further back than the margin.
+    """
+    probe, env, logs, _, model, arm = stack
+    path = _contact_paths()[0]
+    extra = _extra(model)
+    probe.disarm()
+    probe.move_to(path['positions'][0], seconds=4.0)
+    _arm_teleop(probe, env, logs, 'far')
+    assert _drive_into_contact(probe, path), 'the arm did not reach the recorded contact'
+    halted_at = probe.joint_positions()
+    code, output = _retreat(env, logs, 'retreat_far_080', '--clearance', '0.08')
+    assert code == 5, output
+    assert 'REFUSED' in output and 'is clear by 80.0 mm' in output, output
+    assert 'the best clearance is' in output and 'Nothing moved' in output, output
+    assert 'Next:' in output, output
+    assert probe.joint_positions() == pytest.approx(halted_at, abs=1e-4)
+    code, output = _retreat(env, logs, 'retreat_far_030', '--clearance', '0.03')
+    assert code == 0 and 'retreated' in output, output
+    freed = probe.joint_positions()
+    assert model.clearance(freed, extra)[0] >= 0.03 - 1e-3
+    assert _valid(probe, freed, extra)
+    _recover(env, logs, 'far')
+    assert probe.joint_positions() == pytest.approx(READY, abs=5e-3)
+
+
 def test_retreat_refuses_when_the_arm_was_moved_since(stack):
     """INV-8: the path's end must be where the arm is."""
     probe, env, logs, _, _, _ = stack

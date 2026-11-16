@@ -221,6 +221,22 @@ def clutch_into_body() -> List[str]:
     return record(6.4, motion, held_until(6.0), change)
 
 
+def clutch_into_body_slow() -> List[str]:
+    """
+    As ``clutch_into_body``, slowly: the hand pulls 0.28 m straight back over 10 s.
+
+    Grip 1.2-12.6 s; at most 0.053 m/s (1.5-11.5 s). Slow enough that between two of
+    MoveIt Servo's collision checks the arm cannot cross its slow-down band into contact.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        return along(-0.28 * smooth(t, 1.5, 10.0)), HELD
+
+    def change(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        down = math.radians(-25.0) / 2.0
+        return line(i, right, viewer((math.sin(down), 0.0, 0.0, math.cos(down))))
+    return record(13.0, motion, held_until(12.6), change)
+
+
 def pitch_up(deg: float) -> Quat:
     """Rotation about the calibrated right-hand axis: positive raises the pointing end."""
     half = math.radians(deg) / 2.0
@@ -438,7 +454,8 @@ def generate() -> Dict[str, List[str]]:
     makers = [clutch_line, clutch_circle, clutch_rotation, clutch_reengage, clutch_jump,
               clutch_stall, clutch_release_moving, clutch_into_body, clutch_singularity,
               clutch_shoulder, clutch_fast, clutch_step, clutch_joint_limit, clutch_reach,
-              clutch_scale_switch, clutch_keepout_slide, clutch_keepout_reverse, arm_only,
+              clutch_scale_switch, clutch_keepout_slide, clutch_keepout_reverse,
+              clutch_into_body_slow, arm_only,
               gate_absent,
               gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
               gate_seq_backwards]

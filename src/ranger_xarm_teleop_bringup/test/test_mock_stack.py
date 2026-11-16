@@ -262,6 +262,59 @@ def test_target_into_self_collision_ends_in_a_stop_reported_in_teleop_state(stac
     probe.disarm()
 
 
+def test_slowly_into_a_free_scene_object_ends_in_the_stuck_release(stack):
+    """
+    An obstacle in the world, not part of the robot: the session 2 behaviour.
+
+    The link keep-out does not know a free planning-scene object, and MoveIt Servo only
+    slows the arm near it (exponentially within its 20 mm scene band; it halts at contact
+    only). The hand pulls slowly, so the arm cannot cross the band into contact between two
+    of Servo's collision checks: it crawls, and the teleop node's own release of an arm stuck
+    near a collision ends the engagement, before any contact.
+    """
+    probe, env, logs, _ = stack
+    probe.disarm()
+    probe.move_to(INTO_BODY_START)
+    start_tool = probe.tool_position()
+    probe.scene_box(*BODY_OBSTACLE)
+    try:
+        # A release on late input data before the grip ends says nothing about the
+        # obstacle: such a run is repeated, and printed. (The stuck release is not a
+        # late-data release, so it is never repeated.)
+        start, _ = replay_with_clean_input(
+            probe, env, str(logs / 'replay_into_body_slow.log'), 'clutch_into_body_slow',
+            expected_engaged_s=11.0, before=lambda: probe.move_to(INTO_BODY_START))
+        time.sleep(1.0)
+        states = probe.states_since(start)
+    finally:
+        probe.remove_scene_box(BODY_OBSTACLE[0])
+    engaged = [s for s in states if s.clutch_engaged]
+    assert len(engaged) > 60
+    released = [i for i, s in enumerate(states)
+                if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
+    assert released, 'the arm was never released'
+    first = released[0]
+    # Released by the node while MoveIt Servo was still slowing the arm, not halted ...
+    assert states[first].servo_status == ServoStatus.DECELERATE_FOR_COLLISION
+    # ... and the arm never reached contact. servo_status is the latest code received: in the
+    # first engaged cycle it can still show how the previous test's engagement ended, until
+    # MoveIt Servo reports again (no warning: the arm starts well away from the box).
+    since = next((i for i, s in enumerate(states)
+                  if s.clutch_engaged and s.servo_status == ServoStatus.NO_WARNING), None)
+    assert since is not None and since < first, 'MoveIt Servo never reported while engaged'
+    assert not any(s.servo_status == ServoStatus.HALT_FOR_COLLISION for s in states[since:])
+    # MoveIt Servo's slowing is reported (while it crawls, the gate's lead clamp, which this
+    # node reports in preference, alternates with it).
+    assert any(s.clutch_engaged and s.active_limit == TeleopState.LIMIT_SERVO
+               for s in states[:first])
+    assert not any(s.clutch_engaged for s in states[first:])    # grip held: latched
+    end_tool = probe.tool_position()
+    assert 0.05 < start_tool[0] - end_tool[0] < 0.23
+    last = [s.measured_tool_pose.position.x for s in states[-40:]]
+    assert max(last) - min(last) < 0.001
+    probe.disarm()
+
+
 def test_log_has_no_gate_or_mux_errors(stack):
     _, _, _, launch = stack
     output = launch.output()
