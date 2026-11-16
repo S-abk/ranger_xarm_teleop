@@ -326,7 +326,7 @@ MoveIt Servo's collision halt. The model is built from `/robot_description` when
   that is within the margin in every sampled posture. The service `/teleop/keepout_info`
   (`std_srvs/Trigger`) lists the model, the pairs left out and why.
 - **The model never reports more clearance than the geometry has.** Moving links are covered
-  by spheres (20 mm cells) that contain every triangle; fixed boxes, cylinders and spheres are
+  by spheres (25 mm cells) that contain every triangle; fixed boxes, cylinders and spheres are
   used exactly. Only STL collision meshes are supported; other formats refuse the start.
 - **In the solver.** A pair's clearance `d` may fall at most at `(d - margin) / 0.2 s`, so motion
   toward the structure slows from about 50 mm outside the margin and stops at it; motion along

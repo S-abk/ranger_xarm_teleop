@@ -273,7 +273,7 @@ def _between_robot():
     ceiling = ('<link name="ceiling"><collision><geometry><box size="0.40 0.40 0.03"/>'
                '</geometry></collision></link><joint name="base_to_ceiling" type="fixed">'
                '<parent link="xarm_link_base"/><child link="ceiling"/>'
-               '<origin xyz="-0.05 0 0.655"/></joint></robot>')
+               '<origin xyz="-0.05 0 0.660"/></joint></robot>')
     urdf = robot_urdf().replace('</robot>', ceiling)
     model = ko.build(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', MARGIN)
     return sv.arm_from_urdf(urdf, 'xarm_link_base', 'xarm_link_tcp'), model

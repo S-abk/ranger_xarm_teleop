@@ -109,7 +109,8 @@ KEEPOUT_INFO_SERVICE = '/teleop/keepout_info'
 KEEPOUT_SLOW_S = 0.002      # a keep-out step longer than this is reported
 KEEPOUT_FLOOR_SLACK = 1e-4  # m: the clearance falling more below its floor is reported
 TARGET_PERIOD_MS = 20.0     # for the reference-age summary only
-IDLE_CLEARANCE_CYCLES = 5   # the clearance while not engaged is computed this seldom
+IDLE_CLEARANCE_CYCLES = 5   # the measured clearance is computed this seldom ...
+ENGAGED_CLEARANCE_CYCLES = 25   # ... and this seldom while engaged (the solver has its own)
 
 # Poses and joy are published best effort, depth 1; a little depth here lets the pose, joy
 # and status of one frame be paired by stamp whatever order they arrive in, and keeps them
@@ -1296,10 +1297,11 @@ class TeleopNode(Node):
         """
         Return the keep-out clearance and pair at the measured joints (NaN if unknown).
 
-        Computed every IDLE_CLEARANCE_CYCLES cycles (the arm is not driven by teleop then)
-        and exact within the model's influence distance only, which keeps it cheap.
+        Computed every IDLE_CLEARANCE_CYCLES cycles, every ENGAGED_CLEARANCE_CYCLES while
+        engaged, and exact within the model's influence distance only, which keeps it cheap.
         """
-        self._idle_count = (self._idle_count + 1) % IDLE_CLEARANCE_CYCLES
+        every = ENGAGED_CLEARANCE_CYCLES if self.state.engaged else IDLE_CLEARANCE_CYCLES
+        self._idle_count = (self._idle_count + 1) % every
         if self._idle_count and self._idle_clearance is not None:
             return self._idle_clearance
         self._idle_clearance = (math.nan, ('', ''))

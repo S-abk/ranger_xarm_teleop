@@ -57,7 +57,7 @@ import numpy as np
 from .kinematics import chain_from_urdf
 
 TOOL_ARM_JOINTS = 3            # tool against arm links at least this many joints up
-DEFAULT_CELL = 0.020           # m
+DEFAULT_CELL = 0.025           # m (20 mm was 50 % slower per cycle in the node)
 DEFAULT_SPACING = 0.002        # m
 NEAR_SAMPLES = 3000            # postures sampled to find structurally near pairs
 CYLINDER_SIDES = 16
@@ -874,7 +874,7 @@ BOX, CYLINDER, SPHERE = 0, 1, 2
 
 
 def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margin: float,
-          influence_extra: float = 0.06, cell: float = DEFAULT_CELL,
+          influence_extra: float = 0.04, cell: float = DEFAULT_CELL,
           fixed_cell: Optional[float] = None,
           spacing: float = DEFAULT_SPACING, near_samples: int = NEAR_SAMPLES,
           seed: int = 0) -> Model:
