@@ -105,7 +105,9 @@ def test_state_reports_the_clearance_when_idle(node):
     n._on_tf_static(teleop_node.TFMessage(transforms=[]))
     _joints(n, READY)
     clearance, pair = n.idle_clearance()
-    assert 0.03 < clearance < 0.30 and pair[0] and pair[1]
+    # Beyond the influence distance the value is a lower bound, without a pair.
+    assert 0.03 < clearance < 0.30
+    assert bool(pair[0]) == (clearance <= n.keepout.influence)
     _joints(n, [0.0, -1.35, -0.3, 0.0, 1.6, 0.0])           # into the screen
     n._idle_clearance = None                                # (it is refreshed at 10 Hz)
     clearance, pair = n.idle_clearance()
