@@ -149,7 +149,10 @@ def main() -> int:
         goal.planning_options.plan_only = False
         goal.planning_options.planning_scene_diff.is_diff = True
         goal.planning_options.planning_scene_diff.robot_state.is_diff = True
-        allowed, why = may_recover(*fresh())      # once more, right before sending
+        # Once more, right before sending. Waiting for the action server processed no
+        # reports, so they may have gone stale meanwhile: wait for fresh ones first.
+        spin(2.0, handed_back)
+        allowed, why = may_recover(*fresh())
         if not allowed:
             print(f'NOT RECOVERED, nothing moved: {why}')
             return 4

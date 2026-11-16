@@ -256,7 +256,10 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
             goal.trajectory.points.append(JointTrajectoryPoint(
                 positions=[float(x) for x in q], velocities=[float(x) for x in qd],
                 time_from_start=Duration(sec=seconds, nanosec=int((t - seconds) * 1e9))))
-        allowed, why = may_recover(*fresh())          # once more, right before sending
+        # Once more, right before sending. Waiting for the action server processed no
+        # reports, so they may have gone stale meanwhile: wait for fresh ones first.
+        spin(2.0, lambda: may_recover(*fresh())[0])
+        allowed, why = may_recover(*fresh())
         if not allowed:
             print(f'NOT HANDED BACK, nothing moved: {why}')
             return 4
