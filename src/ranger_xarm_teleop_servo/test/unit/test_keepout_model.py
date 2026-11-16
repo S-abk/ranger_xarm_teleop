@@ -150,7 +150,8 @@ def test_recorded_rows_and_the_halts_summary_carry_the_keep_out():
                  lead_translation=0.0, lead_rotation=0.0, commanded_linear_speed=0.1,
                  commanded_angular_speed=0.0, translation_scale=1.0,
                  keepout_clearance=0.03 - 0.0005 * k if k else float('nan'),
-                 keepout_link='l2', keepout_obstacle='screen', keepout_bound=k >= 5)
+                 keepout_link='l2', keepout_obstacle='screen', keepout_bound=k >= 5,
+                 keepout_clearance_commanded=0.027 - 0.0001 * k)
         row = session.state_row(msg)
         row['t'] = 100.0 + 0.02 * k
         rows.append(row)
@@ -159,3 +160,4 @@ def test_recorded_rows_and_the_halts_summary_carry_the_keep_out():
     summary = halts._solver_summary(halts._Series(rows))
     assert summary['share_keepout'] == pytest.approx(0.5)
     assert summary['keepout_min'] == pytest.approx(0.0255)
+    assert summary['keepout_commanded_min'] == pytest.approx(0.0261)

@@ -86,7 +86,7 @@ def test_far_from_the_structure_the_command_is_bit_identical(robot):
 def test_inv2_motion_away_from_the_structure_is_never_reduced(robot):
     arm, model, extra = robot
     for q in (NEAR_SCREEN, [0.3, -1.1, -0.5, 0.2, 1.4, 0.1]):
-        assert model.clearance(q, extra)[0] < MARGIN + 0.06      # inside the slowing zone
+        assert model.clearance(q, extra)[0] < model.influence    # inside the slowing zone
         target = _moved(sv.tool_pose(arm, q), dx=0.04, dz=0.02)  # forward: away
         with_model = sv.solve(arm, q, target, PARAMS, keepout=model, extra=extra)
         plain = sv.solve(arm, q, target, PARAMS)
@@ -96,23 +96,34 @@ def test_inv2_motion_away_from_the_structure_is_never_reduced(robot):
 
 # --- INV-1 -----------------------------------------------------------------------------------
 
-def test_inv1_no_pair_falls_below_the_margin_for_random_motions(robot):
-    """Random start postures clear of the structure, random targets (many beyond it)."""
+@pytest.mark.parametrize('delay', [0, 1, 2])
+def test_inv1_no_pair_falls_below_the_margin_for_random_motions(robot, delay):
+    """
+    Random start postures clear of the structure, random targets (many beyond it).
+
+    With the reference ``delay`` cycles old, as MoveIt Servo's output is. Rows exist only
+    within the influence distance: a pair must not be able to cross that zone in the cycles
+    the reference lags, plus one.
+    """
     arm, model, extra = robot
     rng = np.random.default_rng(2)
     lower = np.array([-3.0, -1.9, -3.7, -3.0, -1.5, -3.0])
     upper = np.array([3.0, 1.9, 0.0, 3.0, 3.0, 3.0])
-    bound_runs = 0
+    bound_runs, fastest = 0, 0.0
     for _ in range(16):
         while True:
             q = rng.uniform(lower, upper)
             if model.clearance(q, extra)[0] > MARGIN + 0.005:
                 break
         target = _moved(sv.tool_pose(arm, q), *rng.normal(0.0, 0.25, 3))
-        history, _, solutions = _drive(arm, model, extra, q, target, 120)
+        history, _, solutions = _drive(arm, model, extra, q, target, 120, delay=delay)
         assert _floor_kept(model, extra, history) <= 1e-9
         bound_runs += any(s.keepout_bound for s in solutions)
+        minima = np.array([model.pair_minima(h, extra) for h in history])
+        fastest = max(fastest, float(np.max(minima[:-1] - minima[1:])))
     assert bound_runs >= 4
+    zone = model.influence - model.margin - sv.KEEPOUT_TARGET_INSIDE
+    assert (1 + delay) * fastest < zone, fastest
 
 
 def test_inv1_pulling_back_into_the_screen_stops_at_the_margin_and_slides(robot):
@@ -285,8 +296,8 @@ def test_between_two_obstacles_neither_is_approached_and_the_free_direction_is_o
     # Link 2 near the screen behind, the forearm under the ceiling.
     q = np.array([0.0, -1.0, -0.6, 0.0, 1.5, 0.0])
     pairs = model.pair_clearances(q, extra)
-    assert MARGIN < min(v for k, v in pairs.items() if k[1] == 'ceiling') < MARGIN + 0.06
-    assert MARGIN < pairs[('l2', 'screen')] < MARGIN + 0.06
+    assert MARGIN < min(v for k, v in pairs.items() if k[1] == 'ceiling') < model.influence
+    assert MARGIN < pairs[('l2', 'screen')] < model.influence
     for move in ({'dx': -0.2}, {'dz': 0.2}, {'dx': -0.2, 'dz': 0.2}):     # into either, both
         target = _moved(sv.tool_pose(arm, q), **move)
         history, commands, _ = _drive(arm, model, extra, q, target, 100)
