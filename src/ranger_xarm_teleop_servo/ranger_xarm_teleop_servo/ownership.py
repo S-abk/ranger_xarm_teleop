@@ -26,6 +26,7 @@ active) is a split: no owner, never switched to teleop, only back to MoveIt. A p
 neither controller active (still loading) is incomplete: no owner either.
 """
 
+from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
 import math
@@ -208,8 +209,65 @@ class StillnessTracker:
         return self.last_stamp - self.still_since
 
 
+class BandTracker:
+    """
+    Tracks whether the gripper joints have stayed within a band over the stillness window.
+
+    The gripper's driven joint jitters in simulation (sample-to-sample speeds that the arm's
+    rule would read as motion, though it goes nowhere), and a finger squeezing an object
+    may too. Its "stopped" is therefore judged by net travel: every joint's positions over
+    the last ``still_duration`` (by sample stamps) span at most ``band``. A ramp of the
+    gripper at its speed limit spans far more than the band in that window. Holes in the
+    stream and stamps that go back restart the window, as for the arm.
+    """
+
+    def __init__(self, params: MuxParams, band: float, names: Sequence[str] = ()) -> None:
+        self.params = params
+        self.band = band
+        self.names = tuple(names)
+        self.samples: deque = deque()               # (stamp, positions)
+        self.last_arrival: Optional[float] = None
+        self.last_motion = 'no joint state yet'
+
+    def update(self, arrival: float, stamp: float, positions: Sequence[float]) -> None:
+        """Take in one sample of the gripper joints: local ``arrival`` and its ``stamp``."""
+        positions = tuple(float(p) for p in positions)
+        if self.samples:
+            dt = stamp - self.samples[-1][0]
+            if dt < 0.0 or dt > self.params.joint_state_timeout:
+                self.samples.clear()
+                self.last_motion = ('gripper joint state stamps went back' if dt < 0.0
+                                    else f'gap of {dt:.2f} s in the gripper joint states')
+        self.samples.append((stamp, positions))
+        # Keep the newest sample at or before the window's start, and everything after it.
+        while len(self.samples) > 1 and self.samples[1][0] <= stamp - self.params.still_duration:
+            self.samples.popleft()
+        self.last_arrival = arrival
+
+    def age(self, now: float) -> float:
+        """Return the age of the newest sample by local arrival; inf when none."""
+        return math.inf if self.last_arrival is None else now - self.last_arrival
+
+    def still(self) -> bool:
+        """Return True when the window is covered and every joint stayed within the band."""
+        if not self.samples:
+            return False
+        if self.samples[-1][0] - self.samples[0][0] < self.params.still_duration - 1e-6:
+            return False
+        for k in range(len(self.samples[-1][1])):
+            values = [s[1][k] for s in self.samples]
+            finite = all(math.isfinite(v) for v in values)
+            span = max(values) - min(values) if finite else math.inf
+            if span > self.band:
+                name = self.names[k] if k < len(self.names) else f'joint {k}'
+                self.last_motion = (f'gripper moved {span:.4f} within '
+                                    f'{self.params.still_duration:.2f} s ({name})')
+                return False
+        return True
+
+
 def check_switch(now: float, tracker: StillnessTracker, goal_active: bool,
-                 teleop_active: bool) -> MuxStatus:
+                 teleop_active: bool, gripper: Optional[BandTracker] = None) -> MuxStatus:
     """Return OK when a controller switch may be requested now, else why not."""
     if teleop_active:
         return MuxStatus.REFUSED_TELEOP_ACTIVE
@@ -217,6 +275,10 @@ def check_switch(now: float, tracker: StillnessTracker, goal_active: bool,
         return MuxStatus.REFUSED_GOAL_ACTIVE
     if tracker.age(now) > tracker.params.joint_state_timeout:
         return MuxStatus.STALE_JOINT_STATE
+    if gripper is not None and gripper.age(now) > gripper.params.joint_state_timeout:
+        return MuxStatus.STALE_JOINT_STATE
     if tracker.still_for() < tracker.params.still_duration:
+        return MuxStatus.REFUSED_MOVING
+    if gripper is not None and not gripper.still():
         return MuxStatus.REFUSED_MOVING
     return MuxStatus.OK

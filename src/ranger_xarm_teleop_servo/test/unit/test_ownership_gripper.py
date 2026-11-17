@@ -13,8 +13,12 @@
 # limitations under the License.
 """Command mux with a gripper pair: one owner for arm and gripper (gripper task INV-4)."""
 
+import math
+
 import pytest
-from ranger_xarm_teleop_servo.ownership import Owner, owner_of, split_of, switch_lists
+from ranger_xarm_teleop_servo.ownership import (BandTracker, check_switch, MuxParams, MuxStatus,
+                                                Owner, owner_of, split_of, StillnessTracker,
+                                                switch_lists)
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
 MOVEIT_G, TELEOP_G = 'xarm_gripper_traj_controller', 'teleop_gripper_controller'
@@ -97,10 +101,74 @@ def test_arm_only_switch_is_unchanged(given, wanted, expected):
 
 
 def test_the_motion_report_names_the_joint_that_moved():
-    from ranger_xarm_teleop_servo.ownership import MuxParams, StillnessTracker
     tracker = StillnessTracker(MuxParams(), names=('a', 'b'))
     tracker.update(0.0, 10.0, (0.0, 0.0), (0.0, 0.0))
     tracker.update(0.01, 10.01, (0.0, 0.01), (0.0, 0.0))
     assert tracker.last_motion == 'joint speed 1.000 rad/s (b)'
     tracker.update(0.02, 10.02, (0.0, 0.01), (0.5, 0.0))
     assert tracker.last_motion == 'joint speed 0.500 rad/s (a)'
+
+
+# ---- the gripper's "stopped": net travel within a band over the stillness window ----
+
+def still_arm(seconds=1.0, rate=1000.0):
+    tracker = StillnessTracker(MuxParams())
+    for k in range(int(seconds * rate) + 1):
+        tracker.update(k / rate, 100.0 + k / rate, (0.0,) * 6, (0.0,) * 6)
+    return tracker
+
+
+def gripper_samples(values, rate=1000.0, band=0.01):
+    tracker = BandTracker(MuxParams(), band, names=('xarm_drive_joint',))
+    for k, value in enumerate(values):
+        tracker.update(k / rate, 100.0 + k / rate, (value,))
+    return tracker
+
+
+def test_jitter_that_goes_nowhere_is_still():
+    # 0.156 rad/s sample-to-sample at 1 kHz (0.000156 rad steps back and forth).
+    values = [0.4 + (0.000156 if k % 7 == 0 else 0.0) for k in range(1001)]
+    tracker = gripper_samples(values)
+    assert tracker.still()
+    assert check_switch(1.0, still_arm(), False, False, tracker) == MuxStatus.OK
+
+
+def test_a_ramp_at_the_speed_limit_is_motion():
+    values = [min(0.849, 0.0005 * k) for k in range(1001)]          # 0.5 rad/s, still going
+    tracker = gripper_samples(values)
+    assert not tracker.still()
+    assert 'xarm_drive_joint' in tracker.last_motion
+    assert check_switch(1.0, still_arm(), False, False, tracker) == MuxStatus.REFUSED_MOVING
+
+
+def test_a_ramp_that_ended_is_still_once_the_window_has_passed():
+    values = [min(0.849, 0.001 * k) for k in range(2001)]           # ends at 0.849 s
+    assert gripper_samples(values[:1000]).still() is False
+    assert gripper_samples(values).still() is True
+
+
+def test_a_short_history_or_a_hole_is_not_still():
+    assert not gripper_samples([0.4] * 200).still()                 # 0.2 s covered
+    tracker = gripper_samples([0.4] * 1000)
+    tracker.update(2.0, 100.0 + 2.0, (0.4,))                         # 1 s hole
+    assert not tracker.still() and 'gap' in tracker.last_motion
+
+
+def test_stamps_going_back_restart_the_window():
+    tracker = gripper_samples([0.4] * 1000)
+    tracker.update(1.0, 99.0, (0.4,))
+    assert not tracker.still() and 'back' in tracker.last_motion
+
+
+def test_a_stale_gripper_joint_state_refuses_the_switch():
+    tracker = gripper_samples([0.4] * 1000)
+    assert check_switch(5.0, still_arm(), False, False, tracker) == MuxStatus.STALE_JOINT_STATE
+
+
+def test_a_non_finite_gripper_position_is_not_still():
+    tracker = gripper_samples([0.4] * 999 + [math.nan])
+    assert not tracker.still()
+
+
+def test_without_a_gripper_tracker_the_check_is_the_arms_alone():
+    assert check_switch(1.0, still_arm(), False, False) == MuxStatus.OK

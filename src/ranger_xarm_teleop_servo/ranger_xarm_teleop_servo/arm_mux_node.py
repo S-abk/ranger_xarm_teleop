@@ -17,11 +17,11 @@ Command mux: gives either MoveIt or teleop exclusive ownership of the arm (G-9).
 With gripper teleop configured (``moveit_gripper_controller`` and
 ``teleop_gripper_controller``), the gripper has the same owner as the arm: MoveIt's and
 teleop's gripper controllers are swapped in the same strict switch, and a goal on MoveIt's
-gripper controller refuses the switch. The gripper joint is not part of "stopped": in
-Gazebo it shows position jitter of about 0.16 rad/s at rest (and a finger squeezing an
-object would show more), which refused every switch. Its motion is covered otherwise:
-MoveIt moves it only through goals, teleop sends nothing while disarmed, and a controller
-that takes over mid-motion holds the last command it finds.
+gripper controller refuses the switch. The gripper must be stopped too, judged by net
+travel rather than sample-to-sample speed: over the stillness window its joints may span at
+most ``gripper_still_band`` (``ownership.BandTracker``). In Gazebo the driven joint shows
+sample-to-sample speeds of about 0.16 rad/s while going nowhere, which the arm's rule
+read as motion and which refused every switch.
 
 Two trajectory controllers claim the arm joints: MoveIt's and the one MoveIt Servo
 feeds. ros2_control lets only one be active, and an inactive trajectory controller
@@ -58,7 +58,8 @@ from action_msgs.msg import GoalStatusArray
 from controller_manager_msgs.srv import ListControllers, SwitchController
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
-from ranger_xarm_teleop_servo.ownership import (any_goal_active, check_switch, MuxParams,
+from ranger_xarm_teleop_servo.ownership import (any_goal_active, BandTracker, check_switch,
+                                                MuxParams,
                                                 MuxStatus, Owner, owner_of, split_of,
                                                 StillnessTracker, switch_lists)
 import rclpy
@@ -96,6 +97,9 @@ class ArmMuxNode(Node):
         # Gripper teleop: both names, or neither (the switch is then the arm's alone).
         self.declare_parameter('moveit_gripper_controller', '')
         self.declare_parameter('teleop_gripper_controller', '')
+        self.declare_parameter('gripper_joints', ['xarm_drive_joint'])
+        # Net travel (joint units) within the stillness window that still counts as stopped.
+        self.declare_parameter('gripper_still_band', 0.01)
 
         self.moveit_controller = str(self.get_parameter('moveit_controller').value)
         self.teleop_controller = str(self.get_parameter('teleop_controller').value)
@@ -111,6 +115,11 @@ class ArmMuxNode(Node):
         if self.gripper:
             self.pairs.append((self.moveit_gripper, self.teleop_gripper))
         self.split = ''
+        self.gripper_joints = []
+        if self.gripper:
+            self.gripper_joints = [str(j) for j in self.get_parameter('gripper_joints').value]
+            if not self.gripper_joints:
+                raise ValueError('gripper_joints: gripper teleop needs the gripper joints')
         self.switch_timeout = float(self.get_parameter('switch_timeout_s').value)
         self.still_wait = float(self.get_parameter('still_wait_s').value)
         self.tracker = StillnessTracker(MuxParams(
@@ -118,6 +127,11 @@ class ArmMuxNode(Node):
             still_duration=float(self.get_parameter('still_duration_s').value),
             joint_state_timeout=float(self.get_parameter('joint_state_timeout_s').value)),
             names=self.joints)
+        self.gripper_tracker = None
+        if self.gripper:
+            self.gripper_tracker = BandTracker(
+                self.tracker.params, float(self.get_parameter('gripper_still_band').value),
+                names=self.gripper_joints)
 
         self.mono = time.monotonic
         self.lock = threading.Lock()
@@ -157,13 +171,17 @@ class ArmMuxNode(Node):
 
     def _on_joint_state(self, msg: JointState) -> None:
         index = {name: i for i, name in enumerate(msg.name)}
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.gripper_tracker is not None and all(j in index for j in self.gripper_joints):
+            with self.lock:
+                self.gripper_tracker.update(self.mono(), stamp,
+                                            [msg.position[index[j]] for j in self.gripper_joints])
         if not all(joint in index for joint in self.joints):
             return
         positions = [msg.position[index[j]] for j in self.joints]
         velocities = None
         if len(msg.velocity) == len(msg.name):
             velocities = [msg.velocity[index[j]] for j in self.joints]
-        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         with self.lock:
             self.tracker.update(self.mono(), stamp, positions, velocities)
 
@@ -287,9 +305,12 @@ class ArmMuxNode(Node):
             with self.lock:
                 goal_active = any(self.goal_status.values())
                 status = check_switch(self.mono(), self.tracker, goal_active,
-                                      self.teleop_active())
+                                      self.teleop_active(), self.gripper_tracker)
                 still = self.tracker.still_for()
                 motion = self.tracker.last_motion
+                if (self.gripper_tracker is not None
+                        and still >= self.tracker.params.still_duration):
+                    motion = self.gripper_tracker.last_motion   # the gripper is what moves
             if status not in (MuxStatus.REFUSED_MOVING, MuxStatus.STALE_JOINT_STATE) \
                     or self.mono() >= deadline:
                 break
