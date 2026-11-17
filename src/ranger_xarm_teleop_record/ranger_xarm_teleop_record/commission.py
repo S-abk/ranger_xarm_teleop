@@ -35,7 +35,7 @@ import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 
 from .profile import load_profile, recorded
@@ -74,7 +74,7 @@ def _dir_size(path: str) -> int:
 class Publisher(Node):
     """Synthetic camera streams at the profile's size and rate."""
 
-    def __init__(self, streams, content: str, use_sim_time: bool):
+    def __init__(self, streams, infos, content: str, qos):
         """Create one image and one camera_info publisher per image stream."""
         super().__init__('record_commission')
         self.items = []
@@ -85,8 +85,8 @@ class Publisher(Node):
             nbytes = w * h * BYTES[enc]
             frames = ([rng.integers(0, 256, nbytes, dtype=np.uint8).tobytes()
                        for _ in range(4)] if content == 'noise' else [bytes(nbytes)])
-            pub = self.create_publisher(Image, spec['topic'], qos_profile_sensor_data)
-            info_spec = streams.get(spec.get('info') or '', None)
+            pub = self.create_publisher(Image, spec['topic'], qos)
+            info_spec = infos.get(spec.get('info') or '', None)
             info_topic = (info_spec or {}).get('topic') or \
                 spec['topic'].rsplit('/', 1)[0] + '/camera_info'
             info = self.create_publisher(CameraInfo, info_topic, qos_profile_sensor_data)
@@ -129,6 +129,9 @@ def main(argv=None) -> int:
     ap.add_argument('--dir', default=None, help='where the test bag goes (default: the '
                     "profile's data directory); it is deleted afterwards unless --keep")
     ap.add_argument('--keep', action='store_true')
+    ap.add_argument('--qos', choices=('best_effort', 'reliable'), default='best_effort',
+                    help="the image publishers' reliability (camera drivers often publish "
+                         'best effort; large best-effort messages can be lost in transport)')
     ap.add_argument('--out', default=None, help='also write the report to this JSON file')
     args = ap.parse_args(argv)
     profile = load_profile(args.profile)
@@ -160,7 +163,9 @@ def main(argv=None) -> int:
         print('refused: these topics already have publishers (a camera or a session is '
               f'running here): {", ".join(busy)}. Run the commissioning on its own.')
         return 3
-    node = Publisher(dict(images, **infos), args.content, False)
+    qos = (qos_profile_sensor_data if args.qos == 'best_effort' else
+           QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE))
+    node = Publisher(images, infos, args.content, qos)
     log = open(os.path.join(work, 'recorder.log'), 'w')
     recorder = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
@@ -204,6 +209,11 @@ def main(argv=None) -> int:
         stats[name] = {'topic': images[name]['topic'], 'published': len(published),
                        'recorded': recorded_n, 'lost': len(published) - recorded_n,
                        'duplicates': len(rec_stamps) - len(set(rec_stamps)),
+                       # up to the last recorded frame only: frames still in flight when
+                       # the recorder stopped do not count as lost
+                       'lost_before_last_recorded': (
+                           len([s for s in published if rec_stamps and s <= rec_stamps[-1]])
+                           - len(rec_stamps)),
                        'rate_hz': window[name] / (t1 - t0),
                        'nominal_hz': images[name]['rate_hz']}
     wall = t1 - t0
@@ -211,7 +221,7 @@ def main(argv=None) -> int:
     disk_rate = (size1 - size0) / wall if size1 > size0 else final / max(wall, 1e-9)
     free = shutil.disk_usage(base).free
     report = {
-        'profile': profile['name'], 'content': args.content, 'seconds': wall,
+        'profile': profile['name'], 'content': args.content, 'qos': args.qos, 'seconds': wall,
         'storage_preset': rec['storage_preset'],
         'streams': stats,
         'recorder_cpu_percent': (ticks1 - ticks0) / hz / wall * 100.0,

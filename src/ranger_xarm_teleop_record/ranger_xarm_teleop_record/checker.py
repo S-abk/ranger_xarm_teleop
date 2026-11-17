@@ -637,8 +637,9 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     report['base'] = _base_report(ep, checks, flags)
     report['link'] = _link_report(ep, checks, flags)
 
+    raised = {f['flag'] for f in flags}         # the checker's own judgement of the same flag wins
     for item in metadata.lookup(ep.sidecar, 'episode.flags') or []:
-        if isinstance(item, dict):
+        if isinstance(item, dict) and str(item.get('flag')) not in raised:
             _flag(flags, str(item.get('flag')), str(item.get('reason', '')), item.get('time'))
 
     report['consistency'] = consistency.check(ep, checks)
