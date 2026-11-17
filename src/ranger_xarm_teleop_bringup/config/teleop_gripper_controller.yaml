@@ -23,7 +23,6 @@ teleop_gripper_controller:
     # No cmd_timeout: with one, the controller would hold the MEASURED position after the
     # teleop node goes silent (a freeze), which releases a grasp. Silent means: hold the
     # last command.
-    state_publish_rate: 50.0
     action_monitor_rate: 20.0
     # A finger blocked on an object is not a fault: no path or goal tolerance (0 = unchecked).
     constraints:

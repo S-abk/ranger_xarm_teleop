@@ -31,6 +31,7 @@ from ranger_xarm_teleop_bridge.bridge_node import BridgeNode
 from ranger_xarm_teleop_bridge.frame_parse import parse_text, ParsedFrame
 from ranger_xarm_teleop_bridge.jsonl_io import read_records
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, TeleopState
+from ranger_xarm_teleop_servo import teleop_node
 from ranger_xarm_teleop_servo.teleop_node import StartupRefused, TeleopNode
 import rclpy
 from rclpy.parameter import Parameter
@@ -261,6 +262,36 @@ def test_a_clutch_release_does_not_change_the_gripper_command(harness):
             if a in (OPEN, CLOSED) and after[0] < 5.8:
                 assert b == a
     assert changes >= 5
+
+
+def test_the_gripper_command_is_the_same_whether_the_clutch_is_used_or_not(harness):
+    """INV-2: the clutch is not an input of the gripper; the same trigger, the same command."""
+    def never_clutch(t, parsed):
+        right = parsed.right
+        if right is None or len(right.buttons) < 2:
+            return parsed
+        buttons = list(right.buttons)
+        buttons[1] = replace(buttons[1], pressed=False, value=0.0)
+        return replace(parsed, right=replace(right, buttons=tuple(buttons)))
+    used, unused = harness(), harness()
+    used.play('gripper_clutch_strokes')
+    unused.play('gripper_clutch_strokes', edit=never_clutch)
+    assert any(c[3].clutch_engaged for c in used.cycles)
+    assert not any(c[3].clutch_engaged for c in unused.cycles)
+    assert [(g.position, g.request) for g in used.grips] == [
+        (g.position, g.request) for g in unused.grips]
+    assert [c[3].gripper_command for c in used.cycles if c[0] > 1.2] == [
+        c[3].gripper_command for c in unused.cycles if c[0] > 1.2]
+
+
+def test_a_held_reference_from_before_the_owner_switch_is_not_used(harness):
+    h = harness(held=0.3)
+    h.relay = False
+    h.node.gripper_held = (0.0, 0.7)            # an old report, from before teleop owned it
+    h.play('arm_only')
+    assert h.grips and all(g.reference_source == GripperCommand.SOURCE_MEASURED
+                           for g in h.grips)
+    assert h.grips[0].position == pytest.approx(0.3)
 
 
 # ---- INV-6 and approval addition 1 ----
@@ -502,3 +533,92 @@ def test_without_finger_geometry_there_is_no_gripper_keepout_check(harness):
     h = harness()
     assert h.node.gripper_keepout is None
     assert h.node.gripper_clearance(np.zeros(6)) is None
+
+
+# ---- the finger keep-out in the node (wiring of margin, model and measured joints) ----
+
+NEAR_MAST = [2.4, -0.769, -0.81, 2.124, 1.204, 1.359]   # opening the fingers nears the mast
+AWAY = [0.0, -0.6, -0.7, 0.0, 1.3, 0.0]
+
+
+class _Output:
+    condition = teleop_node.Hold.CLUTCH_RELEASED
+
+
+def keepout_gripper_node(ros):
+    values = {**LIMITS, **GRIPPER, 'gripper_joint': 'finger_left_joint',
+              'gripper_open_position': 0.04, 'gripper_closed_position': 0.0,
+              'gripper_max_speed': 0.05, 'motion_enabled': True}
+    node = TeleopNode(node_name='teleop_gripper_keepout_cycle',
+                      parameter_overrides=[Parameter(k, value=v) for k, v in values.items()])
+    node._resolver = lambda: resolve
+    node._on_robot_description(String(data=robot_urdf()))
+    return node
+
+
+def run_cycles(node, q, finger, triggers, now, published):
+    """Run the gripper step of the node with the arm at ``q``; the finger follows the command."""
+    for trigger in triggers:
+        now += 0.02
+        node.mono = lambda t=now: t
+        node.joint_state = (now, node.get_clock().now().nanoseconds,
+                            {**dict(zip(KO_JOINTS, q)), 'finger_left_joint': finger[0]})
+        node.joint_state_arrival = now
+        node.state = replace(node.state, frame=replace(node.state.frame, trigger=trigger))
+        node.gripper_cycle(now, ArmOwner.OWNER_TELEOP, _Output(), np.array(q),
+                           node.get_clock().now().to_msg())
+        if node.gripper_output.publish:
+            finger[0] = node.gripper_output.command
+            published.append((node.gripper_output.command, node.gripper_output.hold))
+    return now
+
+
+def test_opening_into_the_margin_stops_there_and_resumes_when_the_arm_moves_away(ros):
+    from ranger_xarm_teleop_servo.gate import Frame, GateState
+    node = keepout_gripper_node(ros)
+    try:
+        published = []
+        node.gripper_pub.publish = lambda msg: None
+        node.owner_gripper = True
+        node.state = GateState(want_armed=True, frame=Frame(
+            arrival=0.0, xr_time=0.0, session_id=1, seq=1, reset_count=0, controller=None,
+            controller_present=True, controller_emulated=False, head=None, head_present=True,
+            head_emulated=False, grip=False, calibrate=False, arm=False, trigger=1.0))
+        node.gripper_held = (0.0, 0.0)
+        finger = [0.0]
+        now = run_cycles(node, NEAR_MAST, finger, [1.0] * 3, 0.0, published)
+        node.gripper_held = (now, 0.0)          # the relay's report after the switch
+        now = run_cycles(node, NEAR_MAST, finger, [1.0] * 2 + [0.0] * 40, now, published)
+        clearance = node.gripper_clearance(np.array(NEAR_MAST))
+        stopped = published[-1][0]
+        assert published[-1][1] == teleop_node.grip.Hold.KEEP_OUT
+        assert 0.0 < stopped < 0.02
+        assert clearance(stopped) >= 0.025 - 1e-6
+        assert clearance(stopped + 0.001) < 0.025
+        assert clearance(0.04) < 0.0                # where it would have gone without the hold
+        # The arm moves away; the trigger stays released: the opening continues by itself.
+        run_cycles(node, AWAY, finger, [0.0] * 40, now, published)
+        assert published[-1][0] == pytest.approx(0.04)
+        assert published[-1][1] == teleop_node.grip.Hold.NONE
+    finally:
+        node.close()
+        node.destroy_node()
+
+
+def test_the_arm_keepout_places_the_fingers_at_their_measured_values(ros):
+    node = keepout_gripper_node(ros)
+    try:
+        node._on_tf_static(teleop_node.TFMessage(transforms=[]))     # builds the arm chain
+        clearances = []
+        for finger in (0.0, 0.04):
+            node.joint_state = (node.mono(), node.get_clock().now().nanoseconds,
+                                {**dict(zip(KO_JOINTS, NEAR_MAST)), 'finger_left_joint': finger})
+            assert node.keepout_extra()['finger_right_joint'] == finger     # mimic resolved
+            node._idle_clearance = None
+            clearances.append(node.idle_clearance()[0])
+        # Another pair is nearest with the fingers closed; opened, a finger is nearer still
+        # (inside the mast), and the measured clearance the arm's keep-out uses shows it.
+        assert clearances[1] < 0.0 < clearances[0]
+    finally:
+        node.close()
+        node.destroy_node()
