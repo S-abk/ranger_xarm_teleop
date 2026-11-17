@@ -32,18 +32,19 @@ from ranger_xarm_teleop_record.checker import check_episode
 from ranger_xarm_teleop_record.export import build_export, write_export
 from ranger_xarm_teleop_record.profile import load_checks
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from stack_helpers import child_environment, Probe, Process, READY, SERVO_FIXTURES
+from stack_helpers import child_environment, Process, READY, SERVO_FIXTURES
+from test_mock_gripper import GripperProbe
 
 SESSION = 'test_session'
 STATE_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
-class RecordProbe(Probe):
-    """The stack probe plus the episode state."""
+class RecordProbe(GripperProbe):
+    """The stack probe (with the gripper's) plus the episode state."""
 
-    def __init__(self, env):
-        super().__init__(env)
+    def __init__(self, env, **kwargs):
+        super().__init__(env, **kwargs)
         self.episode_states = []        # (monotonic, EpisodeState)
         self.node.create_subscription(EpisodeState, '/teleop/episode/state',
                                       self._on_episode, STATE_QOS)

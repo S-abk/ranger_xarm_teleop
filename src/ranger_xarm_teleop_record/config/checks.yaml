@@ -5,7 +5,9 @@ streams:
   rate_min_fraction: 0.9        # measured rate >= this x nominal (inside the stream's gate spans)
   gap_max_s: 0.1                # largest gap between consecutive stamps ...
   gap_max_periods: 3.0          # ... or this many nominal periods, whichever is larger
-  offset_max_periods: 1.0       # |offset to the action stream| <= max(stream period, action period) x this
+  offset_max_periods: 1.6       # |offset to the action stream| <= max(stream period, action period) x this
+                                # (fitted: worst of 7 Gazebo episodes 1.02, a rendered camera image arrives
+                                # up to one frame after its stamp; x 1.5, rounded up)
   domain_max_s: 0.5             # |median(recv - stamp)| above this: the stamps are on another clock
   min_gate_span_s: 0.5          # gate spans shorter than this are not rate-checked (gaps still are)
   count_window_margin_s: 0.2    # companion counts compare messages stamped inside the episode window
@@ -20,10 +22,12 @@ consistency:
   lag_min_s: 0.04               # the measured motion must follow the command by at least ...
   lag_max_s: 0.30               # ... and at most this
   min_path_m: 0.02              # less target travel than this: the lag cannot be identified
-  arm_rms_m: 0.005
-  arm_p99_m: 0.015
-  arm_rot_p99_deg: 3.0
-  gripper_abs_rad: 0.05
+  # Fitted on 7 of 10 scripted Gazebo episodes (simulation time, the recording clock): worst
+  # value x 1.5, rounded up; the other 3 were judged with them. Mock execution is well inside.
+  arm_rms_m: 0.002              # worst 1.1 mm
+  arm_p99_m: 0.0055             # worst 3.5 mm
+  arm_rot_p99_deg: 0.8          # worst 0.52 deg
+  gripper_abs_rad: 0.065        # p99; worst 0.041 rad (ramp at 1 rad/s, 75-85 ms lag)
   gripper_lag_min_s: 0.01       # the gripper's own lag range: its controller follows within a
   gripper_lag_max_s: 0.30       # cycle or two (mock execution echoes the command one cycle late)
   gripper_min_travel_rad: 0.1   # less command travel than this: the gripper lag is not fitted

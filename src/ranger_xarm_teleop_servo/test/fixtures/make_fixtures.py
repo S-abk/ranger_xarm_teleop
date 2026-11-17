@@ -571,9 +571,9 @@ def arm_only() -> List[str]:
 
 
 # Demonstration episodes (not written by main(): the recording tests generate them into a
-# temporary directory, they are too long to keep as files). The left controller rests 0.3 m to the left of the right one; its
-# X and Y buttons are the xr-standard slots 4 and 5 (the same slots as A and B on the right),
-# its trigger is slot 0. X starts and stops an episode, Y keeps it, Y held 1 s discards it,
+# temporary directory, they are too long to keep as files). The left controller rests 0.3 m
+# to the left of the right one; its X and Y buttons are the xr-standard slots 4 and 5 (the
+# same slots as A and B on the right), its trigger is slot 0. X starts and stops an episode, Y keeps it, Y held 1 s discards it,
 # the left trigger marks a moment.
 
 

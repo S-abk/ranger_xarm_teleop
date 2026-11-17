@@ -8,10 +8,11 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 
 | Path | What |
 |---|---|
-| `src/ranger_xarm_teleop_interfaces` | `InputStatus` / `HandStatus`, `TeleopState`, `ArmOwner`, `GripperCommand` messages, `SetArmOwner` service |
+| `src/ranger_xarm_teleop_interfaces` | `InputStatus` / `HandStatus`, `TeleopState`, `ArmOwner`, `GripperCommand`, `EpisodeState` messages, `SetArmOwner` service |
 | `src/ranger_xarm_teleop_bridge` | Bridge node (relay WebSocket → `/teleop/input/*`), JSONL replay node, pure parsing/conversion/analysis modules and their tests |
 | `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, damped least-squares solver, MoveIt Servo joint-jog commands), command mux node, gripper relay node, and the pure modules behind them with their tests |
-| `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator, simulation-only limit values |
+| `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator (`record:=true` adds the recorder), simulation-only limit values |
+| `src/ranger_xarm_teleop_record` | Demonstration episodes: episode node (left controller, rosbag2 recorder control, sidecar), deployment profiles, the pure checker, consistency check and fixed-rate export, and session tools (see Recording demonstrations) |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
 | `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py`, `servo_rigid_pairs.py` |
 | `recordings/` | Local headset recordings (git-ignored) |
@@ -527,4 +528,95 @@ started), DDS endpoint matching can delay messages or block a publish call for 0
 Under a held clutch that is a release on stale data (`hold_reason` 6 or 17), by design. The
 teleop node logs `late cycle: ...` when its own cycle was delayed. Start a replay with
 `wait_for_subscriber_s` and a few seconds of `start_delay_s`, as above.
+
+## Recording demonstrations
+
+Package `ranger_xarm_teleop_record`. A session records demonstration episodes: the action
+(`/teleop/target_pose` and `/teleop/gripper/command`, the joint command alongside), the robot
+state (joint states with efforts, measured tool pose and gripper opening in `/teleop/state`),
+the colour images of the configured cameras, the raw headset input and the base topics when
+they exist. Commanded and measured values stay separate fields with their original stamps.
+
+**What runs.** `record:=true` on `teleop_mock.launch.py` or `teleop_sim.launch.py` (or
+`record.launch.py` on its own, before arming) starts a rosbag2 recorder (MCAP, zstd chunk
+compression: lossless) paused, and the episode node. The episode node resumes, pauses and
+splits the recorder, so each episode is one closed MCAP file. Both start with the stack;
+an episode event is only a service call between them, so nothing joins or leaves the ROS
+graph during a session and the teleop node knows nothing about recording (with
+`record:=false` nothing of it starts).
+
+**Deployment profile.** `profiles/<name>.yaml` names every topic, its kind, whether it is
+required, its nominal rate, the clock its stamps are on, the data directory, the recorder
+settings and the disk thresholds (`mock` and `gazebo` here, both simulation only). The profile
+is copied into every session and episode; the checker's tolerances (`config/checks.yaml`) are
+relative to it. A deployment passes its own profile with `record_profile:=<path>`.
+
+**Left controller** (the right one is teleop's; the left stick and grip are reserved for the
+base):
+
+| Press | When | Effect |
+|---|---|---|
+| X | idle, teleop armed and owning the arm | start an episode |
+| X | recording | stop it (review) |
+| Y, released within 1 s | review | keep it |
+| Y held 1 s | review | discard it: marked, nothing deleted |
+| trigger past 0.6 (re-arms below 0.25) | recording | a time mark inside the episode |
+
+`/teleop/episode/state` (`EpisodeState`) says the state, the episode, elapsed time, flags so
+far, the last event and why a press was refused (a required stream missing or below its
+rate, no labels, teleop not armed, disk low, recorder busy), the free disk in minutes, and a
+ROS-time/wall-time pair. Disarming stops a running episode by itself (`DISARMED`); a gate
+fault does not stop it but flags it (`FAULT_RELEASE` with the hold reason). Joy is read as
+levels with the teleop node's QoS: one lost message neither loses nor doubles a press.
+
+```bash
+ros2 run ranger_xarm_teleop_record episode_labels --profile gazebo   # task label, operator: typed, kept in the data dir
+ros2 launch ranger_xarm_teleop_bringup teleop_sim.launch.py record:=true   # before arming
+ros2 topic echo /teleop/episode/state --field detail
+ros2 run ranger_xarm_teleop_record episode_check ~/teleop_data/<session>          # no ROS graph
+ros2 run ranger_xarm_teleop_record episode_export ~/teleop_data/<session> 3       # fixed rate
+ros2 run ranger_xarm_teleop_record episode_purge ~/teleop_data                    # dry run
+ros2 run ranger_xarm_teleop_record record_commission --profile gazebo             # new machine
+```
+
+**Data directory** (default `~/teleop_data`; refused inside this repo's checkout, and inside
+any other git tree unless ignored there). Every path inside a session is relative, so a
+session can be moved and checked or exported elsewhere:
+
+```
+<data_dir>/labels.json                 task label and operator in force
+<data_dir>/<UTC time>-<suffix>/
+  session.json                         commits and dirty flags (this repo, robot workspace), description
+                                       and SRDF fingerprints, limits file, teleop/Servo/mux parameters,
+                                       frames, clocks, recorder settings, the profile
+  robot_description.urdf/.srdf, limits.yaml
+  bag/                                 one MCAP file per episode
+  episodes/NNNN.json                   the sidecar: status, file, labels, start/stop (ROS, wall,
+                                       monotonic), marks, flags, calibration and what it is bound to,
+                                       scales, camera intrinsics and extrinsics, base mode, counts,
+                                       link quality, clock pairs, real-time factor, + the session block
+  checks/NNNN.json, exports/NNNN/, recorder.log
+```
+
+Latched data (description, static transforms, the first camera_info) reach a paused recorder
+and are dropped, so the sidecar holds them; an episode is interpretable from its MCAP file and
+its sidecar alone.
+
+**Checker** (`episode_check`, pure, never changes data). Per stream: rate and largest gap in
+the recording clock (gated streams only inside their spans: the target while the clutch is
+engaged), the clock domain (one-host rule: robot-side streams on one clock; wall-stamped
+input mapped through the clock pairs), the offset to the action stream, and the counts the
+episode node saw against what was recorded (a shortfall is `DATA_LOST`). Flags: fault
+releases, limits bound for more than a share of the engaged cycles, disarm, low real-time
+factor, base motion, link quality (input age, sequence gaps, XR frame-time jitter,
+reconnects). A consistency check stands in for a replay: the measured tool pose must follow
+the recorded target, and the measured opening the gripper command, within a fitted lag and a
+tolerance, over the cycles where teleop commanded (damped or limited cycles are reported
+separately). An episode missing any sidecar key is refused.
+
+**Export** (`episode_export`): a fixed rate (30 Hz default), causal hold: every field is the
+newest sample not later than the tick, with its age; nothing is interpolated. `clutch_engaged`
+false means hold: no new target; `action_valid` is false there, and `gripper_action_valid` is
+false in cycles where teleop held no gripper command. `data.npz` + `export.json` + lossless PNG
+images (32-bit depth as `.npy`): numpy and PIL only, nothing tied to a training framework.
 

@@ -21,6 +21,10 @@ import sys
 import pytest
 
 PKG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+# The pure modules of the servo and bridge packages they use (rotations, static frames,
+# the Joy layout) are pure as well.
+SERVO_DIR = os.path.join(os.path.dirname(PKG_DIR), 'ranger_xarm_teleop_servo')
+BRIDGE_DIR = os.path.join(os.path.dirname(PKG_DIR), 'ranger_xarm_teleop_bridge')
 MODULES = ['streams', 'profile', 'metadata', 'checker', 'consistency', 'export', 'episode',
            'extrinsics', 'linkstats', 'provenance']
 FORBIDDEN = ['rclpy', 'geometry_msgs', 'sensor_msgs', 'std_msgs', 'std_srvs', 'tf2_ros',
@@ -67,7 +71,7 @@ def test_import_pattern_detects_forbidden_imports():
 def test_module_loads_in_isolated_interpreter(module):
     code = (
         'import sys\n'
-        f'sys.path[:0] = [{PKG_DIR!r}]\n'
+        f'sys.path[:0] = [{PKG_DIR!r}, {SERVO_DIR!r}, {BRIDGE_DIR!r}]\n'
         f'import ranger_xarm_teleop_record.{module}\n'
         f'forbidden = {FORBIDDEN!r}\n'
         'loaded = [m for m in sys.modules if m.split(".")[0] in forbidden]\n'
