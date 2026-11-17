@@ -280,6 +280,7 @@ def test_the_gripper_command_is_the_same_whether_the_clutch_is_used_or_not(harne
     assert not any(c[3].clutch_engaged for c in unused.cycles)
     assert [(g.position, g.request) for g in used.grips] == [
         (g.position, g.request) for g in unused.grips]
+    # From the clutch's first use on (before it, the runs are the same by construction).
     assert [c[3].gripper_command for c in used.cycles if c[0] > 1.2] == [
         c[3].gripper_command for c in unused.cycles if c[0] > 1.2]
 

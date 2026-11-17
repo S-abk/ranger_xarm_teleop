@@ -250,8 +250,9 @@ def gripper_row(msg: Any) -> Dict[str, Any]:
 
 def joy_row(msg: Any) -> Dict[str, Any]:
     """Row for the input buttons and axes, a ``sensor_msgs/Joy`` (bridge index order)."""
+    # A missing trigger value arrives as NaN; JSONL has no NaN, so it is recorded as null.
     return {'k': 'joy', 'stamp': _stamp(msg), 'buttons': [int(b) for b in msg.buttons],
-            'axes': [float(a) for a in msg.axes]}
+            'axes': [float(a) if math.isfinite(a) else None for a in msg.axes]}
 
 
 def _hand(hand: Any) -> Dict[str, bool]:

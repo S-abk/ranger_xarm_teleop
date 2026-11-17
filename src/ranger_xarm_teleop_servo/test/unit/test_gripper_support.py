@@ -129,6 +129,16 @@ def test_model_pairs_moved_by_the_gripper_joint_are_the_fingers():
     assert model.pairs_moved_by('no_joint') == []
 
 
+def test_joy_row_records_a_missing_trigger_as_null():
+    import json
+    from types import SimpleNamespace as NS
+    from ranger_xarm_teleop_servo import session
+    row = session.joy_row(NS(header=NS(stamp=NS(sec=1, nanosec=0)), buttons=[0, 1],
+                             axes=[0.5, math.nan, math.inf]))
+    assert row['axes'] == [0.5, None, None]
+    json.dumps(row, allow_nan=False)
+
+
 def test_session_rows_record_the_gripper_command_and_the_measured_opening_apart():
     from types import SimpleNamespace as NS
     from ranger_xarm_teleop_servo import session

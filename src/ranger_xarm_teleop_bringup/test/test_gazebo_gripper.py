@@ -87,6 +87,7 @@ def test_replay_closes_and_opens_the_simulated_gripper(stack):
     assert positions and max(positions) == pytest.approx(CLOSED)
     assert positions[-1] == pytest.approx(0.0)
     measured = probe.gripper_since(start)
+    assert measured, 'no gripper joint state during the replay'
     assert max(measured) > CLOSED - 0.05, max(measured)
     assert measured[-1] < 0.05, measured[-1]
     states = probe.states_since(start)
@@ -109,7 +110,9 @@ def test_arming_starts_from_the_opening_moveit_left(stack):
     assert grips[0].position == pytest.approx(0.37, abs=1e-6)
     assert grips[0].reference_source == GripperCommand.SOURCE_HELD
     assert all(g.position == grips[0].position for g in grips)
-    assert max(abs(p - 0.37) for p in probe.gripper_since(start)) < 0.01
+    measured = probe.gripper_since(start)
+    assert measured, 'no gripper joint state during the replay'
+    assert max(abs(p - 0.37) for p in measured) < 0.01
     assert any(s.gripper_hold == TeleopState.GRIPPER_HOLD_AWAIT_TRIGGER
                for s in probe.states_since(start))
     probe.disarm()
