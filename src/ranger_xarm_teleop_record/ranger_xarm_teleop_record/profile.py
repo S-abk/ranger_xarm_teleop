@@ -27,6 +27,8 @@ from typing import Dict, List, Optional
 
 import yaml
 
+from ranger_xarm_teleop_record.streams import OPTIONAL_FIELDS
+
 KINDS = ('teleop_state', 'pose', 'gripper_command', 'joint_command', 'joint_states', 'image',
          'camera_info', 'input_status', 'joy', 'episode_state', 'odometry', 'twist', 'owner',
          'other')
@@ -108,6 +110,15 @@ def validate(profile: dict) -> dict:
             problems.append(f'{name}: required but not recorded')
         if s.get('kind') == 'image' and 'image' not in s:
             problems.append(f'{name}: an image stream needs image: {{width, height, encoding}}')
+        fields = s.setdefault('required_fields', [])
+        if not isinstance(fields, list):
+            problems.append(f'{name}: required_fields must be a list')
+        else:
+            known = OPTIONAL_FIELDS.get(s.get('kind'), ())
+            for f in fields:
+                if f not in known:
+                    problems.append(f'{name}: required field {f!r} is not one of {list(known)} '
+                                    f'(kind {s.get("kind")})')
         if s.get('info') is not None and s['info'] not in streams:
             problems.append(f'{name}: info stream {s["info"]!r} not in the profile')
         topic = s.get('topic')
@@ -125,6 +136,21 @@ def validate(profile: dict) -> dict:
         problems.append('state: the action timeline needs a nominal rate')
     if p.get('low_rtf') is not None and not 0.0 < float(p['low_rtf']) <= 1.0:
         problems.append('low_rtf must be in (0, 1] or null')
+    overrides = p.setdefault('checks', {}) or {}
+    p['checks'] = overrides
+    if not isinstance(overrides, dict) or not all(isinstance(v, dict)
+                                                  for v in overrides.values()):
+        problems.append('checks: must map a section of checks.yaml to {key: value}')
+        overrides = {}
+    provisional = p.setdefault('provisional', {}) or {}
+    p['provisional'] = provisional
+    if not isinstance(provisional, dict):
+        problems.append('provisional: must map section.key to why the value is provisional')
+    else:
+        for dotted in provisional:
+            section, _, key = str(dotted).partition('.')
+            if key not in (overrides.get(section) or {}):
+                problems.append(f'provisional: {dotted} is not a tolerance this profile sets')
     if problems:
         raise ProfileError('; '.join(problems))
     return p
@@ -139,6 +165,41 @@ def load_profile(name_or_path: str) -> dict:
 def load_checks(path: Optional[str] = None) -> dict:
     """Load the checker tolerances (the package default when ``path`` is None)."""
     return load_yaml(path or os.path.join(package_dir(), 'config', 'checks.yaml'))
+
+
+def effective_checks(checks: dict, profile: dict, source: str) -> dict:
+    """
+    Return the tolerances in force for ``profile``: ``checks`` with the profile's overrides.
+
+    A deployment profile may override any tolerance of checks.yaml in its ``checks`` block and
+    mark some of them ``provisional`` (set by hand before enough data to fit them). ``source``
+    says which copy of the profile the overrides came from; it is reported with every check
+    under ``_tolerances``. An override of a key checks.yaml does not have is an error, so a
+    typing mistake cannot leave a tolerance silently at its default.
+    """
+    out = copy.deepcopy({k: v for k, v in checks.items() if k != '_tolerances'})
+    overrides = profile.get('checks') or {}
+    for section, values in overrides.items():
+        if not isinstance(out.get(section), dict):
+            raise ProfileError(f'profile {profile.get("name")}: checks.{section} is not a '
+                               'section of the tolerance file')
+        for key, value in values.items():
+            if key not in out[section]:
+                raise ProfileError(f'profile {profile.get("name")}: checks.{section}.{key} '
+                                   'is not a tolerance of the tolerance file')
+            out[section][key] = value
+    out['_tolerances'] = {'profile': profile.get('name'), 'source': source,
+                          'overrides': copy.deepcopy(overrides),
+                          'provisional': dict(profile.get('provisional') or {})}
+    return out
+
+
+def package_profile(name: str) -> Optional[dict]:
+    """Return the package's profile called ``name``, or None when there is none."""
+    path = resolve(name) if name and os.path.sep not in name else None
+    if path is None or not os.path.isfile(path):
+        return None
+    return load_profile(path)
 
 
 def recorded(profile: dict) -> Dict[str, dict]:

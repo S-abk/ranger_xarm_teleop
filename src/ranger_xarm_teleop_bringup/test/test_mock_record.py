@@ -24,6 +24,7 @@ import os
 import sys
 import time
 
+import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, EpisodeState
 from ranger_xarm_teleop_record import metadata as md
@@ -230,9 +231,13 @@ def test_ten_scripted_episodes_pass_the_checker_and_export(stack):
         assert md.missing(sidecar) == [], md.missing(sidecar)
         assert len(sidecar['episode']['marks']) == 1
         assert sidecar['base']['mode'].startswith('parked')
+        # Mock execution publishes joint effort as NaN: noted, not failed.
+        fields = sidecar['fields']['joint_states']
+        assert fields['absent'] == ['effort'] and fields['how'] == {'effort': 'NaN'}, fields
         report = check_episode(read_episode(session, path), checks)
         reports.append(report)
         assert report['verdict'] == 'PASS', (path, report['reasons'])
+        assert report['fields']['joint_states']['absent'] == ['effort']
     with open(os.path.join(str(logs), 'reports.json'), 'w', encoding='utf-8') as handle:
         json.dump(reports, handle, default=str)
     assert [r['usable'] for r in reports] == [True] * 10 + [False]
@@ -243,6 +248,9 @@ def test_ten_scripted_episodes_pass_the_checker_and_export(stack):
     assert 'data.npz' in written and 'export.json' in written
     assert arrays['clutch_engaged'].any() and not arrays['clutch_engaged'].all()
     assert not arrays['action_valid'][~arrays['clutch_engaged']].any()
+    for name, value in arrays.items():
+        if name.endswith('_age'):
+            assert not np.any(value[np.isfinite(value)] < 0.0), name
     text = open(os.path.join(out, 'export.json'), encoding='utf-8').read()
     assert os.path.expanduser('~') not in text and session not in text
 

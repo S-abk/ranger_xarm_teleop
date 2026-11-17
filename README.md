@@ -533,7 +533,7 @@ teleop node logs `late cycle: ...` when its own cycle was delayed. Start a repla
 
 Package `ranger_xarm_teleop_record`. A session records demonstration episodes: the action
 (`/teleop/target_pose` and `/teleop/gripper/command`, the joint command alongside), the robot
-state (joint states with efforts, measured tool pose and gripper opening in `/teleop/state`),
+state (joint states, measured tool pose and gripper opening in `/teleop/state`),
 the colour images of the configured cameras, the raw headset input and the base topics when
 they exist. Commanded and measured values stay separate fields with their original stamps.
 
@@ -549,7 +549,19 @@ graph during a session and the teleop node knows nothing about recording (with
 required, its nominal rate, the clock its stamps are on, the data directory, the recorder
 settings and the disk thresholds (`mock` and `gazebo` here, both simulation only). The profile
 is copied into every session and episode; the checker's tolerances (`config/checks.yaml`) are
-relative to it. A deployment passes its own profile with `record_profile:=<path>`.
+relative to it. A deployment passes its own profile with `record_profile:=<path>`. A profile
+may also:
+
+- override tolerances of `config/checks.yaml` in a `checks` block, and mark some of them
+  `provisional` (set by hand before there was data to fit them). The `gazebo` profile sets the
+  arm rotation limit to 1.5 deg this way. The checking tools apply the package's current
+  profile of the episode's profile name, so a changed tolerance also judges older episodes;
+  every check report names the source and lists the provisional values.
+- list `required_fields` of a stream: optional fields (joint `position`, `velocity`,
+  `effort`; odometry `pose`, `twist`) whose absence fails an episode and refuses START. An
+  absent field (no finite value in the episode) is otherwise only reported, in the sidecar and
+  the check report. Gazebo and mock execution publish joint effort as NaN (their joints declare
+  no effort state interface), so neither profile requires it.
 
 **Left controller** (the right one is teleop's; the left stick and grip are reserved for the
 base):
@@ -575,6 +587,8 @@ ros2 launch ranger_xarm_teleop_bringup teleop_sim.launch.py record:=true   # bef
 ros2 topic echo /teleop/episode/state --field detail
 ros2 run ranger_xarm_teleop_record episode_check ~/teleop_data/<session>          # no ROS graph
 ros2 run ranger_xarm_teleop_record episode_export ~/teleop_data/<session> 3       # fixed rate
+ros2 run ranger_xarm_teleop_record episode_export ~/teleop_data/<session> 3 --tick-stream camera_wrist
+ros2 run ranger_xarm_teleop_record episode_fit ~/teleop_data/<s1> ~/teleop_data/<s2> --out fit.yaml
 ros2 run ranger_xarm_teleop_record episode_purge ~/teleop_data                    # dry run
 ros2 run ranger_xarm_teleop_record record_commission --profile gazebo             # new machine
 ```
@@ -594,7 +608,8 @@ session can be moved and checked or exported elsewhere:
   episodes/NNNN.json                   the sidecar: status, file, labels, start/stop (ROS, wall,
                                        monotonic), marks, flags, calibration and what it is bound to,
                                        scales, camera intrinsics and extrinsics, base mode, counts,
-                                       link quality, clock pairs, real-time factor, + the session block
+                                       link quality, clock pairs, real-time factor, absent fields,
+                                       + the session block
   checks/NNNN.json, exports/NNNN/, recorder.log
 ```
 
@@ -612,10 +627,22 @@ factor, base motion, link quality (input age, sequence gaps, XR frame-time jitte
 reconnects). A consistency check stands in for a replay: the measured tool pose must follow
 the recorded target, and the measured opening the gripper command, within a fitted lag and a
 tolerance, over the cycles where teleop commanded (damped or limited cycles are reported
-separately). An episode missing any sidecar key is refused.
+separately). An episode in which teleop never commanded the arm fails with one reason,
+`NO_ACTION: no teleop arm action in the episode`. An episode missing any sidecar key is
+refused.
+
+**Refitting** (`episode_fit`). Proposes the consistency tolerances from kept episodes of one
+profile: in recording order, the worst value of the first 70 % times 1.5, rounded up (0.5 mm,
+0.1 deg, 0.005 rad); the other 30 % are held out and judged with the proposal. Fewer than five
+eligible episodes give no proposal. It prints the proposal (and writes it with `--out`); the
+profile is edited by hand.
 
 **Export** (`episode_export`): a fixed rate (30 Hz default), causal hold: every field is the
-newest sample not later than the tick, with its age; nothing is interpolated. `clutch_engaged`
+newest sample not later than the tick, with its age (never negative); nothing is interpolated.
+A fixed grid beats against camera frames that are not exactly 1/rate apart and skips or
+repeats some; `--tick-stream <camera>` puts the ticks on that camera's frame stamps instead,
+so each of its frames is used exactly once (`export.json` `ticks` says which grid, and
+`images` counts the frames used, unused and repeated per camera). `clutch_engaged`
 false means hold: no new target; `action_valid` is false there, and `gripper_action_valid` is
 false in cycles where teleop held no gripper command. `data.npz` + `export.json` + lossless PNG
 images (32-bit depth as `.npy`): numpy and PIL only, nothing tied to a training framework.

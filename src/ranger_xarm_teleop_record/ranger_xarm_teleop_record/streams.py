@@ -60,12 +60,62 @@ Pixels are not held here; ``Episode.images[name]`` loads one frame by row index.
 ``twist`` (Twist, no header): float ``twist`` ``(n, 6)``.
 ``owner`` (ArmOwner): int ``owner``, ``status``.
 Kinds not listed (tf, strings, logs) carry no fields; only their times are used.
+
+Absent fields
+-------------
+Some set-ups leave a field of a state message empty or NaN (a simulator whose joints declare
+no effort interface publishes ``effort`` as NaN). ``OPTIONAL_FIELDS`` lists, per kind, the
+fields that may be absent this way. A field is *absent* in an episode when no row has a
+finite value in it. Absence is reported as information; a profile's ``required_fields`` on a
+stream makes it fail the episode.
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
+
+OPTIONAL_FIELDS: Dict[str, tuple] = {
+    'joint_states': ('position', 'velocity', 'effort'),
+    'odometry': ('pose', 'twist'),
+}
+
+
+def any_finite(values: Sequence[float]) -> bool:
+    """Return True when at least one value is a finite number (an empty sequence has none)."""
+    return bool(np.any(np.isfinite(np.asarray(values, dtype=float))))
+
+
+class FieldPresence:
+    """Which optional fields had a finite value over the messages added (the episode node)."""
+
+    def __init__(self, keys: Sequence[str]):
+        """Track ``keys`` (a kind's OPTIONAL_FIELDS)."""
+        self.keys = tuple(keys)
+        self.n = 0
+        self.finite = {k: False for k in self.keys}
+        self.nonempty = {k: False for k in self.keys}
+        self.last: Dict[str, bool] = {}            # finite in the newest message
+
+    def add(self, values: Dict[str, Sequence[float]]) -> None:
+        """Note one message's values per field."""
+        self.n += 1
+        for key in self.keys:
+            value = values.get(key, ())
+            finite = len(value) > 0 and any_finite(value)
+            self.last[key] = finite
+            self.finite[key] = self.finite[key] or finite
+            self.nonempty[key] = self.nonempty[key] or len(value) > 0
+
+    def absent(self) -> List[str]:
+        """Return the fields with no finite value in any message added."""
+        return [k for k in self.keys if not self.finite[k]]
+
+    def report(self) -> dict:
+        """Return ``{messages, absent, how}`` for a sidecar (how: empty, NaN, no message)."""
+        how = {k: ('no message' if self.n == 0 else 'empty' if not self.nonempty[k]
+                   else 'NaN') for k in self.absent()}
+        return {'messages': self.n, 'absent': self.absent(), 'how': how}
 
 
 @dataclass
@@ -101,6 +151,15 @@ class Stream:
     def __len__(self) -> int:
         """Return the number of recorded messages."""
         return len(self.stamp)
+
+    def absent_fields(self) -> List[str]:
+        """Return this kind's optional fields with no finite value in any row."""
+        out = []
+        for key in OPTIONAL_FIELDS.get(self.kind, ()):
+            value = self.fields.get(key)
+            if value is None or not len(self) or not any_finite(np.ravel(value)):
+                out.append(key)
+        return out
 
 
 @dataclass

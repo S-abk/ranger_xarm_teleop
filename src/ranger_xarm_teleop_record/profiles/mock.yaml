@@ -24,6 +24,8 @@ disk:
 # clock (null: an event stream, no rate or gap check). gate: rate and gaps are judged only in
 # these spans (engaged = clutch engaged; gripper_active). required: START is refused while it
 # is missing or below its rate (ungated streams only), and the checker fails without it.
+# required_fields: optional fields (streams.py OPTIONAL_FIELDS) the episode fails without; here
+# none, because mock execution publishes joint effort as NaN.
 # count: the episode node counts publications in the episode, compared with the recording.
 streams:
   state:            {topic: /teleop/state, kind: teleop_state, type: ranger_xarm_teleop_interfaces/msg/TeleopState, required: true, rate_hz: 50, clock: robot, count: true}

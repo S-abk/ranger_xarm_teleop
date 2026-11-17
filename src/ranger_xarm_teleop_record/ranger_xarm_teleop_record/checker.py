@@ -21,7 +21,14 @@ missing is reported, and fails the episode.
 
 Report keys: ``verdict`` (PASS, FAIL, REFUSED), ``reasons``, ``flags`` (INV-4 notices; each
 ``{flag, reason, time}``), ``usable``, ``streams`` (one entry per recorded profile stream),
-``link``, ``rtf``, ``base``, ``limits``, ``consistency``, ``missing_metadata``, ``window``.
+``link``, ``rtf``, ``base``, ``limits``, ``consistency``, ``missing_metadata``, ``window``,
+``fields`` (optional fields absent per stream, see streams.py) and ``tolerances`` (which
+profile's overrides were applied over checks.yaml, and which values are provisional).
+
+Tolerances: when ``checks`` has not been through ``profile.effective_checks`` the overrides of
+the episode's own recorded profile apply. The command-line tools apply those of the package's
+current profile of the same name instead, so a refitted or provisional tolerance also judges
+episodes recorded before it was set (the report says which source was used).
 
 Times are seconds on the recording clock unless a key says wall. A ``host_wall`` stream is
 mapped onto the recording clock with the clock pairs of the ``episode_state`` stream
@@ -36,8 +43,8 @@ import numpy as np
 
 from ranger_xarm_teleop_record import consistency
 from ranger_xarm_teleop_record import metadata
-from ranger_xarm_teleop_record.profile import period, recorded
-from ranger_xarm_teleop_record.streams import Episode, Stream
+from ranger_xarm_teleop_record.profile import effective_checks, period, recorded
+from ranger_xarm_teleop_record.streams import Episode, OPTIONAL_FIELDS, Stream
 
 # Replicated from ranger_xarm_teleop_interfaces/msg/TeleopState.msg (HOLD_* and LIMIT_*).
 HOLD_NAMES = {
@@ -64,6 +71,8 @@ LIMIT_NONE = 0
 
 CMD_VEL_EPS = 1e-6
 DEFAULT_FAIL_FLAGS = ('DATA_LOST', 'RECORDER_ERROR', 'TELEOP_STATE_LOST')
+# What a gated stream's absence means when its gate never opened in the episode.
+GATE_ACTION = {'engaged': 'teleop arm action', 'gripper_active': 'teleop gripper action'}
 
 
 # --------------------------------------------------------------------------------------------
@@ -285,6 +294,13 @@ def _check_stream(name: str, spec: dict, ctx: _Context, reasons: List[str],
            'clock': spec.get('clock'), 'nominal_hz': nominal, 'ok': True, 'problems': []}
     problems: List[str] = out['problems']
     if n == 0:
+        if spec.get('required') and gate and not ctx.gates.get(gate):
+            # Nothing to record: the gate never opened (an episode without an engaged cycle).
+            # check_episode reports this once for the episode, not once per gated stream.
+            problems.append(f'absent: no {gate} cycle in the episode')
+            out['ok'] = False
+            out['gate_never_open'] = True
+            return out
         if spec.get('required'):
             problems.append('required stream missing')
         if gate and ctx.gates.get(gate):
@@ -359,6 +375,23 @@ def _check_stream(name: str, spec: dict, ctx: _Context, reasons: List[str],
                     out['rate_wall_hz'] = stats['rate_hz'] * (last - first) / (wall[1] - wall[0])
     out['ok'] = not problems
     reasons.extend(f'{name}: {p}' for p in problems)
+    return out
+
+
+def _field_report(ep: Episode, reasons: List[str]) -> dict:
+    """Report the optional fields absent per stream; fail on a profile's required_fields."""
+    out = {}
+    for name, spec in recorded(ep.profile).items():
+        st = ep.get(name)
+        if spec.get('kind') not in OPTIONAL_FIELDS or st is None or not len(st):
+            continue
+        absent = st.absent_fields()
+        required = list(spec.get('required_fields') or [])
+        out[name] = {'absent': absent, 'required_fields': required}
+        for key in required:
+            if key in absent:
+                reasons.append(f'FIELD_MISSING: {name}: required field {key} has no finite '
+                               'value in the episode')
     return out
 
 
@@ -599,6 +632,8 @@ def _link_report(ep: Episode, checks: dict, flags: List[dict]) -> dict:
 
 def check_episode(ep: Episode, checks: dict) -> dict:
     """Judge one episode; return the report (see the module docstring). Never mutates ``ep``."""
+    if '_tolerances' not in checks:
+        checks = effective_checks(checks, ep.profile, 'recorded profile (episode sidecar)')
     reasons: List[str] = []
     flags: List[dict] = []
     absent = metadata.missing(ep.sidecar)
@@ -606,7 +641,8 @@ def check_episode(ep: Episode, checks: dict) -> dict:
         reasons.append(f'MISSING_METADATA: {key}')
     report: dict = {'verdict': 'FAIL', 'reasons': reasons, 'flags': flags, 'usable': False,
                     'streams': {}, 'link': {}, 'rtf': {}, 'base': {}, 'limits': {},
-                    'consistency': {}, 'missing_metadata': list(absent), 'window': None}
+                    'consistency': {}, 'missing_metadata': list(absent), 'window': None,
+                    'fields': {}, 'tolerances': checks['_tolerances']}
     state = ep.get('state')
     if state is None or len(state) < 2:
         reasons.append('state: fewer than two rows, no action timeline')
@@ -644,7 +680,16 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     if domain.get('no_pairs'):
         reasons.append('NO_CLOCK_PAIRS: no episode_state clock pairs to map: '
                        + ', '.join(domain['no_pairs']))
+    no_gate = {}
+    for name, entry in report['streams'].items():
+        if entry.get('gate_never_open'):
+            no_gate.setdefault(entry['gate'], []).append(name)
+    for gate, names in no_gate.items():
+        what = GATE_ACTION.get(gate, f'{gate} cycle')
+        reasons.append(f'NO_ACTION: no {what} in the episode ({", ".join(names)} absent; the '
+                       f'episode lasted {ctx.window[1] - ctx.window[0]:.2f} s)')
     reasons.extend(stream_reasons)
+    report['fields'] = _field_report(ep, reasons)
 
     _check_counts(ep, checks, report['streams'], flags, reasons)
 

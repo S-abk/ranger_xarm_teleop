@@ -19,11 +19,23 @@ recorder:
 disk:
   min_free_gb_to_start: 20
   min_free_gb_to_continue: 10
+# Tolerances of config/checks.yaml this deployment sets differently (section: {key: value}).
+# The checking tools apply the package's current copy of this block, also to episodes recorded
+# before it changed; each check report names the source and lists the provisional values.
+checks:
+  consistency:
+    arm_rot_p99_deg: 1.5        # set by hand; checks.yaml's 0.8 was fitted on scripted episodes
+provisional:                    # set by hand, not fitted: refit with episode_fit on kept live episodes
+  consistency.arm_rot_p99_deg: >-
+    set by hand after the first live headset session (one kept episode at 0.94 deg against
+    the 0.8 deg fitted on scripted episodes); replace with an episode_fit result
 # Streams. kind: see streams.py. clock: robot = the host's ROS clock (simulation time here),
 # host_wall = the host's system clock, none = no header. rate_hz: nominal, in the recording
 # clock (null: an event stream, no rate or gap check). gate: rate and gaps are judged only in
 # these spans (engaged = clutch engaged; gripper_active). required: START is refused while it
 # is missing or below its rate (ungated streams only), and the checker fails without it.
+# required_fields: optional fields (streams.py OPTIONAL_FIELDS) the episode fails without; here
+# none, because Gazebo's joints declare no effort state interface and it publishes effort as NaN.
 # count: the episode node counts publications in the episode, compared with the recording.
 streams:
   state:            {topic: /teleop/state, kind: teleop_state, type: ranger_xarm_teleop_interfaces/msg/TeleopState, required: true, rate_hz: 50, clock: robot, count: true}

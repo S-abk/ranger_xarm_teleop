@@ -14,11 +14,21 @@
 """
 Fixed-rate export of one episode (no ROS).
 
-The export puts every field on a common tick grid, ``t_k = t0 + k / rate`` over the first to
-last stamp of the state stream (the action timeline). The only rule that touches the data is
-a causal zero-order hold: each field takes the newest sample whose stamp is not later than
-the tick, and the age of that sample is exported with it. Nothing is interpolated, no later
-sample is used, and a gap in a source stream shows as growing age and an invalid tick.
+The export puts every field on a common tick grid. By default the grid is fixed,
+``t_k = t0 + k / rate`` over the first to last stamp of the state stream (the action
+timeline). With ``tick_stream`` the ticks are the stamps of one camera's frames instead, so
+every frame of that camera is used exactly once (a fixed grid beats against a camera whose
+frames are not exactly 1/rate apart and skips or repeats frames). The only rule that touches
+the data is a causal zero-order hold: each field takes the newest sample whose stamp is not
+later than the tick, and the age of that sample is exported with it. Nothing is interpolated,
+no later sample is used, no age is negative, and a gap in a source stream shows as growing
+age and an invalid tick.
+
+The measured fields of TeleopState (tool pose, gripper opening) come from a joint state whose
+stamp can be later than the state's own cycle stamp (the teleop node reads the newest joint
+state when it publishes). They are held on the newest state row whose cycle stamp and
+measured-gripper stamp are both not later than the tick, which may be an earlier row than the
+one the other state fields come from.
 
 Output of ``write_export``: ``data.npz`` (arrays, first dimension T), ``export.json`` (what the
 arrays mean, the hold rule, the episode identity, the checker verdict) and ``images/<stream>/
@@ -36,7 +46,7 @@ from PIL import Image
 from ranger_xarm_teleop_record import metadata
 from ranger_xarm_teleop_record.checker import clock_pairs, jsonable, rec_to_wall
 from ranger_xarm_teleop_record.profile import period, recorded
-from ranger_xarm_teleop_record.streams import Episode, Stream
+from ranger_xarm_teleop_record.streams import Episode, OPTIONAL_FIELDS, Stream
 
 FORMAT = 'ranger_xarm_teleop.export/1'
 RULE = ('causal zero-order hold: each field is the newest sample not later than the tick, '
@@ -51,6 +61,7 @@ STATE_FIELDS = ('armed', 'clutch_engaged', 'hold_reason', 'active_limit', 'dampe
                 'gripper_request', 'gripper_reference_source', 'gripper_measured',
                 'gripper_measured_valid', 'gripper_measured_stamp')
 STAMPED_KINDS = ('teleop_state', 'joint_states', 'image')   # streams whose age gates a tick
+TICK_KINDS = ('image',)                                      # streams that may give the ticks
 
 
 # --------------------------------------------------------------------------------------------
@@ -73,10 +84,16 @@ def hold_index(stamp: np.ndarray, t: np.ndarray) -> np.ndarray:
 
 
 def _age(stamp: np.ndarray, idx: np.ndarray, t: np.ndarray) -> np.ndarray:
-    """Return ``t - stamp[idx]``, NaN where nothing is held yet."""
+    """
+    Return ``t - stamp[idx]``, NaN where nothing is held yet.
+
+    ``hold_index`` admits a stamp up to TIME_EPS after the tick (float rounding of the tick
+    grid); such an age is clamped to 0. A stamp later than that is never held, so the clamp
+    cannot hide a sample from after the tick.
+    """
     out = np.full(len(t), np.nan)
     ok = idx >= 0
-    out[ok] = t[ok] - np.asarray(stamp, dtype=float)[idx[ok]]
+    out[ok] = np.maximum(t[ok] - np.asarray(stamp, dtype=float)[idx[ok]], 0.0)
     return out
 
 
@@ -95,9 +112,10 @@ def _gather(values: np.ndarray, idx: np.ndarray, fill=np.nan) -> np.ndarray:
 
 # name -> (unit, frame key or text, description)
 FIELD_INFO: Dict[str, Tuple[str, str, str]] = {
-    't': ('s', 'recording clock', 'tick time'),
+    't': ('s', 'recording clock', 'tick time (see ticks in export.json)'),
     't_wall': ('s', 'host wall clock', 'tick time mapped to the host wall clock'),
-    'clutch_engaged': ('', '', 'teleop was commanding the arm in the held state cycle'),
+    'clutch_engaged': ('', '', 'teleop was commanding the arm in the held state cycle '
+                       '(False before the first state cycle)'),
     'action_valid': ('', '', 'clutch engaged and a target stamped in the same cycle'),
     'action_pose': ('m, xyzw', 'base', 'commanded tool target (newest target)'),
     'action_pose_age': ('s', '', 'tick time minus the target stamp'),
@@ -116,17 +134,22 @@ FIELD_INFO: Dict[str, Tuple[str, str, str]] = {
     'joint_effort': ('N m or N', '', 'measured joint efforts'),
     'joint_state_age': ('s', '', 'tick time minus the joint state stamp'),
     'tool_pose_measured': ('m, xyzw', 'base', 'forward kinematics of the measured joints; '
-                           'NaN where not valid'),
+                           'NaN where not valid. Held on the measured row (see '
+                           'measured_row_age); TeleopState carries no stamp of its own joint '
+                           'state, which is not newer than the gripper sample\'s'),
     'tool_pose_measured_valid': ('', '', 'the measured tool pose was valid'),
     'gripper_measured': ('rad', '', 'measured gripper opening; NaN where not valid'),
     'gripper_measured_valid': ('', '', 'the measured opening was valid'),
     'gripper_measured_age': ('s', '', 'tick time minus the stamp of the measured opening'),
+    'measured_row_age': ('s', '', 'tick time minus the later of the cycle stamp and the '
+                         'gripper sample stamp of the row the measured fields come from'),
     'damped': ('', '', 'the solver was damped in the held cycle'),
     'active_limit': ('', '', 'TeleopState.LIMIT_* of the held cycle'),
     'hold_reason': ('', '', 'TeleopState.HOLD_* of the held cycle'),
     'armed': ('', '', 'teleop armed'),
     'translation_scale': ('', '', 'operator translation scale'),
-    'input_age': ('s', '', 'age of the newest operator input frame in the held cycle'),
+    'input_age': ('s', '', 'age of the newest operator input frame in the held cycle, on the '
+                  'teleop node\'s monotonic clock; NaN where it had no input frame'),
     'state_age': ('s', '', 'tick time minus the state stamp'),
     'tick_valid': ('', '', 'every required observation is fresh (state, joint states, '
                    'required images); action fields do not matter here'),
@@ -162,15 +185,56 @@ def _rows(ep: Episode, name: str) -> Optional[Stream]:
     return st if st is not None and len(st) > 0 else None
 
 
-def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
-                 verdict=None) -> Tuple[Dict[str, np.ndarray], dict]:
+def _ticks(ep: Episode, state: Stream, rate_hz: Optional[float], checks: dict,
+           tick_stream: Optional[str]) -> Tuple[np.ndarray, dict, Optional[np.ndarray]]:
     """
-    Return ``(arrays, meta)``: the episode on a fixed tick grid and its description.
+    Return ``(t, ticks, rows)``: the tick times, their description for export.json and, for
+    ``tick_stream``, the row of that stream at each tick (each row exactly once).
+    """
+    t0 = float(np.min(state.stamp))
+    t1 = float(np.max(state.stamp))
+    if not tick_stream:
+        rate = float(rate_hz if rate_hz else checks['export']['rate_hz'])
+        n = int(math.floor((t1 - t0) * rate + 1e-9)) + 1
+        t = t0 + np.arange(n) / rate
+        return t, {'mode': 'fixed', 'rate_hz': rate,
+                   'rule': 't_k = t_start + k / rate_hz, from the first to the last state '
+                           'stamp'}, None
+    spec = ep.profile['streams'].get(tick_stream)
+    if spec is None or spec.get('kind') not in TICK_KINDS:
+        raise ValueError(f'{tick_stream}: ticks can only follow a recorded image stream')
+    st = _rows(ep, tick_stream)
+    if st is None:
+        raise ValueError(f'{tick_stream}: no frames recorded')
+    if rate_hz:
+        raise ValueError('a tick stream gives the ticks; a rate cannot be given with it')
+    finite = np.flatnonzero(np.isfinite(st.stamp))
+    rows = finite[np.argsort(st.stamp[finite], kind='stable')]
+    t = np.asarray(st.stamp[rows], dtype=float)
+    dt = np.diff(t)
+    return t, {
+        'mode': 'stream', 'stream': tick_stream,
+        'rate_hz': spec.get('rate_hz'),
+        'rule': f'one tick per frame of {tick_stream}, at its stamp, in stamp order; rate_hz '
+                'is that stream\'s nominal rate, the spacing varies with the frames',
+        'dt_min_s': float(dt.min()) if len(dt) else None,
+        'dt_max_s': float(dt.max()) if len(dt) else None,
+        'ticks_before_first_state': int(np.sum(t < t0)),
+        'ticks_after_last_state': int(np.sum(t > t1)),
+    }, rows
 
+
+def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
+                 verdict=None, tick_stream: Optional[str] = None
+                 ) -> Tuple[Dict[str, np.ndarray], dict]:
+    """
+    Return ``(arrays, meta)``: the episode on a tick grid and its description.
+
+    The grid is fixed at ``rate_hz`` (default: checks.yaml export.rate_hz), or, with
+    ``tick_stream`` (an image stream), one tick per frame of that stream at its stamp.
     ``verdict`` is the checker's report (or just its verdict string) and is copied into the
     metadata. Raises ValueError when the state stream is missing or lacks a needed field.
     """
-    rate = float(rate_hz if rate_hz else checks['export']['rate_hz'])
     max_age = float(checks['export']['max_age_periods'])
     state = _rows(ep, 'state')
     if state is None:
@@ -182,8 +246,9 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
     state_period = period(specs['state'])
     t0 = float(np.min(state.stamp))
     t1 = float(np.max(state.stamp))
-    n = int(math.floor((t1 - t0) * rate + 1e-9)) + 1
-    t = t0 + np.arange(n) / rate
+    t, ticks, tick_rows = _ticks(ep, state, rate_hz, checks, tick_stream)
+    rate = ticks['rate_hz']
+    n = len(t)
     arrays: Dict[str, np.ndarray] = {'t': t}
     pairs = clock_pairs(ep)
     if pairs is not None:
@@ -191,14 +256,18 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
 
     si = hold_index(state.stamp, t)
     arrays['state_age'] = _age(state.stamp, si, t)
+    have = si >= 0                       # False only for ticks before the first state cycle
 
-    def held(key):
-        """Return a state field at the held state row."""
-        return np.asarray(state.fields[key])[si]
+    def held(key, fill, rows=si):
+        """Return a state field at the held state row (``fill`` before the first row)."""
+        values = np.asarray(state.fields[key])
+        out = values[np.maximum(rows, 0)].copy()
+        out[rows < 0] = fill
+        return out
 
-    engaged = held('clutch_engaged').astype(bool)
+    engaged = held('clutch_engaged', False).astype(bool)
     arrays['clutch_engaged'] = engaged
-    cycle_stamp = state.stamp[si]
+    cycle_stamp = np.where(have, state.stamp[np.maximum(si, 0)], np.nan)
 
     # Action: the target of the held cycle.
     target = _rows(ep, 'target')
@@ -207,7 +276,7 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
         arrays['action_pose'] = _gather(target.fields['pose'], ti)
         arrays['action_pose_age'] = _age(target.stamp, ti, t)
         same = np.zeros(n, dtype=bool)
-        ok = ti >= 0
+        ok = (ti >= 0) & have
         same[ok] = np.abs(target.stamp[ti[ok]] - cycle_stamp[ok]) <= 0.5 * state_period
         arrays['action_valid'] = engaged & same
     else:
@@ -217,11 +286,12 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
 
     # Contract (Recording): gripper cycles marked MEASURED are never actions, also when teleop
     # commanded from the measured opening (no held reference arrived): masked conservatively.
-    arrays['gripper_action_valid'] = (held('gripper_active').astype(bool)
-                                      & (held('gripper_reference_source') != SOURCE_MEASURED))
-    arrays['gripper_command'] = held('gripper_command').astype(float)
-    arrays['gripper_request'] = held('gripper_request').astype(np.int64)
-    arrays['gripper_source'] = held('gripper_reference_source').astype(np.int64)
+    source = held('gripper_reference_source', -1).astype(np.int64)
+    arrays['gripper_action_valid'] = (held('gripper_active', False).astype(bool)
+                                      & (source != SOURCE_MEASURED))
+    arrays['gripper_command'] = held('gripper_command', np.nan).astype(float)
+    arrays['gripper_request'] = held('gripper_request', -1).astype(np.int64)
+    arrays['gripper_source'] = source
 
     constants: Dict[str, List[str]] = {}
     command = _rows(ep, 'joint_command')
@@ -230,7 +300,7 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
         arrays['joint_command'] = _gather(command.fields['velocities'], ci)
         arrays['joint_command_age'] = _age(command.stamp, ci, t)
         same = np.zeros(n, dtype=bool)
-        ok = ci >= 0
+        ok = (ci >= 0) & have
         same[ok] = np.abs(command.stamp[ci[ok]] - cycle_stamp[ok]) <= 0.5 * state_period
         arrays['joint_command_valid'] = engaged & same
         constants['joint_command_names'] = list(command.joint_names)
@@ -245,25 +315,37 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
         constants['joint_names'] = list(joints.joint_names)
         arrays['joint_names'] = np.array(joints.joint_names, dtype=str)
 
-    pose_ok = held('measured_tool_pose_valid').astype(bool)
-    pose = held('measured_tool_pose').astype(float)
+    # Measured fields: the newest row whose cycle stamp and gripper sample stamp are both not
+    # later than the tick (the sample can be newer than the cycle; see the module docstring).
+    all_g_stamp = np.asarray(state.fields['gripper_measured_stamp'], dtype=float)
+    all_g_ok = (np.asarray(state.fields['gripper_measured_valid']).astype(bool)
+                & (all_g_stamp > 0.0))
+    measured_key = np.where(all_g_ok, np.maximum(state.stamp, all_g_stamp), state.stamp)
+    mi = hold_index(measured_key, t)
+    arrays['measured_row_age'] = _age(measured_key, mi, t)
+    pose_ok = held('measured_tool_pose_valid', False, mi).astype(bool)
+    pose = held('measured_tool_pose', np.nan, mi).astype(float)
     pose[~pose_ok] = np.nan
     arrays['tool_pose_measured'] = pose
     arrays['tool_pose_measured_valid'] = pose_ok
-    g_ok = held('gripper_measured_valid').astype(bool)
-    g_value = held('gripper_measured').astype(float)
+    g_ok = held('gripper_measured_valid', False, mi).astype(bool) & (mi >= 0)
+    g_ok &= all_g_ok[np.maximum(mi, 0)]
+    g_value = held('gripper_measured', np.nan, mi).astype(float)
     g_value[~g_ok] = np.nan
-    g_stamp = held('gripper_measured_stamp').astype(float)
     arrays['gripper_measured'] = g_value
     arrays['gripper_measured_valid'] = g_ok
-    arrays['gripper_measured_age'] = np.where(g_stamp > 0.0, t - g_stamp, np.nan)
+    g_age = _age(all_g_stamp, mi, t)
+    g_age[~g_ok] = np.nan
+    arrays['gripper_measured_age'] = g_age
 
-    arrays['damped'] = held('damped').astype(bool)
-    arrays['active_limit'] = held('active_limit').astype(np.int64)
-    arrays['hold_reason'] = held('hold_reason').astype(np.int64)
-    arrays['armed'] = held('armed').astype(bool)
-    arrays['translation_scale'] = held('translation_scale').astype(float)
-    arrays['input_age'] = held('input_age').astype(float)
+    arrays['damped'] = held('damped', False).astype(bool)
+    arrays['active_limit'] = held('active_limit', -1).astype(np.int64)
+    arrays['hold_reason'] = held('hold_reason', -1).astype(np.int64)
+    arrays['armed'] = held('armed', False).astype(bool)
+    arrays['translation_scale'] = held('translation_scale', np.nan).astype(float)
+    input_age = held('input_age', np.nan).astype(float)
+    input_age[~(input_age >= 0.0)] = np.nan          # TeleopState sends -1 with no input frame
+    arrays['input_age'] = input_age
 
     base_name = None
     for name, spec in recorded(ep.profile).items():
@@ -281,15 +363,21 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
         if spec.get('kind') != 'image' or _rows(ep, name) is None:
             continue
         st = ep.streams[name]
-        ii = hold_index(st.stamp, t)
+        ii = tick_rows if name == tick_stream else hold_index(st.stamp, t)
         arrays[f'image_{name}_index'] = ii.astype(np.int64)
         arrays[f'image_{name}_age'] = _age(st.stamp, ii, t)
         enc = _encoding(ep, name)
         ext = 'npy' if enc == '32FC1' else 'png'
+        used = np.unique(ii[ii >= 0])
         images[name] = {'encoding': enc, 'file_extension': ext,
                         'index_array': f'image_{name}_index',
                         'age_array': f'image_{name}_age',
-                        'path': f'images/{name}/<row:06d>.{ext}'}
+                        'path': f'images/{name}/<row:06d>.{ext}',
+                        'frames_recorded': int(len(st)),
+                        'frames_used': int(len(used)),
+                        'frames_unused': int(len(st) - len(used)),
+                        'ticks_repeating_frame': int(np.sum((ii[1:] == ii[:-1])
+                                                            & (ii[1:] >= 0)))}
         if ext == 'npy':
             images[name]['note'] = 'float32 array stored with numpy.save, not a PNG'
 
@@ -303,13 +391,26 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
         if st is None:
             valid[:] = False
             continue
-        idx = si if name == 'state' else hold_index(st.stamp, t)
+        if name == 'state':
+            idx = si
+        elif name == tick_stream:
+            idx = tick_rows
+        else:
+            idx = hold_index(st.stamp, t)
         age = _age(st.stamp, idx, t)
         with np.errstate(invalid='ignore'):
             valid &= np.isfinite(age) & (age <= max_age * period(spec) + TIME_EPS)
     arrays['tick_valid'] = valid
 
+    absent_fields = {}
+    for name, spec in recorded(ep.profile).items():
+        st = _rows(ep, name)
+        if st is not None and spec.get('kind') in OPTIONAL_FIELDS:
+            absent_fields[name] = st.absent_fields()
     meta = _meta(ep, arrays, rate, t0, t1, constants, images, base_name, verdict, pairs)
+    meta['ticks'] = jsonable(ticks)
+    meta['fields_absent'] = absent_fields
+    meta['state_window'] = {'t_first': t0, 't_last': t1}
     return arrays, meta
 
 
@@ -342,7 +443,8 @@ def _meta(ep: Episode, arrays: Dict[str, np.ndarray], rate: float, t0: float, t1
         'rate_hz': rate,
         'n_ticks': int(len(arrays['t'])),
         'rule': RULE,
-        'time': {'clock': 'recording clock (t)', 't_start': t0, 't_stop': t1,
+        'time': {'clock': 'recording clock (t)', 't_start': float(arrays['t'][0]),
+                 't_stop': float(arrays['t'][-1]),
                  'wall_pairs': None if pairs is None else int(len(pairs[0]))},
         'frames': {'base': frames['base'], 'tool': frames['tool'],
                    'poses': f'x y z qx qy qz qw in {frames["base"]} (quaternion xyzw)'},
