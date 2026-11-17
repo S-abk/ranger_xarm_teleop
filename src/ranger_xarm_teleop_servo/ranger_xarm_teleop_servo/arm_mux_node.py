@@ -19,9 +19,9 @@ With gripper teleop configured (``moveit_gripper_controller`` and
 teleop's gripper controllers are swapped in the same strict switch, and a goal on MoveIt's
 gripper controller refuses the switch. The gripper must be stopped too, judged by net
 travel rather than sample-to-sample speed: over the stillness window its joints may span at
-most ``gripper_still_band`` (``ownership.BandTracker``). In Gazebo the driven joint shows
-sample-to-sample speeds of about 0.16 rad/s while going nowhere, which the arm's rule
-read as motion and which refused every switch.
+most ``gripper_still_band`` (``ownership.BandTracker``). With the arm's rule, Gazebo read
+the driven joint as moving at about 0.16 rad/s again and again and every switch back to
+MoveIt was refused.
 
 Two trajectory controllers claim the arm joints: MoveIt's and the one MoveIt Servo
 feeds. ros2_control lets only one be active, and an inactive trajectory controller

@@ -213,15 +213,19 @@ class BandTracker:
     """
     Tracks whether the gripper joints have stayed within a band over the stillness window.
 
-    The gripper's driven joint jitters in simulation (sample-to-sample speeds that the arm's
-    rule would read as motion, though it goes nowhere), and a finger squeezing an object
-    may too. Its "stopped" is therefore judged by net travel: every joint's positions over
+    In Gazebo the arm's rule (sample-to-sample speed) read the gripper's driven joint as
+    moving at about 0.16 rad/s, again and again, and refused every switch back to MoveIt;
+    a finger squeezing an object might read so too (not measured). Its "stopped" is
+    therefore judged by net travel: every joint's positions over
     the last ``still_duration`` (by sample stamps) span at most ``band``. A ramp of the
     gripper at its speed limit spans far more than the band in that window. Holes in the
     stream and stamps that go back restart the window, as for the arm.
     """
 
     def __init__(self, params: MuxParams, band: float, names: Sequence[str] = ()) -> None:
+        if not (math.isfinite(band) and band > 0.0):
+            raise ValueError('gripper_still_band: expected a finite positive number, got '
+                             f'{band!r}')
         self.params = params
         self.band = band
         self.names = tuple(names)
@@ -234,6 +238,9 @@ class BandTracker:
         positions = tuple(float(p) for p in positions)
         if self.samples:
             dt = stamp - self.samples[-1][0]
+            if dt == 0.0:
+                self.last_arrival = arrival     # the same sample again: nothing new to judge
+                return
             if dt < 0.0 or dt > self.params.joint_state_timeout:
                 self.samples.clear()
                 self.last_motion = ('gripper joint state stamps went back' if dt < 0.0
@@ -252,7 +259,11 @@ class BandTracker:
         """Return True when the window is covered and every joint stayed within the band."""
         if not self.samples:
             return False
-        if self.samples[-1][0] - self.samples[0][0] < self.params.still_duration - 1e-6:
+        covered = self.samples[-1][0] - self.samples[0][0]
+        if covered < self.params.still_duration - 1e-6:
+            if covered > 0.0:
+                self.last_motion = (f'gripper joint states cover only {covered:.2f} s of '
+                                    f'{self.params.still_duration:.2f} s')
             return False
         for k in range(len(self.samples[-1][1])):
             values = [s[1][k] for s in self.samples]

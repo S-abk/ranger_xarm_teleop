@@ -142,15 +142,26 @@ def stack(tmp_path_factory):
         print(launch.output()[-6000:])
 
 
-def arm(probe, env, logs, name):
-    """Calibrate and arm with the arm_only recording; wait until teleop owns both."""
-    probe.disarm()
-    start = time.monotonic()
-    process = replay(env, 'arm_only', str(logs / f'replay_{name}.log'), start_delay=1.0)
-    try:
-        assert process.wait(40.0) == 0, process.output()
-    finally:
-        process.stop()
+def arm(probe, env, logs, name, attempts=3):
+    """
+    Calibrate and arm with the arm_only recording; wait until teleop owns both.
+
+    The arm button is pressed in the recording's first second, while the replay's new
+    publisher is still being discovered; a run in which the press never arrived (no state
+    says armed) is repeated, as replay_with_clean_input does.
+    """
+    for attempt in range(attempts):
+        probe.disarm()
+        start = time.monotonic()
+        process = replay(env, 'arm_only', str(logs / f'replay_{name}.{attempt}.log'),
+                         start_delay=1.0)
+        try:
+            assert process.wait(40.0) == 0, process.output()
+        finally:
+            process.stop()
+        if any(s.armed for s in probe.states_since(start)) or attempt + 1 == attempts:
+            break
+        print(f'discarded replay {name}.{attempt}: the arm button press never arrived')
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 10.0, 'teleop owner')
     return start
 
@@ -274,6 +285,24 @@ def test_arming_starts_from_the_opening_moveit_left_and_disarming_keeps_teleops(
     time.sleep(1.0)
     assert probe.controllers()[MOVEIT_G] == 'active'
     assert max(abs(p - 0.37) for p in probe.gripper_since(before)) < 1e-3
+
+
+def test_a_moving_gripper_refuses_the_switch(stack):
+    """The contract: only with arm and gripper stopped. A move without a goal (topic)."""
+    probe, _, _, _ = stack
+    probe.disarm()
+    start = probe.gripper_position()
+    target = 0.1 if start > 0.45 else 0.8
+    probe.moveit_gripper_topic.publish(point(target, seconds=3.0))
+    time.sleep(0.8)
+    response = probe.set_owner(ArmOwner.OWNER_TELEOP)
+    assert not response.success
+    assert response.status == ArmOwner.STATUS_REFUSED_MOVING, response.detail
+    assert 'gripper moved' in response.detail and 'xarm_drive_joint' in response.detail
+    assert probe.controllers()[MOVEIT_G] == 'active'
+    probe.wait_for(lambda: abs(probe.gripper_position() - target) < 1e-3, 10.0,
+                   'the gripper to arrive')
+    time.sleep(0.6)
 
 
 def test_a_split_is_reported_never_switched_to_teleop_and_resolved_back_to_moveit(stack):

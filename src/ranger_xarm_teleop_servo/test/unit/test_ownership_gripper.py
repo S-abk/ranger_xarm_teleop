@@ -172,3 +172,22 @@ def test_a_non_finite_gripper_position_is_not_still():
 
 def test_without_a_gripper_tracker_the_check_is_the_arms_alone():
     assert check_switch(1.0, still_arm(), False, False) == MuxStatus.OK
+
+
+@pytest.mark.parametrize('band', [0.0, -0.01, math.nan, math.inf])
+def test_the_band_must_be_finite_and_positive(band):
+    with pytest.raises(ValueError, match='gripper_still_band'):
+        BandTracker(MuxParams(), band)
+
+
+def test_a_repeated_stamp_adds_nothing():
+    tracker = gripper_samples([0.4] * 1000)
+    before = len(tracker.samples)
+    for _ in range(5000):
+        tracker.update(1.0, 100.999, (0.4,))
+    assert len(tracker.samples) == before and tracker.still()
+
+
+def test_an_uncovered_window_says_so():
+    tracker = gripper_samples([0.4] * 100)
+    assert not tracker.still() and 'cover only' in tracker.last_motion
