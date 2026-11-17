@@ -27,7 +27,7 @@ loses nor doubles it. Hold times use the caller's monotonic clock.
 from dataclasses import dataclass, field
 from enum import IntEnum
 import math
-from typing import List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence, Union
 
 from ranger_xarm_teleop_bridge.joy_layout import AXIS_NAMES, BUTTON_NAMES
 
@@ -112,8 +112,14 @@ class Control:
         """Return True while Y is held in REVIEW and the discard has not happened yet."""
         return self.state == State.REVIEW and self._y and self._y_down_at is not None
 
-    def joy(self, b: Buttons, now: float, start_problems: Sequence[str] = ()) -> List[Outcome]:
-        """Take one Joy message received at ``now``; return the events it causes."""
+    def joy(self, b: Buttons, now: float,
+            start_problems: Union[Sequence[str], Callable[[], Sequence[str]]] = ()
+            ) -> List[Outcome]:
+        """
+        Take one Joy message received at ``now``; return the events it causes.
+
+        ``start_problems`` may be a callable: it is then asked only when X is pressed.
+        """
         out: List[Outcome] = []
         first = not self._seen
         self._seen = True
@@ -169,7 +175,9 @@ class Control:
             return [Outcome(Event.REFUSED, f'recorder did not start: {detail}')]
         return []                                    # a failed stop stays in REVIEW, flagged
 
-    def _on_x(self, start_problems: Sequence[str]) -> Outcome:
+    def _on_x(self, start_problems) -> Outcome:
+        if callable(start_problems):
+            start_problems = start_problems()
         if self.busy:
             return Outcome(Event.REFUSED, 'the recorder is busy with the last press')
         if self.state == State.IDLE:

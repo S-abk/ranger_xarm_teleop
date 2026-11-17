@@ -5,9 +5,11 @@ streams:
   rate_min_fraction: 0.9        # measured rate >= this x nominal (inside the stream's gate spans)
   gap_max_s: 0.1                # largest gap between consecutive stamps ...
   gap_max_periods: 3.0          # ... or this many nominal periods, whichever is larger
-  offset_max_periods: 1.6       # |offset to the action stream| <= max(stream period, action period) x this
-                                # (fitted: worst of 7 Gazebo episodes 1.02, a rendered camera image arrives
-                                # up to one frame after its stamp; x 1.5, rounded up)
+  offset_max_periods: 0.9       # |offset to the action stream| <= max(stream period, action period) x this
+                                # (fitted, non-image streams: worst of 7 Gazebo episodes 0.54 (camera_info);
+                                # x 1.5, rounded up)
+  offset_max_periods_image: 1.6 # image streams (fitted: worst of 7 Gazebo episodes 1.02, a rendered camera
+                                # image arrives up to one frame after its stamp; x 1.5, rounded up)
   domain_max_s: 0.5             # |median(recv - stamp)| above this: the stamps are on another clock
   min_gate_span_s: 0.5          # gate spans shorter than this are not rate-checked (gaps still are)
   count_window_margin_s: 0.2    # companion counts compare messages stamped inside the episode window

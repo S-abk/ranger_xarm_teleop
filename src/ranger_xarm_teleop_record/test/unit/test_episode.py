@@ -204,3 +204,17 @@ def test_ready_changes_never_interrupt_an_episode():
     run(c, press('x', 4))
     c.set_ready(False)
     assert c.state == State.RECORDING
+
+
+def test_start_problems_are_asked_only_on_an_x_press():
+    c = ready()
+    asked = []
+
+    def problems():
+        asked.append(1)
+        return ['disk low']
+    for i in range(20):
+        c.joy(Buttons(False, i % 2 == 0, 0.3), 1.0 + i * DT, problems)
+    assert asked == []
+    out = c.joy(Buttons(True, False, 0.0), 2.0, problems)
+    assert asked == [1] and kinds(out) == [Event.REFUSED] and out[0].detail == 'disk low'

@@ -338,8 +338,10 @@ class EpisodeNode(Node):
         if b is None:
             return
         now = time.monotonic()
-        problems = self.start_problems(now) if self.control.state == State.IDLE else \
-            self.ready_problems(now)
+
+        def problems():                   # evaluated only on an X press (labels, disk, graph)
+            return (self.start_problems(now) if self.control.state == State.IDLE
+                    else self.ready_problems(now))
         self.on_events(self.control.joy(b, now, problems))
 
     # ---------------------------------------------------------------- readiness

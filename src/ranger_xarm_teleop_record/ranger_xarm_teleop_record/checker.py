@@ -315,7 +315,11 @@ def _check_stream(name: str, spec: dict, ctx: _Context, reasons: List[str],
         offset = latency - ctx.state_latency
         out['offset_s'] = offset
         if nominal is not None:
-            limit = float(tol['offset_max_periods']) * max(per, ctx.state_period)
+            # Rendered or captured images may arrive up to a frame after their stamp: their
+            # factor is fitted separately (checks.yaml); every other stream keeps its own.
+            factor = (tol.get('offset_max_periods_image', tol['offset_max_periods'])
+                      if spec.get('kind') == 'image' else tol['offset_max_periods'])
+            limit = float(factor) * max(per, ctx.state_period)
             out['offset_limit_s'] = limit
             out['offset_ok'] = abs(offset) <= limit
             if not out['offset_ok']:

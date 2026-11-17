@@ -516,3 +516,15 @@ def test_data_outside_the_sidecar_episode_fails(clean):
     report = run(ep)
     assert report['verdict'] == 'FAIL'
     assert any(r.startswith('WINDOW') for r in report['reasons'])
+
+
+def test_the_image_offset_factor_applies_to_images_only(clean):
+    # 30 ms of extra latency on joint_states: within an image's 1.6 frames, beyond 1.0 cycle
+    ep = copy.deepcopy(clean)
+    ep.streams['joint_states'].recv = ep.streams['joint_states'].recv + 0.030
+    report = run(ep)
+    assert report['verdict'] == 'FAIL' and 'joint_states: offset' in reasons(report)
+    ep = copy.deepcopy(clean)
+    ep.streams['camera_wrist'].recv = ep.streams['camera_wrist'].recv + 0.040
+    report = run(ep)
+    assert 'camera_wrist: offset' not in reasons(report), reasons(report)
