@@ -13,7 +13,7 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 | `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, damped least-squares solver, MoveIt Servo joint-jog commands), command mux node, gripper relay node, and the pure modules behind them with their tests |
 | `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator, simulation-only limit values |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
-| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py` |
+| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py`, `servo_rigid_pairs.py` |
 | `recordings/` | Local headset recordings (git-ignored) |
 
 ## Build and test
@@ -416,6 +416,26 @@ carries a fixed tool in the gripper can never have it opened by teleop.
   no command timeout, so a finger blocked on an object keeps its squeeze) and reports the
   opening that controller holds. The hardware adapter (a `GripperCommand` action client) is
   not built; the relay refuses `mode:=action`.
+
+#### A closed gripper and MoveIt Servo's speed
+
+MoveIt Servo slows every joint while any self-collision pair its collision matrix leaves
+enabled is within `self_collision_proximity_threshold` (10 mm in `config/servo.yaml`), in
+every direction of motion. Pairs inside the gripper, or between a finger and the link the
+gripper is mounted on, keep their distance however the arm moves, but a closed gripper brings
+some within 10 mm: with the robot workspace's SRDF a finger is 7.8 mm from the gripper base
+when closed (14.5 mm open), and the arm then runs at about a fifth of the commanded speed.
+
+Such pairs are derived from the description, with no link names (`rigid_pairs.py`): both
+links have collision geometry, are moved by the arm, have no joint of MoveIt Servo's group
+between them, and are left enabled by the SRDF. The teleop node logs them at start-up as
+`<disable_collisions>` lines; `tools/servo_rigid_pairs.py --urdf FILE --srdf FILE` prints the
+same. They belong in the SRDF move_group reads: MoveIt Servo takes move_group's collision
+matrix (it asks move_group for the planning scene when it starts), so an SRDF given to Servo
+alone has no effect. For move_group, disabling them changes nothing for arm plans; for the
+gripper's own motion it gives up the check of those pairs, which the description never brings
+closer than 7.8 mm within the joint limits. The mock and Gazebo stack tests that compare the
+tool speed with the gripper open and closed skip, naming the pairs, while any is left enabled.
 
 ### Measuring a run
 

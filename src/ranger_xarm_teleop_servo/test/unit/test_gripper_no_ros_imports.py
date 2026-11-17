@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The gripper task's pure modules import no ROS packages and load without ROS (INV-8)."""
+"""The gripper tasks' pure modules import no ROS packages and load without ROS (INV-8, INV-5)."""
 
 import os
 import subprocess
@@ -20,7 +20,7 @@ import sys
 import pytest
 from test_servo_no_ros_imports import BRIDGE_DIR, FORBIDDEN, IMPORT_RE, PKG_DIR, source_of  # noqa
 
-MODULES = ['gripper', 'gripper_relay']
+MODULES = ['gripper', 'gripper_relay', 'rigid_pairs']
 
 
 @pytest.mark.parametrize('module', MODULES)

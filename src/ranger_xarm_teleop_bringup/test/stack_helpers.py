@@ -13,6 +13,7 @@
 # limitations under the License.
 """Helpers for the tests that start real processes: own ROS domain, localhost discovery."""
 
+import math
 import os
 import signal
 import subprocess
@@ -495,3 +496,42 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
             continue
         return start, discarded
     return start, discarded
+
+
+# ---- tool speed with the gripper open and closed (gripper_fix) ----
+
+SERVO_GROUP = 'xarm6'           # the move_group_name of config/servo.yaml
+
+
+def enabled_rigid_pairs(probe):
+    """
+    Return the self-collision pairs MoveIt Servo checks that no arm motion can change.
+
+    Derived from the running robot description and the SRDF move_group reads (the file of
+    ``ranger_xarm_moveit_config``; MoveIt Servo follows move_group's collision matrix).
+    While any is left enabled, a closed gripper can slow the arm (README, Gripper).
+    """
+    from ament_index_python.packages import get_package_share_directory
+    from ranger_xarm_teleop_servo.rigid_pairs import rigid_pairs
+    probe.wait_for(lambda: probe.description is not None, 30.0, 'the robot description')
+    path = os.path.join(get_package_share_directory('ranger_xarm_moveit_config'), 'config',
+                        'ranger_xarm.srdf')
+    with open(path, encoding='utf-8') as handle:
+        return rigid_pairs(probe.description, handle.read(), SERVO_GROUP)
+
+
+def tool_speed_profile(states, window=5):
+    """
+    Return (peak tool speed m/s, largest displacement m, servo codes) of the engaged cycles.
+
+    The speed is the measured tool position's change over ``window`` cycles, by the state
+    stamps; the displacement is from the first engaged cycle.
+    """
+    engaged = [s for s in states if s.armed and s.clutch_engaged]
+    stamps = [s.header.stamp.sec + s.header.stamp.nanosec * 1e-9 for s in engaged]
+    points = [(s.measured_tool_pose.position.x, s.measured_tool_pose.position.y,
+               s.measured_tool_pose.position.z) for s in engaged]
+    speeds = [math.dist(points[i], points[i - window]) / (stamps[i] - stamps[i - window])
+              for i in range(window, len(engaged)) if stamps[i] > stamps[i - window]]
+    displacement = max((math.dist(p, points[0]) for p in points), default=0.0)
+    return max(speeds, default=0.0), displacement, [int(s.servo_status) for s in engaged]

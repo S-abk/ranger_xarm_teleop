@@ -25,8 +25,9 @@ import time
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, TeleopState
 
-from stack_helpers import child_environment, kill_gz_partition, Process, READY, replay
-from test_mock_gripper import GripperProbe
+from stack_helpers import (child_environment, enabled_rigid_pairs, kill_gz_partition, Process,
+                           READY, replay)
+from test_mock_gripper import assert_same_tool_speed, GripperProbe, speed_run
 
 pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
                                 reason='set TELEOP_TEST_GAZEBO=1 to run the Gazebo tests')
@@ -116,3 +117,15 @@ def test_arming_starts_from_the_opening_moveit_left(stack):
     assert any(s.gripper_hold == TeleopState.GRIPPER_HOLD_AWAIT_TRIGGER
                for s in probe.states_since(start))
     probe.disarm()
+
+
+def test_tool_speed_is_the_same_with_the_gripper_open_and_closed(stack):
+    """gripper_fix: the same hand motion, gripper open and closed (see test_mock_gripper)."""
+    probe, env, logs = stack
+    pairs = enabled_rigid_pairs(probe)
+    if pairs:
+        pytest.skip(f'the SRDF leaves {len(pairs)} self-collision pairs enabled that no arm '
+                    f'motion can change (MoveIt Servo slows the arm while the gripper is '
+                    f'closed): {pairs}')
+    assert_same_tool_speed(speed_run(probe, env, logs, 'open'),
+                           speed_run(probe, env, logs, 'closed'))

@@ -26,11 +26,14 @@ from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from controller_manager_msgs.srv import SwitchController
+from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, TeleopState
 from rclpy.action import ActionClient
 from sensor_msgs.msg import JointState
-from stack_helpers import child_environment, Probe, Process, READY, replay
+from stack_helpers import (BODY_OBSTACLE, BODY_OBSTACLE_LINK, child_environment,
+                           enabled_rigid_pairs, INTO_BODY_START, Probe, Process, READY, replay,
+                           replay_with_clean_input, tool_speed_profile)
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
@@ -320,3 +323,88 @@ def test_a_split_is_reported_never_switched_to_teleop_and_resolved_back_to_movei
     controllers = probe.controllers()
     assert controllers[MOVEIT_G] == 'active' and controllers[TELEOP_G] == 'inactive'
     assert controllers[MOVEIT] == 'active'
+
+
+# ---- gripper_fix: the arm is not slowed by a closed gripper; Servo still stops it ----
+
+SPEED_TOLERANCE = 0.10          # peak tool speed, closed vs open, relative
+TRAVEL_TOLERANCE = 0.005        # largest tool displacement, closed vs open, m
+
+
+def speed_run(probe, env, logs, case):
+    """Replay ``gripper_speed_<case>`` from READY with the gripper open; return the states."""
+    probe.disarm()
+    probe.move_to(READY)
+    probe.move_gripper(0.0)
+    start, _ = replay_with_clean_input(probe, env, str(logs / f'replay_speed_{case}.log'),
+                                       f'gripper_speed_{case}', expected_engaged_s=2.5)
+    time.sleep(1.0)
+    return probe.states_since(start)
+
+
+def assert_same_tool_speed(states_open, states_closed):
+    engaged_open = [s for s in states_open if s.armed and s.clutch_engaged]
+    engaged_closed = [s for s in states_closed if s.armed and s.clutch_engaged]
+    assert len(engaged_open) > 100 and len(engaged_closed) > 100
+    assert all(s.gripper_measured < 0.01 for s in engaged_open)
+    assert all(s.gripper_measured > CLOSED - 0.01 for s in engaged_closed)
+    peak_open, travel_open, codes_open = tool_speed_profile(states_open)
+    peak_closed, travel_closed, codes_closed = tool_speed_profile(states_closed)
+    print(f'peak tool speed open {peak_open:.4f} closed {peak_closed:.4f} m/s; '
+          f'travel open {travel_open:.4f} closed {travel_closed:.4f} m')
+    assert peak_open > 0.15                     # the hand's peak is 0.19 m/s
+    assert abs(peak_closed / peak_open - 1.0) <= SPEED_TOLERANCE
+    assert abs(travel_closed - travel_open) <= TRAVEL_TOLERANCE
+    # MoveIt Servo never slowed either run (its first engaged report can still be the
+    # previous engagement's last).
+    for codes in (codes_open, codes_closed):
+        assert ServoStatus.DECELERATE_FOR_COLLISION not in codes[1:], codes
+
+
+def test_tool_speed_is_the_same_with_the_gripper_open_and_closed(stack):
+    probe, env, logs, _ = stack
+    pairs = enabled_rigid_pairs(probe)
+    if pairs:
+        pytest.skip(f'the SRDF leaves {len(pairs)} self-collision pairs enabled that no arm '
+                    f'motion can change (MoveIt Servo slows the arm while the gripper is '
+                    f'closed): {pairs}')
+    assert_same_tool_speed(speed_run(probe, env, logs, 'open'),
+                           speed_run(probe, env, logs, 'closed'))
+
+
+def test_servo_still_stops_the_arm_before_a_collision_with_the_gripper_closed(stack):
+    """The into-the-body test of test_mock_stack.py, gripper closed (INV-1)."""
+    probe, env, logs, _ = stack
+    probe.disarm()
+    probe.move_to(INTO_BODY_START)
+    probe.move_gripper(CLOSED)
+    probe.scene_box(*BODY_OBSTACLE, attach_to=BODY_OBSTACLE_LINK)
+    start_tool = probe.tool_position()
+    try:
+        start = time.monotonic()
+        process = replay(env, 'clutch_into_body', str(logs / 'replay_into_body_closed.log'))
+        try:
+            assert process.wait(40.0) == 0, process.output()
+        finally:
+            process.stop()
+        time.sleep(1.0)
+        states = probe.states_since(start)
+    finally:
+        probe.remove_scene_box(BODY_OBSTACLE[0], attach_to=BODY_OBSTACLE_LINK)
+    engaged = [s for s in states if s.clutch_engaged]
+    assert len(engaged) > 60
+    assert all(s.gripper_measured > CLOSED - 0.01 for s in engaged)
+    halted = [s for s in states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
+    assert halted, 'the halt for collision was never reported'
+    assert all(s.servo_status == ServoStatus.HALT_FOR_COLLISION and not s.clutch_engaged
+               for s in halted)
+    first_halt = states.index(halted[0])
+    assert not any(s.clutch_engaged for s in states[first_halt:])    # grip held: latched
+    end_tool = probe.tool_position()
+    travelled = start_tool[0] - end_tool[0]
+    assert 0.05 < travelled < 0.23
+    last = [s.measured_tool_pose.position.x for s in states[-40:]]
+    assert max(last) - min(last) < 0.001
+    probe.disarm()
+    probe.move_gripper(0.0)
+    probe.move_to(READY)
