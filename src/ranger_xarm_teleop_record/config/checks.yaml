@@ -11,6 +11,7 @@ streams:
   domain_max_s: 0.5             # |median(recv - stamp)| above this: the stamps are on another clock
   min_gate_span_s: 0.5          # gate spans shorter than this are not rate-checked (gaps still are)
   count_window_margin_s: 0.2    # companion counts compare messages stamped inside the episode window
+  window_slack_s: 0.5           # recorded data may start/end this far outside the sidecar's start/stop
 flags:
   limit_bound_max_share: 0.25   # LIMIT_BOUND when active_limit != NONE for more than this share of engaged cycles
   base_moved_m: 0.005           # BASE_MOVED when odometry travel exceeds this ...

@@ -195,6 +195,7 @@ class EpisodeNode(Node):
         self._not_ready: List[str] = ['starting']
         self._call = None                     # (kind, monotonic start) of a recorder call
         self._split_owed = False              # the last episode's file is not closed yet
+        self._pause_owed = False              # a pause went unanswered: may still be recording
         self._last_split_try = 0.0
         self._stop_owed: Optional[str] = None  # a stop that came while START was in flight
 
@@ -205,8 +206,12 @@ class EpisodeNode(Node):
             elif spec.get('count') and spec.get('clock') != 'none':
                 # Counted only (the actions): any type with a header, best effort, so a
                 # publisher of either reliability matches.
+                cls = get_message(spec['type'])
+                if 'header' not in cls.get_fields_and_field_types():
+                    raise RuntimeError(f'profile stream {name}: count needs a header '
+                                       f'({spec["type"]} has none)')
                 self.watch[name] = StreamWatch(name, spec)
-                self.create_subscription(get_message(spec['type']), spec['topic'],
+                self.create_subscription(cls, spec['topic'],
                                          lambda m, n=name: self._note(n, m.header.stamp),
                                          COUNT_QOS)
         self.create_subscription(String, '/robot_description', self.on_description, LATCHED_QOS)
@@ -357,6 +362,8 @@ class EpisodeNode(Node):
                 p = self.watch[spec['info']].problem(now)
                 if p:
                     out.append(f'{name} (by its camera_info) {p}')
+        if self._pause_owed:
+            out.append('the recorder did not confirm a pause; retrying')
         if self._split_owed:
             out.append("the recorder has not closed the last episode's file yet")
         if self.urdf is None:
@@ -471,7 +478,10 @@ class EpisodeNode(Node):
         self._flag('RECORDER_ERROR', f'resume failed: {why}', None)
         self._write_episode()                 # the failed attempt keeps its sidecar
         self.episode = None
-        self.pause_cli.call_async(Pause.Request())     # in case it did resume
+        self._stop_owed = None
+        # It may have resumed after all: pause it and close its file before the next START.
+        self._pause_owed = True
+        self._split_owed = True
         self.on_events(self.control.done(False, why))
 
     def _resumed(self, future) -> None:
@@ -512,6 +522,7 @@ class EpisodeNode(Node):
             return
         if future.exception() is not None:
             self._flag('RECORDER_ERROR', f'pause failed: {future.exception()}', None)
+            self._pause_owed = True           # pause again, then split again, before a START
         self._call = ('split', time.monotonic())
         self.split_cli.call_async(SplitBagfile.Request()).add_done_callback(self._split)
 
@@ -520,11 +531,19 @@ class EpisodeNode(Node):
             return
         if future.exception() is not None:
             self._flag('RECORDER_ERROR', f'split failed: {future.exception()}', None)
-        else:
+        elif not self._pause_owed:
             self._split_owed = False
         self._finish()
         self.control.done(True)
         self.publish_state()
+
+    def _pause_retried(self, future) -> None:
+        if not self._expect('pause_retry'):
+            return
+        if future.exception() is None:
+            self._pause_owed = False
+            self._last_split_try = 0.0         # split at the next tick
+            self.get_logger().info('recorder: the owed pause went through')
 
     def _split_retried(self, future) -> None:
         if not self._expect('split_retry'):
@@ -597,6 +616,7 @@ class EpisodeNode(Node):
                 self._start_failed(why)
             elif kind == 'pause':
                 self._flag('RECORDER_ERROR', why, None)
+                self._pause_owed = True
                 self._call = ('split', now)
                 self.split_cli.call_async(SplitBagfile.Request()).add_done_callback(self._split)
             elif kind == 'split':
@@ -605,12 +625,17 @@ class EpisodeNode(Node):
                 self.control.done(True)
             else:                                   # a retried split for a finished episode
                 self.get_logger().error(f'recorder: {why}')
-        if self._split_owed and self._call is None and self.episode is None \
-                and now - self._last_split_try >= 5.0:
+        if (self._pause_owed or self._split_owed) and self._call is None \
+                and self.episode is None and now - self._last_split_try >= 5.0:
             self._last_split_try = now
-            self._call = ('split_retry', now)
-            self.split_cli.call_async(SplitBagfile.Request()).add_done_callback(
-                self._split_retried)
+            if self._pause_owed:               # first make sure it is paused, then split
+                self._call = ('pause_retry', now)
+                self.pause_cli.call_async(Pause.Request()).add_done_callback(
+                    self._pause_retried)
+            else:
+                self._call = ('split_retry', now)
+                self.split_cli.call_async(SplitBagfile.Request()).add_done_callback(
+                    self._split_retried)
         problems = self.ready_problems(now)
         self.control.set_ready(not problems, '; '.join(problems))
         self._not_ready = problems

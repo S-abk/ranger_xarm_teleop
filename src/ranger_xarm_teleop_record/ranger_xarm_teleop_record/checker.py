@@ -63,6 +63,7 @@ LIMIT_NAMES = {
 LIMIT_NONE = 0
 
 CMD_VEL_EPS = 1e-6
+DEFAULT_FAIL_FLAGS = ('DATA_LOST', 'RECORDER_ERROR', 'TELEOP_STATE_LOST')
 
 
 # --------------------------------------------------------------------------------------------
@@ -611,6 +612,19 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     ctx = _Context(ep, checks)
     report['window'] = {'start': ctx.window[0], 'stop': ctx.window[1],
                         'duration_s': ctx.window[1] - ctx.window[0]}
+    # The recording must lie inside the episode the sidecar describes (start acknowledged to
+    # stop request): data from before START or after STOP means the recorder was not paused.
+    start = metadata.lookup(ep.sidecar, 'episode.start.acknowledged.ros')
+    if start is None:
+        start = metadata.lookup(ep.sidecar, 'episode.start.ros')
+    stop = metadata.lookup(ep.sidecar, 'episode.stop.ros')
+    slack = float(ctx.tol.get('window_slack_s', 0.5))
+    if start is not None and stop is not None:
+        report['window'].update({'sidecar_start': start, 'sidecar_stop': stop})
+        if ctx.window[0] < start - slack or ctx.window[1] > stop + slack:
+            reasons.append(f'WINDOW: recorded {ctx.window[0]:.3f}-{ctx.window[1]:.3f} s lies '
+                           f'outside the episode {start:.3f}-{stop:.3f} s (+-{slack:g} s): the '
+                           'recorder was not paused around it')
     report['gate_spans'] = {k: [list(s) for s in v] for k, v in ctx.gates.items()}
 
     stream_reasons: List[str] = []
@@ -646,9 +660,10 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     if report['consistency']['verdict'] == 'FAIL':
         reasons.append('CONSISTENCY: ' + '; '.join(report['consistency'].get('reasons', [])))
 
-    # Flags that mean the data cannot be trusted fail the episode (checks.yaml fail_flags).
-    for flag in sorted({f['flag'] for f in flags}
-                       & set(checks.get('flags', {}).get('fail_flags', []))):
+    # Flags that mean the data cannot be trusted fail the episode (checks.yaml fail_flags;
+    # a tolerance file without the key fails closed, on the default list).
+    fail_flags = checks.get('flags', {}).get('fail_flags', DEFAULT_FAIL_FLAGS)
+    for flag in sorted({f['flag'] for f in flags} & set(fail_flags)):
         if not any(r.startswith(flag + ':') for r in reasons):
             reasons.append(f'{flag}: ' + '; '.join(
                 f['reason'] for f in flags if f['flag'] == flag)[:300])

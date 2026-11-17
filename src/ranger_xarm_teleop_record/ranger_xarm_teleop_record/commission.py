@@ -156,11 +156,12 @@ def main(argv=None) -> int:
     while time.monotonic() < end:                       # let discovery settle
         rclpy.spin_once(probe, timeout_sec=0.1)
     busy = [s['topic'] for s in list(images.values()) + list(infos.values())
-            if probe.count_publishers(s['topic']) > 0]
+            if probe.count_publishers(s['topic']) > 0 or probe.count_subscribers(s['topic']) > 0]
     probe.destroy_node()
     if busy:
         rclpy.shutdown()
-        print('refused: these topics already have publishers (a camera or a session is '
+        print('refused: these topics already have publishers or subscribers (a camera or a '
+              'session is '
               f'running here): {", ".join(busy)}. Run the commissioning on its own.')
         return 3
     qos = (qos_profile_sensor_data if args.qos == 'best_effort' else

@@ -538,7 +538,7 @@ the colour images of the configured cameras, the raw headset input and the base 
 they exist. Commanded and measured values stay separate fields with their original stamps.
 
 **What runs.** `record:=true` on `teleop_mock.launch.py` or `teleop_sim.launch.py` (or
-`record.launch.py` on its own, before arming) starts a rosbag2 recorder (MCAP, zstd chunk
+`ranger_xarm_teleop_record record.launch.py` on its own, before arming) starts a rosbag2 recorder (MCAP, zstd chunk
 compression: lossless) paused, and the episode node. The episode node resumes, pauses and
 splits the recorder, so each episode is one closed MCAP file. Both start with the stack;
 an episode event is only a service call between them, so nothing joins or leaves the ROS

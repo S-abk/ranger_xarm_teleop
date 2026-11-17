@@ -493,3 +493,26 @@ def test_report_is_strict_json_even_when_failing(clean):
     ep = synth.shift_stamps(clean, 'joint_states', 1000.0)
     report = run(ep)
     json.dumps(report, allow_nan=False)
+
+
+def test_recorder_error_fails_and_a_checks_file_without_fail_flags_fails_closed(clean):
+    ep = copy.deepcopy(clean)
+    ep.sidecar['episode']['flags'] = [{'flag': 'RECORDER_ERROR', 'reason': 'pause failed',
+                                       'time': None}]
+    assert run(ep)['verdict'] == 'FAIL'
+    checks = copy.deepcopy(CHECKS)
+    checks['flags'].pop('fail_flags')
+    report = checker.check_episode(ep, checks)
+    assert report['verdict'] == 'FAIL'
+    assert any(r.startswith('RECORDER_ERROR') for r in report['reasons'])
+
+
+def test_data_outside_the_sidecar_episode_fails(clean):
+    """The recorder kept recording before START (a pause that did not take)."""
+    ep = copy.deepcopy(clean)
+    w0 = float(ep.streams['state'].stamp[0])
+    ep.sidecar['episode']['start'] = dict(ep.sidecar['episode']['start'], ros=w0 + 2.0)
+    ep.sidecar['episode']['start'].pop('acknowledged', None)
+    report = run(ep)
+    assert report['verdict'] == 'FAIL'
+    assert any(r.startswith('WINDOW') for r in report['reasons'])

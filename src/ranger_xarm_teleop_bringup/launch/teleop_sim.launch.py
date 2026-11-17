@@ -76,7 +76,9 @@ def generate_launch_description():
                 'moveit_gripper_controller': 'xarm_xarm_gripper_traj_controller',
             }.items()),
         IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(os.path.join(share, 'launch', 'record.launch.py')),
+            PythonLaunchDescriptionSource(os.path.join(
+                get_package_share_directory('ranger_xarm_teleop_record'), 'launch',
+                'record.launch.py')),
             launch_arguments={
                 'profile': LaunchConfiguration('record_profile'),
                 'data_dir': LaunchConfiguration('record_data_dir'),
