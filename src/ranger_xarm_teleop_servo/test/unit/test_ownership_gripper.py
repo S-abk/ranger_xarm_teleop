@@ -94,3 +94,13 @@ def test_a_split_is_never_switched_to_teleop_only_back_to_moveit():
 def test_arm_only_switch_is_unchanged(given, wanted, expected):
     lists, why = switch_lists(given, ARM_ONLY, wanted)
     assert why == '' and lists == expected
+
+
+def test_the_motion_report_names_the_joint_that_moved():
+    from ranger_xarm_teleop_servo.ownership import MuxParams, StillnessTracker
+    tracker = StillnessTracker(MuxParams(), names=('a', 'b'))
+    tracker.update(0.0, 10.0, (0.0, 0.0), (0.0, 0.0))
+    tracker.update(0.01, 10.01, (0.0, 0.01), (0.0, 0.0))
+    assert tracker.last_motion == 'joint speed 1.000 rad/s (b)'
+    tracker.update(0.02, 10.02, (0.0, 0.01), (0.5, 0.0))
+    assert tracker.last_motion == 'joint speed 0.500 rad/s (a)'

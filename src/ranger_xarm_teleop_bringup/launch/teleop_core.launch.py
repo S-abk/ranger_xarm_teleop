@@ -160,8 +160,8 @@ def launch_setup(context, *args, **kwargs):
                      'controller_manager': arg('controller_manager'),
                      'moveit_gripper_controller': (arg('moveit_gripper_controller')
                                                    if gripper else ''),
-                     'teleop_gripper_controller': teleop_gripper if gripper else '',
-                     'gripper_joints': [arg('gripper_joint')]}, sim_time])
+                     'teleop_gripper_controller': teleop_gripper if gripper else ''},
+                    sim_time])
 
     teleop_parameters = [limits_file]
     if arg('teleop_params_file'):

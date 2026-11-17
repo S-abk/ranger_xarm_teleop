@@ -355,8 +355,11 @@ the clutch is released. A refused or failed switch leaves the owner as it was an
 
 With gripper teleop, the gripper has the same owner as the arm: MoveIt's gripper controller
 (`moveit_gripper_controller`; `xarm_xarm_gripper_traj_controller` in Gazebo) and
-`teleop_gripper_controller` are swapped in the same strict switch, the gripper joint counts in
-"still", and a goal on MoveIt's gripper controller refuses the switch. `ArmOwner.gripper` says
+`teleop_gripper_controller` are swapped in the same strict switch, and a goal on MoveIt's
+gripper controller refuses the switch. The gripper joint does not count in "still": in Gazebo
+it jitters at about 0.16 rad/s at rest, which refused every switch; MoveIt moves it only
+through goals, teleop sends nothing while disarmed, and the controller that takes over holds
+the last command it finds. `ArmOwner.gripper` says
 the gripper is included. Controllers split between owners (or both of a pair active) are
 reported as no owner; the mux then refuses teleop and only switches back to MoveIt. The robot
 workspace's mock execution has no gripper controller, so `teleop_mock.launch.py` starts a

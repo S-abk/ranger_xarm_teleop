@@ -141,8 +141,9 @@ class StillnessTracker:
     sequence with a hole longer than the timeout cannot show stillness across it.
     """
 
-    def __init__(self, params: MuxParams) -> None:
+    def __init__(self, params: MuxParams, names: Sequence[str] = ()) -> None:
         self.params = params
+        self.names = tuple(names)                   # joint names, for the motion report
         self.last_arrival: Optional[float] = None
         self.last_stamp: Optional[float] = None
         self.last_positions: Optional[Sequence[float]] = None
@@ -159,8 +160,11 @@ class StillnessTracker:
         seen moving.
         """
         speed = 0.0
+        fastest = None
         if velocities:
-            speed = max(abs(float(v)) for v in velocities)
+            speeds = [abs(float(v)) for v in velocities]
+            speed = max(speeds)
+            fastest = speeds.index(speed)
         comparable = (self.last_stamp is not None and self.last_positions is not None
                       and len(self.last_positions) == len(positions))
         if comparable:
@@ -177,12 +181,16 @@ class StillnessTracker:
                 self.still_since = None     # a hole: stillness has to be shown again
                 self.last_motion = f'gap of {dt:.2f} s in the joint states'
             else:
-                step = max(abs(float(a) - float(b))
-                           for a, b in zip(positions, self.last_positions))
-                speed = max(speed, step / dt)
+                steps = [abs(float(a) - float(b)) / dt
+                         for a, b in zip(positions, self.last_positions)]
+                if max(steps) > speed:
+                    speed = max(steps)
+                    fastest = steps.index(speed)
         if not math.isfinite(speed) or speed > self.params.still_speed:
             self.still_since = None
-            self.last_motion = f'joint speed {speed:.3f} rad/s'
+            name = (self.names[fastest] if fastest is not None and fastest < len(self.names)
+                    else '')
+            self.last_motion = f'joint speed {speed:.3f} rad/s' + (f' ({name})' if name else '')
         elif self.still_since is None:
             self.still_since = stamp
         self.last_arrival = arrival

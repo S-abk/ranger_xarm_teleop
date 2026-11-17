@@ -16,8 +16,12 @@ Command mux: gives either MoveIt or teleop exclusive ownership of the arm (G-9).
 
 With gripper teleop configured (``moveit_gripper_controller`` and
 ``teleop_gripper_controller``), the gripper has the same owner as the arm: MoveIt's and
-teleop's gripper controllers are swapped in the same strict switch, the gripper joints
-count in "stopped", and a goal on MoveIt's gripper controller refuses the switch.
+teleop's gripper controllers are swapped in the same strict switch, and a goal on MoveIt's
+gripper controller refuses the switch. The gripper joint is not part of "stopped": in
+Gazebo it shows position jitter of about 0.16 rad/s at rest (and a finger squeezing an
+object would show more), which refused every switch. Its motion is covered otherwise:
+MoveIt moves it only through goals, teleop sends nothing while disarmed, and a controller
+that takes over mid-motion holds the last command it finds.
 
 Two trajectory controllers claim the arm joints: MoveIt's and the one MoveIt Servo
 feeds. ros2_control lets only one be active, and an inactive trajectory controller
@@ -92,7 +96,6 @@ class ArmMuxNode(Node):
         # Gripper teleop: both names, or neither (the switch is then the arm's alone).
         self.declare_parameter('moveit_gripper_controller', '')
         self.declare_parameter('teleop_gripper_controller', '')
-        self.declare_parameter('gripper_joints', ['xarm_drive_joint'])
 
         self.moveit_controller = str(self.get_parameter('moveit_controller').value)
         self.teleop_controller = str(self.get_parameter('teleop_controller').value)
@@ -107,17 +110,14 @@ class ArmMuxNode(Node):
         self.pairs = [(self.moveit_controller, self.teleop_controller)]
         if self.gripper:
             self.pairs.append((self.moveit_gripper, self.teleop_gripper))
-            gripper_joints = [str(j) for j in self.get_parameter('gripper_joints').value]
-            if not gripper_joints:
-                raise ValueError('gripper_joints: the gripper teleop needs its joints')
-            self.joints = self.joints + [j for j in gripper_joints if j not in self.joints]
         self.split = ''
         self.switch_timeout = float(self.get_parameter('switch_timeout_s').value)
         self.still_wait = float(self.get_parameter('still_wait_s').value)
         self.tracker = StillnessTracker(MuxParams(
             still_speed=float(self.get_parameter('still_speed_rad_s').value),
             still_duration=float(self.get_parameter('still_duration_s').value),
-            joint_state_timeout=float(self.get_parameter('joint_state_timeout_s').value)))
+            joint_state_timeout=float(self.get_parameter('joint_state_timeout_s').value)),
+            names=self.joints)
 
         self.mono = time.monotonic
         self.lock = threading.Lock()
