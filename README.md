@@ -8,9 +8,9 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 
 | Path | What |
 |---|---|
-| `src/ranger_xarm_teleop_interfaces` | `InputStatus` / `HandStatus`, `TeleopState`, `ArmOwner` messages, `SetArmOwner` service |
+| `src/ranger_xarm_teleop_interfaces` | `InputStatus` / `HandStatus`, `TeleopState`, `ArmOwner`, `GripperCommand` messages, `SetArmOwner` service |
 | `src/ranger_xarm_teleop_bridge` | Bridge node (relay WebSocket → `/teleop/input/*`), JSONL replay node, pure parsing/conversion/analysis modules and their tests |
-| `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, damped least-squares solver, MoveIt Servo joint-jog commands), command mux node, and the pure modules behind them with their tests |
+| `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, damped least-squares solver, MoveIt Servo joint-jog commands), command mux node, gripper relay node, and the pure modules behind them with their tests |
 | `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator, simulation-only limit values |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
 | `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py` |
@@ -201,6 +201,11 @@ ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:=<recording.js
    that point and only the motion after it is scaled anew. `translation_scale` in
    `/teleop/state` shows the scale in use (or the one the next engagement uses) and the log
    says `translation scale: coarse (2.00)`.
+5. **Gripper (trigger).** While armed, pressing the trigger past 0.6 closes the gripper and
+   letting it fall below 0.25 opens it, clutch held or not (see Gripper below). After arming,
+   and after any interruption of the input, the trigger acts only once it crosses one of the
+   two thresholds again: a trigger still held at that moment does nothing until it is released
+   (or pressed) again. `gripper_hold` in `/teleop/state` says `AWAIT_TRIGGER` meanwhile.
 
 `ros2 topic echo /teleop/state` shows why the arm is not moving (`hold_reason`), which bound is
 shaping the target or the joint command (`active_limit`), the owner of the arm, the calibration
@@ -297,13 +302,14 @@ Each cycle the solver turns the target into joint velocities:
 
 **The limit values have no defaults.** Maximum offset, view cone, per-cycle limits, speed
 caps, lead limits, the largest translation scale and the link keep-out margin are required
-parameters; the teleop node
-exits if one is missing. For simulation,
+parameters, and so are the gripper's range and speed when gripper teleop is enabled; the
+teleop node exits if one is missing. For simulation,
 `config/SIMULATION_ONLY_limits.yaml` supplies values. That file marks itself simulation-only:
 the node then starts only if every ros2_control hardware plugin in the robot description is a
 simulator, and `teleop_core.launch.py` refuses the file unless called with `simulation:=true`,
 which only `teleop_mock.launch.py` and `teleop_sim.launch.py` do. An extra parameter file
-(`teleop_params_file`) may not set a limit value, `motion_enabled` or the simulation-only flag. A robot needs its own limits
+(`teleop_params_file`) may not set a limit value, `motion_enabled`, `gripper_enabled`, the
+gripper's joint, range or speed, or the simulation-only flag. A robot needs its own limits
 file, written by whoever is responsible for it, and its own launch path.
 
 Clocks: MoveIt Servo, the mux, the teleop node and the controllers use simulation time under a
@@ -346,6 +352,60 @@ and ignores its command topic. `arm_mux_node` reports the owner on `/teleop/mux/
 switches with one strict `switch_controller` call, only when every arm joint has been still for
 0.3 s (judged from an unbroken run of joint-state samples), no trajectory goal is active and
 the clutch is released. A refused or failed switch leaves the owner as it was and says why.
+
+With gripper teleop, the gripper has the same owner as the arm: MoveIt's gripper controller
+(`moveit_gripper_controller`; `xarm_xarm_gripper_traj_controller` in Gazebo) and
+`teleop_gripper_controller` are swapped in the same strict switch, the gripper joint counts in
+"still", and a goal on MoveIt's gripper controller refuses the switch. `ArmOwner.gripper` says
+the gripper is included. Controllers split between owners (or both of a pair active) are
+reported as no owner; the mux then refuses teleop and only switches back to MoveIt. The robot
+workspace's mock execution has no gripper controller, so `teleop_mock.launch.py` starts a
+stand-in for MoveIt's (`xarm_gripper_traj_controller`, `config/mock_moveit_gripper_controller.yaml`);
+move_group cannot command it in mock execution.
+
+### Gripper
+
+Off unless `gripper_enabled` is true (default false; the mock and simulator launch files set
+it). Off, the node creates no gripper publisher and does not read the trigger, so a robot that
+carries a fixed tool in the gripper can never have it opened by teleop.
+
+- **Mapping: two states with hysteresis.** The request becomes close when the trigger
+  (`/teleop/input/joy` axis 4) rises through `gripper_close_threshold` (0.6) and open when it
+  falls through `gripper_open_threshold` (0.25). The command then moves to
+  `gripper_closed_position` or `gripper_open_position` at `gripper_max_speed`; these three
+  are required (no default) and must lie within the driven joint's URDF limits, or the node
+  refuses to start. The squeeze is the same on every clutch stroke, and a re-grip that relaxes
+  the index finger into the band does not open the gripper.
+- **The recorded action.** `/teleop/gripper/command` (`GripperCommand`: joint, position in its
+  units, request, where the first command came from) is published in every cycle where the
+  gripper is commanded, with the cycle's stamp: the same as `/teleop/target_pose` and
+  `/teleop/state`. `/teleop/state` carries the command in force in every cycle
+  (`gripper_command`, also while frozen) and, separately, the measured opening
+  (`gripper_measured`, from `/joint_states`, with that message's stamp).
+- **When it is commanded.** Armed, teleop owns the gripper (see Command mux), the input is
+  valid (no gate condition other than the released grip, and no frame since the last cycle
+  that trips the gate: absent, emulated or out-of-view controller, headset pose, session,
+  reset count, sequence), and the newest frame has a trigger value in [0, 1]. Otherwise
+  nothing is sent and the gripper holds its last command (`gripper_hold`: `NOT_ARMED`,
+  `NOT_OWNER`, `INPUT`).
+- **Arming never moves it.** The first command is the opening the gripper is already holding:
+  teleop's own last command after an interruption, else what the controller holds after the
+  owner switch (the previous owner's last command, reported by the gripper relay on
+  `/teleop/gripper/held`), else, after `gripper_reference_timeout_s` (0.5 s) without one, the
+  measured opening. `gripper_reference_source` says which.
+- **Measured or assumed.** In Gazebo the opening is measured by the physics engine. In mock
+  execution it is the command echoed back. On the hardware driver it is partly assumed: the
+  gripper action proxy publishes the commanded target, so a grasp stalled on an object reads
+  as closed.
+- **Link keep-out.** The model places the fingers at their measured joint values. A step of the
+  gripper command that would bring a finger nearer the fixed structure than the margin, and
+  nearer than at the current command, is not taken (`gripper_hold` `KEEP_OUT`); the request
+  stays, so the gripper continues by itself once the arm has moved away.
+- **Backends.** `gripper_relay_node` carries the command to the teleop gripper controller
+  (`config/teleop_gripper_controller.yaml`, a trajectory controller with no tolerances and
+  no command timeout, so a finger blocked on an object keeps its squeeze) and reports the
+  opening that controller holds. The hardware adapter (a `GripperCommand` action client) is
+  not built; the relay refuses `mode:=action`.
 
 ### Measuring a run
 

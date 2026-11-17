@@ -42,17 +42,18 @@ CLOSED = 0.849
 class GripperProbe(Probe):
     """The stack probe plus the gripper command, the gripper joint and gripper clients."""
 
-    def __init__(self, env):
-        super().__init__(env)
+    def __init__(self, env, moveit_controller=MOVEIT, moveit_gripper=MOVEIT_G):
+        super().__init__(env, moveit_controller=moveit_controller)
+        self.moveit_gripper = moveit_gripper
         self.grips = []             # (monotonic, GripperCommand)
         self.gripper_joint = []     # (monotonic, position)
         self.node.create_subscription(GripperCommand, '/teleop/gripper/command',
                                       self._on_grip, 50)
         self.node.create_subscription(JointState, '/joint_states', self._on_gripper_joint, 50)
         self.gripper_action = ActionClient(self.node, FollowJointTrajectory,
-                                           f'/{MOVEIT_G}/follow_joint_trajectory')
+                                           f'/{moveit_gripper}/follow_joint_trajectory')
         self.moveit_gripper_topic = self.node.create_publisher(
-            JointTrajectory, f'/{MOVEIT_G}/joint_trajectory', 10)
+            JointTrajectory, f'/{moveit_gripper}/joint_trajectory', 10)
         self.teleop_gripper_topic = self.node.create_publisher(
             JointTrajectory, f'/{TELEOP_G}/joint_trajectory', 10)
         self.stray_command = self.node.create_publisher(
