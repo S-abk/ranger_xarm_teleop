@@ -100,8 +100,8 @@ def main() -> int:
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         node.create_subscription(String, '/robot_description',
                                  lambda msg: seen.update(description=msg.data), latched)
-        node.create_subscription(ArmOwner, '/teleop/mux/owner', on_owner, 10)
-        node.create_subscription(TeleopState, '/teleop/state', on_state, 10)
+        node.create_subscription(ArmOwner, '/teleop/mux/owner', on_owner, 1)   # newest only
+        node.create_subscription(TeleopState, '/teleop/state', on_state, 1)   # newest only
         disarm = node.create_client(Trigger, args.disarm_service)
         move = ActionClient(node, MoveGroup, '/move_action')
         spin(10.0, lambda: seen['description'] is not None)
@@ -149,7 +149,10 @@ def main() -> int:
         goal.planning_options.plan_only = False
         goal.planning_options.planning_scene_diff.is_diff = True
         goal.planning_options.planning_scene_diff.robot_state.is_diff = True
-        allowed, why = may_recover(*fresh())      # once more, right before sending
+        # Once more, right before sending. Waiting for the action server processed no
+        # reports, so they may have gone stale meanwhile: wait for fresh ones first.
+        spin(2.0, handed_back)
+        allowed, why = may_recover(*fresh())
         if not allowed:
             print(f'NOT RECOVERED, nothing moved: {why}')
             return 4

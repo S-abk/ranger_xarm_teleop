@@ -100,8 +100,13 @@ def launch_setup(context, *args, **kwargs):
                    '--controller-manager', arg('controller_manager'),
                    '--controller-manager-timeout', '120'])
 
+    # No ``name=`` here either (see below): MoveIt Servo's planning scene monitor makes a tf
+    # TransformListener with a node of its own, which the remap would also rename to
+    # servo_node, so that it answered /servo_node/get_parameters too (with no values).
+    # Servo's node is called servo_node by its code, so its parameters and services keep
+    # that name.
     servo_node = Node(
-        package='moveit_servo', executable='servo_node', name='servo_node', output='screen',
+        package='moveit_servo', executable='servo_node', output='screen',
         parameters=[{'moveit_servo': servo}, {'update_period': servo['publish_period']},
                     {'planning_group_name': servo['move_group_name']},
                     robot_description, semantic, kinematics, joint_limits, sim_time])

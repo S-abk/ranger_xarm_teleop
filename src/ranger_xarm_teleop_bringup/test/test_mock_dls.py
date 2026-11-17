@@ -36,8 +36,9 @@ from ranger_xarm_teleop_servo.rotations import (pose_from_matrix, q_between, v_n
                                                 v_sub)
 import rclpy
 
-from stack_helpers import (child_environment, Probe, Process, READY, replay,
-                           replay_with_clean_input)
+from stack_helpers import (BODY_OBSTACLE, BODY_OBSTACLE_LINK, child_environment, INTO_BODY_START,
+                           Probe, Process, READY, replay, replay_with_clean_input,
+                           SHOULDER_START)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -186,26 +187,40 @@ def test_after_a_collision_halt_recovery_is_refused_and_teleop_works_again(stack
     probe, env, logs, _ = stack
 
     def ready():
-        probe.move_to(READY)
-    start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_into_body.log'),
-                                       'clutch_into_body', expected_engaged_s=1.0,
-                                       before=ready)
-    states = probe.states_since(start)
-    halted = [s for s in states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
-    assert halted and all(s.servo_status == ServoStatus.HALT_FOR_COLLISION for s in halted)
-    assert probe.owner_value() == ArmOwner.OWNER_TELEOP     # still armed after the halt
-    halted_at = probe.joint_positions()
-    process = Process(['python3', os.path.join(TOOLS, 'recover_arm.py')], env,
-                      str(logs / 'recover_collision.log'))
+        probe.move_to(INTO_BODY_START)
+        probe.scene_box(*BODY_OBSTACLE, attach_to=BODY_OBSTACLE_LINK)
+    failing = True
     try:
-        code = process.wait(120.0)
+        start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_into_body.log'),
+                                           'clutch_into_body', expected_engaged_s=1.0,
+                                           before=ready)
+        states = probe.states_since(start)
+        halted = [s for s in states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
+        assert halted and all(s.servo_status == ServoStatus.HALT_FOR_COLLISION
+                              for s in halted)
+        assert probe.owner_value() == ArmOwner.OWNER_TELEOP     # still armed after the halt
+        halted_at = probe.joint_positions()
+        process = Process(['python3', os.path.join(TOOLS, 'recover_arm.py')], env,
+                          str(logs / 'recover_collision.log'))
+        try:
+            code = process.wait(120.0)
+        finally:
+            process.stop()
+        output = process.output()
+        assert 'disarm: disarmed' in output and 'MoveIt owns the arm' in output
+        assert code != 0 and 'start state in collision' in output, output
+        assert probe.joint_positions() == pytest.approx(halted_at, abs=1e-4)
+        probe.move_to(READY)                    # straight to the controller: test only
+        failing = False
     finally:
-        process.stop()
-    output = process.output()
-    assert 'disarm: disarmed' in output and 'MoveIt owns the arm' in output
-    assert code != 0 and 'start state in collision' in output, output
-    assert probe.joint_positions() == pytest.approx(halted_at, abs=1e-4)
-    probe.move_to(READY)                    # straight to the controller: test only
+        # Also when an assertion above fails: the box would halt every later test. A failure
+        # to remove it must not hide that first failure; on its own it fails the test.
+        try:
+            probe.remove_scene_box(BODY_OBSTACLE[0], attach_to=BODY_OBSTACLE_LINK)
+        except Exception as err:  # noqa: B902
+            if not failing:
+                raise
+            print(f'could not remove the scene box: {err}')
     assert probe.joint_positions() == pytest.approx(READY, abs=5e-3)
     # Teleop again, from the recovered posture: the arm follows the line.
     before = probe.tool_position()
@@ -287,7 +302,7 @@ def _tool_between(timed, t0, t1):
 def test_shoulder_region_is_crossed_without_a_halt(stack):
     """INV-5 (shoulder): pulled back over joint 1's axis, damped, never halted."""
     probe, env, logs, _ = stack
-    timed, _ = _clean_run(probe, env, logs, 'clutch_shoulder', 1.0)
+    timed, _ = _clean_run(probe, env, logs, 'clutch_shoulder', 1.0, posture=SHOULDER_START)
     engaged = [s for _, s in timed if s.clutch_engaged]
     assert min(s.conditioning for s in engaged) < 0.2
     assert any(s.damped for s in engaged)

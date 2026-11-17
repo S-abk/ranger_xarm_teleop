@@ -13,7 +13,7 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 | `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, damped least-squares solver, MoveIt Servo joint-jog commands), command mux node, and the pure modules behind them with their tests |
 | `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator, simulation-only limit values |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
-| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py` |
+| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py` |
 | `recordings/` | Local headset recordings (git-ignored) |
 
 ## Build and test
@@ -292,10 +292,12 @@ Each cycle the solver turns the target into joint velocities:
 | (view cone) | the cone's axis is the headset's forward axis, tilted down by `view_cone_tilt_deg` (default 0) about the headset's left-right axis; its half-angle is the required `view_cone_half_angle_deg` |
 | tool point or wrist point (`wrist_frame`) beyond a keep-out plane (`keep_out_planes`, flat list `nx ny nz d` per plane, allowed side `n . x >= d`, in `xarm_link_base`) | pushed back onto the plane; if that breaks another bound, the last accepted target is kept |
 | singularity, joint position limit, joint velocity limit, tool speed cap | the solver damps, holds the joint or scales the command (`active_limit` 6-8); never a halt |
+| an arm link or the tool nearer the robot's fixed structure than `link_keepout_margin_m` plus the slowing zone (see below) | motion toward it is removed, motion along or away from it kept (`active_limit` 9, `keepout_bound`); the target's lead into the blocked direction is absorbed |
 | self-collision, scene collision; a joint inside MoveIt Servo's own margin (a backstop) | MoveIt Servo slows (`active_limit` 4, `servo_status`); when it halts, the clutch is released (`hold_reason` 19) so the target cannot run on ahead of a standing arm |
 
 **The limit values have no defaults.** Maximum offset, view cone, per-cycle limits, speed
-caps, lead limits and the largest translation scale are required parameters; the teleop node
+caps, lead limits, the largest translation scale and the link keep-out margin are required
+parameters; the teleop node
 exits if one is missing. For simulation,
 `config/SIMULATION_ONLY_limits.yaml` supplies values. That file marks itself simulation-only:
 the node then starts only if every ros2_control hardware plugin in the robot description is a
@@ -308,6 +310,33 @@ Clocks: MoveIt Servo, the mux, the teleop node and the controllers use simulatio
 simulator (their stamps must agree with the joint states); the bridge and the replay node stay
 on the system clock. Input age, the target cycle and every timeout use the monotonic clock of
 the machine, so 100 ms is 100 ms of real time whatever the simulator does.
+
+### Link keep-out
+
+The teleop node keeps every arm link, and the tool, `link_keepout_margin_m` away from the
+robot's own fixed structure (G-15), so pulling the tool back toward the base no longer ends in
+MoveIt Servo's collision halt. The model is built from `/robot_description` when it arrives
+(`ranger_xarm_teleop_servo/keepout.py`, numpy only):
+
+- **What is kept apart.** Fixed: every link joined to the arm base through fixed joints (base,
+  mounts, sensors, anything bolted on). Moving: every link downstream of the first arm joint
+  (arm, gripper, cameras, any tool a project attaches). Every moving link against every fixed
+  one, and the links moved by the last arm joint against the arm links three or more joints up.
+  Left out, and logged at start-up: a moving link attached directly to a fixed one, and a pair
+  that is within the margin in every sampled posture. The service `/teleop/keepout_info`
+  (`std_srvs/Trigger`) lists the model, the pairs left out and why.
+- **The model never reports more clearance than the geometry has.** Moving links are covered
+  by spheres (25 mm cells) that contain every triangle; fixed boxes, cylinders and spheres are
+  used exactly. Only STL collision meshes are supported; other formats refuse the start.
+- **In the solver.** Within 60 mm of the margin, a pair's clearance `d` may fall at most at
+  `(d - margin) / 0.2 s`: 0.3 m/s at 60 mm, nothing at the margin, so at 0.25 m/s motion toward
+  the structure slows from about 50 mm and stops at the margin; motion along or away from it
+  keeps its speed. Where the command breaks that, it is replaced by the nearest
+  command that does not (in tool motion; motion across the hand's direction costs more than
+  slowing along it).
+- **Checks.** A later `/robot_description`, or MoveIt Servo's robot description, with other
+  geometry disables teleop until the node is restarted. `TeleopState` reports the clearance,
+  its pair and whether the keep-out shaped the command.
 
 ### Command mux
 
@@ -368,7 +397,19 @@ tools/recover_arm.py          # disarm, wait until MoveIt owns the arm, plan to 
 ```
 
 When the arm is in contact, MoveIt refuses to plan from that start state
-(`start state in collision`) and `recover_arm.py` moves nothing.
+(`start state in collision`) and `recover_arm.py` moves nothing. Then:
+
+```bash
+tools/retreat_arm.py          # disarm, then back out along the recorded joint path, slowly
+```
+
+The teleop node records the measured joint path while teleop is armed (the last 60 s,
+`/teleop/joint_path`). `retreat_arm.py` walks it backwards from the arm's posture to the first
+point that is clear by the keep-out margin and valid for move_group, within 0.15 m of tool path
+and 0.5 rad per joint, and sends that stretch to MoveIt's controller at 0.1 rad/s and 0.03 m/s
+at most, without planning. It moves nothing when there is no path, the arm has moved since,
+the path goes deeper into contact on the way back or no point within the bounds is clear, and
+says why and what to do. Simulation only, like `move_arm.py`.
 
 (simulation only, like `tools/move_arm.py`, which prints why a goal was rejected). Without
 `--controller`, `move_arm.py` asks the command mux which controller is MoveIt's (failing that,

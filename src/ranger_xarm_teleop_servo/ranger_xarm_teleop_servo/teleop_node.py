@@ -32,10 +32,19 @@ newest ``/joint_states`` on the chain of ``/robot_description`` (base frame to t
 tip link) and the fixed tool-to-tip transform. The solver's reference is MoveIt Servo's
 own commanded state: the last point of its newest output on ``servo_output_topic``.
 
-Service
+Services
   /teleop/disarm                 std_srvs/Trigger: disarm (the clutch releases, the arm goes
                                  back to MoveIt once it has stopped). There is no service
                                  to arm: that is the arm button only.
+  /teleop/joint_path             GetJointPath: the measured joint path recorded while armed
+                                 (for the retreat tool)
+  /teleop/keepout_info           std_srvs/Trigger: the link keep-out model in use (margin,
+                                 fingerprint, spheres, pairs left out and why)
+
+Link keep-out (G-15). A model of the arm's links and the robot's fixed structure is built
+from ``/robot_description`` when it first arrives (``keepout.py``); a description it cannot
+follow refuses the start. A later description with other geometry, or MoveIt Servo checking
+a robot description with other geometry, disables teleop until restart.
 
 Clocks. Input staleness, the target cycle and every timeout run on the monotonic clock
 of this machine: a frame's age is measured from its local arrival, never by comparing
@@ -55,6 +64,7 @@ import threading
 import time
 from typing import Dict, Optional
 
+from ament_index_python.packages import get_package_share_directory
 from control_msgs.msg import JointJog
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from moveit_msgs.msg import ServoStatus
@@ -63,13 +73,15 @@ import numpy as np
 from ranger_xarm_teleop_bridge.bridge_node import (HEAD_POSE_TOPIC, JOY_TOPIC,
                                                    POSE_TOPICS, STATUS_QOS, STATUS_TOPIC)
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, InputStatus, TeleopState
-from ranger_xarm_teleop_interfaces.srv import SetArmOwner
+from ranger_xarm_teleop_interfaces.srv import GetJointPath, SetArmOwner
+from ranger_xarm_teleop_servo import keepout as ko
 from ranger_xarm_teleop_servo import params as gate_params
 from ranger_xarm_teleop_servo import solver as dls
 from ranger_xarm_teleop_servo.frames import (ARM_BUTTON, CALIBRATE_BUTTON, CLUTCH_BUTTON,
                                              SCALE_BUTTON)
 from ranger_xarm_teleop_servo.gate import Env, Frame, GateState, Limit, on_frame, tick
 from ranger_xarm_teleop_servo.kinematics import ChainError
+from ranger_xarm_teleop_servo.retreat import PathRecorder
 from ranger_xarm_teleop_servo.rotations import (inverse, Pose, pose_from_matrix, pose_to_matrix,
                                                 q_between, q_from_yaw, v_norm, v_sub)
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator
@@ -85,13 +97,20 @@ from sensor_msgs.msg import JointState, Joy
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 from tf2_msgs.msg import TFMessage
-from trajectory_msgs.msg import JointTrajectory
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 TARGET_TOPIC = '/teleop/target_pose'
 STATE_TOPIC = '/teleop/state'
 OWNER_TOPIC = '/teleop/mux/owner'
 SET_OWNER_SERVICE = '/teleop/mux/set_owner'
 DISARM_SERVICE = '/teleop/disarm'
+JOINT_PATH_SERVICE = '/teleop/joint_path'
+KEEPOUT_INFO_SERVICE = '/teleop/keepout_info'
+KEEPOUT_SLOW_S = 0.002      # a keep-out step longer than this is reported
+KEEPOUT_FLOOR_SLACK = 1e-4  # m: the clearance falling more below its floor is reported
+TARGET_PERIOD_MS = 20.0     # for the reference-age summary only
+IDLE_CLEARANCE_CYCLES = 5   # the measured clearance is computed this seldom ...
+ENGAGED_CLEARANCE_CYCLES = 25   # ... and this seldom while engaged (the solver has its own)
 
 # Poses and joy are published best effort, depth 1; a little depth here lets the pose, joy
 # and status of one frame be paired by stamp whatever order they arrive in, and keeps them
@@ -152,7 +171,8 @@ STUCK_COMMANDED_RAD = 0.2
 STUCK_FRACTION = 0.02
 SOLVER_LIMITS = {dls.LIMIT_JOINT_POSITION: Limit.JOINT_POSITION,
                  dls.LIMIT_JOINT_VELOCITY: Limit.JOINT_VELOCITY,
-                 dls.LIMIT_TOOL_SPEED: Limit.TOOL_SPEED}
+                 dls.LIMIT_TOOL_SPEED: Limit.TOOL_SPEED,
+                 dls.LIMIT_LINK_KEEPOUT: Limit.LINK_KEEPOUT}
 # Solver tuning parameters (not safety limits) and their SolverParams fields.
 SOLVER_TUNING = {'solver_gain': 'gain', 'damping_threshold': 'damping_threshold',
                  'max_damping': 'max_damping',
@@ -211,6 +231,23 @@ class CycleCounter:
         self.slowest = (0.0, '', '')        # seconds, longest step, joint command parts
         self.late_count = 0
         self.latest = 0.0                   # longest interval between cycle starts
+        self.keepout = []                   # seconds of each solver keep-out step (wall)
+        self.keepout_cpu = []               # the same, CPU time of the node's thread
+        self.measured_clearance = []        # seconds of each clearance at the measured joints
+        self.reference_ages = []            # seconds: MoveIt Servo's output at each solve
+
+    def reference_age(self, age: float) -> None:
+        """Record how old MoveIt Servo's newest output was when the solver used it."""
+        self.reference_ages.append(age)
+
+    def keepout_step(self, took: float, cpu: float) -> None:
+        """Record one solver keep-out step (model and, if bound, the fix): wall and CPU s."""
+        self.keepout.append(took)
+        self.keepout_cpu.append(cpu)
+
+    def measured_clearance_step(self, took: float) -> None:
+        """Record one keep-out clearance computed at the measured joints (s)."""
+        self.measured_clearance.append(took)
 
     def started(self, now: float, interval: float) -> None:
         """Count a cycle that started ``interval`` seconds after the previous one."""
@@ -226,20 +263,42 @@ class CycleCounter:
         if took > self.slowest[0]:
             self.slowest = (took, slowest, parts)
 
-    def report(self, now: float) -> str:
-        """Return the summary when one is due and anything was counted, then start again."""
-        if self.since is None or now - self.since < CYCLE_REPORT_S:
+    def report(self, now: float, final: bool = False) -> str:
+        """
+        Return the summary when one is due and anything was counted, then start again.
+
+        ``final``: at shutdown, whatever was counted since the last summary.
+        """
+        if self.since is None or (now - self.since < CYCLE_REPORT_S and not final):
             return ''
         text = ''
+        if self.keepout:
+            steps = np.array(self.keepout) * 1000.0
+            cpu = np.array(self.keepout_cpu) * 1000.0
+            text = (f'link keep-out: {len(steps)} steps, median {np.median(steps):.2f} ms, '
+                    f'p99 {np.percentile(steps, 99):.2f} ms, longest {steps.max():.2f} ms '
+                    f'(CPU of this thread: median {np.median(cpu):.2f} ms, p99 '
+                    f'{np.percentile(cpu, 99):.2f} ms). ')
+        if self.measured_clearance:
+            steps = np.array(self.measured_clearance) * 1000.0
+            text += (f'clearance at the measured joints: {len(steps)} times, median '
+                     f'{np.median(steps):.2f} ms, p99 {np.percentile(steps, 99):.2f} ms. ')
+        if self.reference_ages:
+            ages = np.array(self.reference_ages) * 1000.0
+            text += (f'solver reference (MoveIt Servo output) age: median {np.median(ages):.0f} '
+                     f'ms, p99 {np.percentile(ages, 99):.0f} ms, longest {ages.max():.0f} ms, '
+                     f'{int(np.sum(ages > 2.5 * TARGET_PERIOD_MS))} of {len(ages)} over 2.5 '
+                     'cycles. ')
         if self.slow_count or self.late_count:
             took, slowest, parts = self.slowest
-            text = (f'last {now - self.since:.0f} s: {self.slow_count} slow cycles '
-                    f'(over {SLOW_CYCLE_S * 1000.0:.0f} ms'
-                    + (f'; longest {took * 1000.0:.0f} ms, {slowest}'
-                       + (f' ({parts})' if parts else '') if self.slow_count else '')
-                    + f'), {self.late_count} cycles started over '
-                    f'{LATE_START_S * 1000.0:.0f} ms after the previous one'
-                    + (f' (longest {self.latest * 1000.0:.0f} ms)' if self.late_count else ''))
+            text += (f'last {now - self.since:.0f} s: {self.slow_count} slow cycles '
+                     f'(over {SLOW_CYCLE_S * 1000.0:.0f} ms'
+                     + (f'; longest {took * 1000.0:.0f} ms, {slowest}'
+                        + (f' ({parts})' if parts else '') if self.slow_count else '')
+                     + f'), {self.late_count} cycles started over '
+                     f'{LATE_START_S * 1000.0:.0f} ms after the previous one'
+                     + (f' (longest {self.latest * 1000.0:.0f} ms)' if self.late_count
+                        else ''))
         self.__init__()
         self.since = now
         return text
@@ -264,6 +323,9 @@ class TeleopNode(Node):
         self.declare_parameter('servo_node', '/servo_node')
         self.declare_parameter('servo_output_topic', '/teleop_arm_controller/joint_trajectory')
         self.declare_parameter('robot_description_timeout_s', 15.0)
+        # G-15: PENDING for hardware, so no default; the cell is a model resolution.
+        self.declare_parameter('link_keepout_margin_m', Parameter.Type.DOUBLE)
+        self.declare_parameter('link_keepout_cell_m', ko.DEFAULT_CELL)
         for name in SOLVER_TUNING:
             self.declare_parameter(name, Parameter.Type.DOUBLE)
         # Joint velocity limits besides the URDF's (MoveIt's joint_limits.yaml); the smaller
@@ -304,6 +366,16 @@ class TeleopNode(Node):
             raise StartupRefused('joint_velocity_limit_names and joint_velocity_limits differ '
                                  'in length')
         self.velocity_limits = dict(zip(names, limits))
+        margin = self._value_or_none('link_keepout_margin_m')
+        if margin is None:
+            raise StartupRefused('required safety values without a default are not set: '
+                                 'link_keepout_margin_m')
+        if not (math.isfinite(margin) and margin > 0.0):
+            raise StartupRefused(f'link_keepout_margin_m: {margin!r} is not a positive number')
+        self.keepout_margin = float(margin)
+        self.keepout_cell = float(self.get_parameter('link_keepout_cell_m').value)
+        if not (math.isfinite(self.keepout_cell) and 0.002 < self.keepout_cell <= 0.05):
+            raise StartupRefused('link_keepout_cell_m must be within (0.002, 0.05] m')
 
         self.state = GateState()
         self.mono = time.monotonic
@@ -323,6 +395,17 @@ class TeleopNode(Node):
         self.urdf: Optional[str] = None
         self.arm: Optional[dls.Arm] = None
         self.arm_error = ''
+        # Link keep-out (G-15): the model, what it was built from, and why it cannot be used.
+        self.keepout: Optional[ko.Model] = None
+        self.keepout_fault = ''
+        self._keepout_tried = False
+        self.keepout_floor = math.inf       # clearance the next cycle may not fall below
+        self.servo_description_compared = False
+        self.path = PathRecorder()
+        self._idle_count = 0
+        self._idle_clearance = None
+        self._recording = False
+        self.servo_description_pending = False
         # Joint states and MoveIt Servo's output arrive at the controller rate. A second
         # node on its own executor thread receives both, so they never queue in front of
         # the headset input in this node's executor. Each callback stores one tuple (a
@@ -404,9 +487,13 @@ class TeleopNode(Node):
         self.pause_client = self.create_client(SetBool, f'{servo}/pause_servo')
         self.type_client = self.create_client(ServoCommandType, f'{servo}/switch_command_type')
         self.servo_params_client = self.create_client(GetParameters, f'{servo}/get_parameters')
+        self.servo_description_client = self.create_client(GetParameters,
+                                                           f'{servo}/get_parameters')
         self.owner_client = self.create_client(SetArmOwner, SET_OWNER_SERVICE)
 
         self.create_service(Trigger, DISARM_SERVICE, self._on_disarm)
+        self.create_service(GetJointPath, JOINT_PATH_SERVICE, self._on_joint_path)
+        self.create_service(Trigger, KEEPOUT_INFO_SERVICE, self._on_keepout_info)
         self.timer = self.create_timer(self.params.target_period, self._on_timer,
                                        clock=self.steady)
         self.get_logger().info(
@@ -567,8 +654,67 @@ class TeleopNode(Node):
                     f'in {self.tool_frame}')
         self._build_arm()
 
+    def _resolver(self):
+        return ko.make_resolver(get_package_share_directory)
+
+    def _build_keepout(self) -> None:
+        """Build the link keep-out model from the robot description (refuses the start)."""
+        self._keepout_tried = True
+        started = time.perf_counter()
+        try:
+            self.keepout = ko.build(self.urdf, self._resolver(), self.base_frame,
+                                    self.tip_frame, self.keepout_margin,
+                                    cell=self.keepout_cell)
+        except ChainError as err:
+            # No arm chain: the solver has none either and teleop stays not ready.
+            self.get_logger().error(f'no link keep-out model: {err}')
+            return
+        except (ko.ModelError, ValueError) as err:
+            raise StartupRefused(f'link keep-out: {err}') from err
+        took = time.perf_counter() - started
+        model = self.keepout
+        self.get_logger().info(
+            f'link keep-out: margin {model.margin * 1000.0:.1f} mm, {model.sphere_count} '
+            f'spheres on {len(model.bodies)} moving links, largest radius '
+            f'{model.largest_radius * 1000.0:.1f} mm (inflation below twice that per covered '
+            f'side), {len(model.pair_list)} pairs, fixed '
+            f'links {model.units.names}, built in {took:.2f} s, fingerprint '
+            f'{model.fingerprint[:12]}')
+        for item in model.excluded:
+            extra = ('' if item.reason == 'adjacent' else
+                     f' (clearance {item.low * 1000.0:.1f} to {item.high * 1000.0:.1f} mm over '
+                     'the sampled postures)')
+            self.get_logger().warning(
+                f'link keep-out: {item.moving} - {item.other} left out: {item.reason}{extra}')
+        if model.not_covered:
+            self.get_logger().warning(
+                'link keep-out: not covered (behind joints that are neither fixed nor arm '
+                f'joints): {model.not_covered}')
+        if not model.pair_list:
+            self.get_logger().warning('link keep-out: the description has no pair of arm '
+                                      'and fixed collision geometry; nothing is kept out')
+
+    def _compare_description(self, text: str, source: str) -> None:
+        """Disable teleop if ``text`` has other geometry than the keep-out model's."""
+        try:
+            other = ko.fingerprint(text, self._resolver(), self.base_frame, self.tip_frame,
+                                   self.keepout_margin)
+        except (ko.ModelError, ChainError, ValueError) as err:
+            other = f'unusable: {err}'
+        if other == self.keepout.fingerprint:
+            self.get_logger().info(f'{source} has the same geometry as the link keep-out model')
+            return
+        fault = (f'{source} does not match the link keep-out model built at start-up '
+                 '(other collision geometry or kinematics): teleop is disabled until it is '
+                 'restarted')
+        if fault != self.keepout_fault:
+            self.get_logger().error(fault)
+        self.keepout_fault = fault
+
     def _build_arm(self) -> None:
         """Build the solver's arm once the robot description and the tool offset are known."""
+        if self.urdf is not None and self.keepout is None and not self._keepout_tried:
+            self._build_keepout()
         if self.arm is not None or self.urdf is None or self.tool_to_tip is None:
             return
         try:
@@ -585,7 +731,13 @@ class TeleopNode(Node):
             f'velocity limits {[round(v, 3) for v in self.arm.velocity]} rad/s')
 
     def close(self) -> None:
-        """Stop the watcher thread (joint states and transforms) and its node."""
+        """Log the cycle summary since the last one; stop the watcher thread and its node."""
+        try:
+            summary = self._cycles.report(self.mono(), final=True)
+            if summary:
+                self.get_logger().info(f'at shutdown: {summary}')
+        except Exception:  # noqa: B902 - a log line must not stop the shutdown
+            pass
         try:
             self._watch_executor.shutdown(timeout_sec=1.0)
         except Exception:  # noqa: B902 - already shut down with the context
@@ -610,17 +762,19 @@ class TeleopNode(Node):
             self.servo_output = (self.mono(), dict(zip(msg.joint_names, msg.points[-1].positions)))
 
     def _on_robot_description(self, msg: String) -> None:
+        if self.simulation_only and not self.robot_description_checked:
+            try:
+                plugins = require_simulator(msg.data)
+            except NotASimulator as err:
+                raise StartupRefused(str(err)) from err
+            self.robot_description_checked = True
+            self.get_logger().info(
+                f'simulation-only limits accepted: hardware {sorted(set(plugins))}')
         if self.urdf is None:
             self.urdf = msg.data
             self._build_arm()
-        if not self.simulation_only or self.robot_description_checked:
-            return
-        try:
-            plugins = require_simulator(msg.data)
-        except NotASimulator as err:
-            raise StartupRefused(str(err)) from err
-        self.robot_description_checked = True
-        self.get_logger().info(f'simulation-only limits accepted: hardware {sorted(set(plugins))}')
+        elif msg.data != self.urdf and self.keepout is not None:
+            self._compare_description(msg.data, 'a later /robot_description')
 
     def _on_owner(self, msg: ArmOwner) -> None:
         self.owner = msg.owner
@@ -706,7 +860,8 @@ class TeleopNode(Node):
         grace after the first one, then never older than the timeout), and the tool at
         Servo's commanded state must agree with the measured one.
         """
-        ready = self.arm is not None and not self.solver_fault
+        ready = (self.arm is not None and self.keepout is not None and not self.solver_fault
+                 and not self.keepout_fault and not self.servo_description_pending)
         if not self.state.engaged or self.first_command_at is None:
             return ready, True
         reference = self.reference(now)
@@ -758,6 +913,14 @@ class TeleopNode(Node):
     def arming_conditioning(self, joints) -> float:
         """Return the solver's orientation conditioning at ``joints`` (NaN if unknown)."""
         if joints is None or self.arm is None:
+            return math.nan
+        if self.keepout_fault:
+            self.get_logger().error(f'arm refused: {self.keepout_fault}')
+            return math.nan
+        try:
+            self.keepout_extra()
+        except ko.ModelError as err:
+            self.get_logger().error(f'arm refused: link keep-out: {err}')
             return math.nan
         try:
             return float(dls.levels(self.arm, joints, self.solver_params).orientation)
@@ -845,13 +1008,25 @@ class TeleopNode(Node):
                     'until it is activated again')
             self.servo_mode_wrong = True
         stuck = self.stuck_check(now, tool)
+        recording = (joints is not None and self.state.want_armed
+                     and owner == ArmOwner.OWNER_TELEOP and self.joint_state is not None)
+        if recording:
+            if not self._recording and self.path.resume(joints):
+                self.get_logger().info('joint path: the arm moved while teleop was disarmed; '
+                                       'the earlier path was dropped')
+            self.path.add(self.joint_state[1] * 1e-9, joints)
+        self._recording = recording
+        blocked = (tuple(float(v) for v in self.solution.blocked)
+                   if self.solution is not None and self.solution.blocked is not None
+                   else (0.0, 0.0, 0.0))
         env = Env(now=now, owner_is_teleop=owner == ArmOwner.OWNER_TELEOP,
                   tool_pose=tool if ready else None, tool_pose_age=tool_age,
                   servo_active=(self.servo_state == SERVO_ACTIVE and self.servo_verified
                                 and not self.servo_mode_wrong and following),
                   servo_halted=self.servo_halted() or stuck, solver_ready=solver_ready,
                   arming_conditioning=(self.arming_conditioning(joints)
-                                       if self.state.arm_pending else math.inf))
+                                       if self.state.arm_pending else math.inf),
+                  blocked=blocked)
         marks.append(('tool pose', self.mono()))
         engaged_before = self.state.engaged
         self.state, output = tick(self.state, env, self.params)
@@ -938,6 +1113,9 @@ class TeleopNode(Node):
             reference = joints
         else:
             reference = self.reference(now)
+            newest = self.servo_output
+            if reference is not None and self.output_confirmed and newest is not None:
+                self._cycles.reference_age(now - newest[0])
         solving = self.mono()
         self._command_steps.append(('reference', solving - started))
         why = ''
@@ -947,13 +1125,19 @@ class TeleopNode(Node):
             why = 'solver reference not finite'
         else:
             try:
+                extra = self.keepout_extra()
                 solution = dls.solve(self.arm, reference, pose_to_matrix(output.target),
-                                     self.solver_params, output.feedforward)
+                                     self.solver_params, output.feedforward,
+                                     keepout=self.keepout, extra=extra)
+            except ko.ModelError as err:
+                solution, why = None, f'link keep-out: {err}'
             except (np.linalg.LinAlgError, ValueError) as err:
                 solution, why = None, f'solver failed: {err}'
             if solution is not None and not np.all(np.isfinite(solution.qdot)):
                 why = 'joint command not finite'
         self._command_steps.append(('solve', self.mono() - solving))
+        if not why:
+            self.keepout_watch(solution, engaged_before)
         if why:
             # Never send a guess: stop now, and the gate releases the clutch next cycle.
             self.get_logger().error(f'{why}; sending a stop, clutch released')
@@ -968,6 +1152,84 @@ class TeleopNode(Node):
         self._command_steps.append(('publish joint command', self.mono() - publishing))
         self.commanding = True
         return True
+
+    def keepout_extra(self) -> Optional[dict]:
+        """Return the measured values of the non-arm joints the keep-out model needs."""
+        if self.keepout is None:
+            return None
+        latest = self.joint_state
+        return self.keepout.extra_values(latest[2] if latest is not None else {})
+
+    def keepout_watch(self, solution, engaged_before: bool) -> None:
+        """Time the keep-out step, and report a clearance that fell below its floor."""
+        if self.keepout is None:
+            return
+        took = solution.keepout_seconds
+        self._cycles.keepout_step(took, solution.keepout_cpu_seconds)
+        self._command_steps.append(('link keep-out', took))
+        if took > KEEPOUT_SLOW_S:
+            self.get_logger().warning(f'link keep-out step took {took * 1000.0:.1f} ms',
+                                      throttle_duration_sec=1.0)
+        clearance = solution.keepout_clearance
+        if not engaged_before:
+            self.keepout_floor = math.inf
+        if (math.isfinite(self.keepout_floor)
+                and clearance < self.keepout_floor - KEEPOUT_FLOOR_SLACK):
+            self.get_logger().error(
+                f'link keep-out: clearance {clearance * 1000.0:.2f} mm '
+                f'({solution.keepout_pair[0]} - {solution.keepout_pair[1]}) is below the '
+                f'floor of the cycle before, {self.keepout_floor * 1000.0:.2f} mm',
+                throttle_duration_sec=1.0)
+        self.keepout_floor = (min(clearance, self.keepout.margin) if math.isfinite(clearance)
+                              else math.inf)
+
+    def _on_joint_path(self, request, response):
+        times, postures = self.path.path()
+        response.path.joint_names = list(self.arm.joint_names) if self.arm is not None else []
+        if len(times) == 0:
+            response.message = ('no path recorded: teleop has not moved the arm since this '
+                                'node started')
+            return response
+        first = int(round(times[0] * 1e9))
+        response.path.header.stamp.sec, response.path.header.stamp.nanosec = divmod(
+            first, 1_000_000_000)
+        response.path.header.frame_id = self.base_frame
+        for t, q in zip(times, postures):
+            point = JointTrajectoryPoint()
+            point.positions = [float(v) for v in q]
+            offset = int(round((t - times[0]) * 1e9))
+            point.time_from_start.sec, point.time_from_start.nanosec = divmod(
+                offset, 1_000_000_000)
+            response.path.points.append(point)
+        response.message = (f'{len(times)} points over {times[-1] - times[0]:.1f} s'
+                            + ('; older points were dropped (60 s kept)'
+                               if self.path.dropped_for_age else ''))
+        return response
+
+    def _on_keepout_info(self, request, response):
+        model = self.keepout
+        if model is None:
+            response.success = False
+            response.message = 'no link keep-out model yet (no robot description)'
+            return response
+        lines = [f'margin {model.margin * 1000.0:.1f} mm; cell {model.cell * 1000.0:.0f} mm; '
+                 f'{model.sphere_count} spheres; largest radius '
+                 f'{model.largest_radius * 1000.0:.1f} mm (inflation below twice that per '
+                 f'covered side); fingerprint {model.fingerprint}',
+                 f'fixed links: {model.units.names}',
+                 f'pairs: {len(model.pair_list)}']
+        for item in model.excluded:
+            lines.append(f'left out: {item.moving} - {item.other}: {item.reason}'
+                         + ('' if item.reason == 'adjacent' else
+                            f' (clearance {item.low * 1000.0:.1f} to '
+                            f'{item.high * 1000.0:.1f} mm)'))
+        if model.not_covered:
+            lines.append(f'not covered: {model.not_covered}')
+        if self.keepout_fault:
+            lines.append(f'FAULT: {self.keepout_fault}')
+        response.success = not self.keepout_fault
+        response.message = '\n'.join(lines)
+        return response
 
     def stop_command(self, stamp, force: bool = False) -> None:
         """
@@ -1018,8 +1280,10 @@ class TeleopNode(Node):
         solution = self.solution if output.target is not None else None
         if limit == Limit.NONE and solution is not None:
             limit = SOLVER_LIMITS.get(solution.limit, Limit.NONE)
-        if (output.engaged and limit == Limit.NONE and self.servo_status_current()
-                and self.servo_status > 0):
+        # MoveIt Servo slowing or halting the arm outranks this node's own solver limits:
+        # it is the collision backstop, and the operator has to know it is acting.
+        if (output.engaged and (limit == Limit.NONE or limit in SOLVER_LIMITS.values())
+                and self.servo_status_current() and self.servo_status > 0):
             limit = Limit.SERVO
         msg.active_limit = int(limit)
         if solution is not None:
@@ -1046,7 +1310,40 @@ class TeleopNode(Node):
         msg.measured_tool_pose_valid = tool is not None
         if tool is not None:
             fill_pose(msg.measured_tool_pose, tool)
+        msg.keepout_margin = self.keepout_margin
+        clearance, pair = self.idle_clearance()
+        msg.keepout_clearance = float(clearance)
+        msg.keepout_link, msg.keepout_obstacle = pair
+        msg.keepout_clearance_commanded = math.nan
+        if solution is not None:
+            msg.keepout_bound = bool(solution.keepout_bound)
+            msg.keepout_clearance_commanded = float(solution.keepout_clearance)
         return msg
+
+    def idle_clearance(self):
+        """
+        Return the keep-out clearance and pair at the measured joints (NaN if unknown).
+
+        Computed every IDLE_CLEARANCE_CYCLES cycles, every ENGAGED_CLEARANCE_CYCLES while
+        engaged, and exact within the model's influence distance only, which keeps it cheap.
+        """
+        every = ENGAGED_CLEARANCE_CYCLES if self.state.engaged else IDLE_CLEARANCE_CYCLES
+        self._idle_count = (self._idle_count + 1) % every
+        if self._idle_count and self._idle_clearance is not None:
+            return self._idle_clearance
+        self._idle_clearance = (math.nan, ('', ''))
+        if self.keepout is None or self.arm is None or self.joint_state is None:
+            return self._idle_clearance
+        positions = self.joint_state[2]
+        try:
+            q = [positions[name] for name in self.arm.joint_names]
+            started = time.perf_counter()
+            rows = self.keepout.evaluate(q, self.keepout.extra_values(positions), per_pair=1)
+            self._cycles.measured_clearance_step(time.perf_counter() - started)
+        except (KeyError, ko.ModelError, ValueError):
+            return self._idle_clearance
+        self._idle_clearance = (rows.clearance, rows.nearest)
+        return self._idle_clearance
 
     # ---- MoveIt Servo ----
 
@@ -1130,6 +1427,33 @@ class TeleopNode(Node):
                 "margins inside the solver's, command timeout within the input timeout")
         self.servo_refusal = ''
         self.servo_verified = True
+        self.compare_servo_description()
+
+    def compare_servo_description(self) -> None:
+        """Ask MoveIt Servo once for its robot description and compare it with the model's."""
+        if (self.servo_description_compared or self.keepout is None
+                or not self.servo_description_client.service_is_ready()):
+            return
+        self.servo_description_compared = True
+        self.servo_description_pending = True
+        future = self.servo_description_client.call_async(
+            GetParameters.Request(names=['robot_description']))
+
+        def answered(done) -> None:
+            self.servo_description_pending = False
+            try:
+                values = done.result().values
+            except Exception as err:  # noqa: B902 - reported; Servo is verified otherwise
+                self.get_logger().warning(f'MoveIt Servo robot description not read: {err}')
+                self.servo_description_compared = False
+                return
+            text = values[0].string_value if len(values) == 1 else ''
+            if not text:
+                self.get_logger().warning('MoveIt Servo reports no robot_description; the '
+                                          'link keep-out model was not compared with it')
+            elif text != self.urdf:
+                self._compare_description(text, "MoveIt Servo's robot description")
+        future.add_done_callback(answered)
 
     def _servo_mismatch(self, values) -> str:
         """

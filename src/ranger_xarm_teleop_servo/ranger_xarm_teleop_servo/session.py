@@ -22,6 +22,7 @@ and a request to stop is carried out only once the clutch is released.
 The message arguments are duck-typed, so this module imports no message package.
 """
 
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 STATE_FRESH_S = 1.0         # a teleop state older than this says nothing about the clutch
@@ -167,6 +168,20 @@ def description_row(urdf: str) -> Dict[str, Any]:
 
 def state_row(msg: Any) -> Dict[str, Any]:
     """Row for a ``TeleopState``."""
+    row = _state_fields(msg)
+    if hasattr(msg, 'keepout_clearance'):
+        # The link keep-out (G-15): clearance in m (None when unknown), its pair, whether
+        # it shaped the command.
+        clearance = float(msg.keepout_clearance)
+        commanded = float(getattr(msg, 'keepout_clearance_commanded', math.nan))
+        row.update(keepout=clearance if math.isfinite(clearance) else None,
+                   keepout_pair=[str(msg.keepout_link), str(msg.keepout_obstacle)],
+                   keepout_bound=bool(msg.keepout_bound),
+                   keepout_commanded=commanded if math.isfinite(commanded) else None)
+    return row
+
+
+def _state_fields(msg: Any) -> Dict[str, Any]:
     return {
         'k': 'state', 'stamp': _stamp(msg), 'motion': bool(msg.motion_enabled),
         'armed': bool(msg.armed), 'engaged': bool(msg.clutch_engaged),

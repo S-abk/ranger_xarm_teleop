@@ -36,7 +36,7 @@ from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from rcl_interfaces.srv import GetParameters
 
 from stack_helpers import (child_environment, kill_gz_partition, Probe, Process, READY,
-                           replay_with_clean_input)
+                           replay_with_clean_input, SHOULDER_START)
 
 pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
                                 reason='set TELEOP_TEST_GAZEBO=1 to run the Gazebo tests')
@@ -227,7 +227,7 @@ def test_shoulder_region_is_crossed_without_a_halt(stack):
     probe, env, logs = stack
 
     def ready():
-        probe.move_to(READY, seconds=4.0)
+        probe.move_to(SHOULDER_START, seconds=4.0)
         time.sleep(1.0)
     start, _ = replay_with_clean_input(probe, env, str(logs / 'replay_shoulder.log'),
                                        'clutch_shoulder', expected_engaged_s=1.0, before=ready)

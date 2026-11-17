@@ -53,8 +53,14 @@ class ModelStep:
 def run(frames: Iterable[Frame], gate_params: GateParams, arm: Arm, solver_params: SolverParams,
         q0: Sequence[float], delay: float = 0.15, stale_ticks: int = 1,
         state: Optional[GateState] = None, tail: float = 1.0,
-        edit: Optional[Callable[[Frame], Frame]] = None) -> List[ModelStep]:
-    """Run the gate and the solver over ``frames`` against the delayed model arm."""
+        edit: Optional[Callable[[Frame], Frame]] = None, keepout=None,
+        extra: Optional[dict] = None) -> List[ModelStep]:
+    """
+    Run the gate and the solver over ``frames`` against the delayed model arm.
+
+    ``keepout`` and ``extra``: the link keep-out model and its non-arm joint values, passed
+    to the solver; the blocked tool direction of each command goes back to the gate.
+    """
     period = gate_params.target_period
     delay_ticks = max(0, int(round(delay / period)))
     state = state if state is not None else GateState()
@@ -66,6 +72,7 @@ def run(frames: Iterable[Frame], gate_params: GateParams, arm: Arm, solver_param
     wanted_for = 0
     end = (frames[-1].arrival if frames else 0.0) + tail
     reference: Optional[np.ndarray] = None
+    blocked = (0.0, 0.0, 0.0)
     for k in range(int(math.floor(end / period)) + 1):
         now = k * period
         while index < len(frames) and frames[index].arrival <= now:
@@ -77,7 +84,8 @@ def run(frames: Iterable[Frame], gate_params: GateParams, arm: Arm, solver_param
         env = Env(now=now, owner_is_teleop=True, tool_pose=tool, tool_pose_age=0.0,
                   servo_active=wanted_for >= 1,
                   arming_conditioning=(levels(arm, measured, solver_params).orientation
-                                       if state.arm_pending else math.inf))
+                                       if state.arm_pending else math.inf),
+                  blocked=blocked)
         engaged_before = state.engaged
         state, output = tick(state, env, gate_params)
         wanted_for = wanted_for + 1 if output.want_servo_active else 0
@@ -90,10 +98,12 @@ def run(frames: Iterable[Frame], gate_params: GateParams, arm: Arm, solver_param
                 reference = history[max(0, len(history) - 1 - (stale_ticks - 1))].copy() \
                     if stale_ticks > 0 else commanded.copy()
             solution = solve(arm, reference, pose_to_matrix(output.target), solver_params,
-                             output.feedforward)
+                             output.feedforward, keepout=keepout, extra=extra)
             qdot = solution.qdot
+            blocked = tuple(float(v) for v in solution.blocked)
         else:
             reference = None
+            blocked = (0.0, 0.0, 0.0)
         commanded = commanded + qdot * period
         history.append(commanded.copy())
         steps.append(ModelStep(now, output, solution, qdot, commanded.copy(), measured.copy(),

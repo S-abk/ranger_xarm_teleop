@@ -221,6 +221,22 @@ def clutch_into_body() -> List[str]:
     return record(6.4, motion, held_until(6.0), change)
 
 
+def clutch_into_body_slow() -> List[str]:
+    """
+    As ``clutch_into_body``, slowly: the hand pulls 0.28 m straight back over 10 s.
+
+    Grip 1.2-12.6 s; at most 0.053 m/s (1.5-11.5 s). Slow enough that between two of
+    MoveIt Servo's collision checks the arm cannot cross its slow-down band into contact.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        return along(-0.28 * smooth(t, 1.5, 10.0)), HELD
+
+    def change(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        down = math.radians(-25.0) / 2.0
+        return line(i, right, viewer((math.sin(down), 0.0, 0.0, math.cos(down))))
+    return record(13.0, motion, held_until(12.6), change)
+
+
 def pitch_up(deg: float) -> Quat:
     """Rotation about the calibrated right-hand axis: positive raises the pointing end."""
     half = math.radians(deg) / 2.0
@@ -402,12 +418,45 @@ def gate_seq_backwards() -> List[str]:
     return record(3.6, slow_motion, held_until(9.0), change)
 
 
+def clutch_keepout_slide() -> List[str]:
+    """
+    Pull the tool back into the structure behind the arm, slide sideways, pull away (G-15).
+
+    Grip 1.2-9.0 s: back 0.25 m (1.5-4.0 s), still, 0.15 m to the left (4.5-6.5 s), still,
+    forward 0.25 m (7.0-8.5 s), away from the structure. The headset looks down at the hand.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        dx = moves(t, [(1.5, 2.5, -0.25), (7.0, 1.5, 0.25)])
+        dy = moves(t, [(4.5, 2.0, 0.15)])
+        return at_offset(dx, dy, 0.0), HELD
+    return record(9.4, motion, held_until(9.0), looking_down)
+
+
+def clutch_keepout_reverse() -> List[str]:
+    """
+    Pull the tool back into the structure, keep pulling, then turn back (G-15 with G-14).
+
+    Grip 1.2-6.8 s: back 0.30 m (1.5-3.5 s, up to 0.28 m/s), held there to 5.0 s, then
+    forward 0.12 m (5.0-6.0 s). The headset looks down at the hand.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        return at_offset(moves(t, [(1.5, 2.0, -0.30), (5.0, 1.0, 0.12)])), HELD
+    return record(7.2, motion, held_until(6.8), looking_down)
+
+
+def arm_only() -> List[str]:
+    """Calibrate and arm, then hold the controller still without gripping (3 s)."""
+    return record(3.0, lambda t: (START, yaw(CAL_YAW_DEG)), lambda t: False)
+
+
 def generate() -> Dict[str, List[str]]:
     """Return fixture name -> exact file lines (without newlines)."""
     makers = [clutch_line, clutch_circle, clutch_rotation, clutch_reengage, clutch_jump,
               clutch_stall, clutch_release_moving, clutch_into_body, clutch_singularity,
               clutch_shoulder, clutch_fast, clutch_step, clutch_joint_limit, clutch_reach,
-              clutch_scale_switch, gate_absent,
+              clutch_scale_switch, clutch_keepout_slide, clutch_keepout_reverse,
+              clutch_into_body_slow, arm_only,
+              gate_absent,
               gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
               gate_seq_backwards]
     return {maker.__name__: maker() for maker in makers}

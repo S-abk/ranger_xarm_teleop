@@ -51,15 +51,26 @@ One call of ``solve`` turns the tool target of a cycle into the joint velocity c
    ``(distance - margin) / tau`` (a velocity damper), ``tau`` chosen so the bound reaches
    the joint velocity limit at ``limit_zone`` from the limit. A joint that would exceed its
    bound is fixed at it and the rest is solved again without it.
+5b. **Link keep-out (G-15),** when a model is given (``keepout.py``): for every sphere
+   pair of the model within its influence distance, the clearance ``d`` may fall at most
+   at ``max(d - margin - 0.5 mm, 0) / keepout_time``: a row
+   ``n^T J_c qdot >= -max(d - m', 0) / tau``. If the solution above breaks a row it is
+   replaced by the nearest command (in tool motion, orientation weighted 0.3, plus a small
+   weight on joint motion) that keeps every row and every joint position bound: a small
+   convex problem solved exactly (least distance programming). Only the approach is
+   removed; motion along and away from the structure keeps its speed. Rows that cannot
+   all hold give zero joint velocity. The 0.5 mm inside the margin covers the second-order
+   drift of a step along a curved boundary, which the linear rows do not see.
 6. **One scale factor** for the whole vector, so the direction of motion is kept: every
    joint within ``velocity_fraction`` of its velocity limit, and the tool's linear and
    angular speed within the caps, for the twist ``J qdot`` at the reference and for the
    actual step of one cycle (forward kinematics), which on a curved path can be longer.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
-from typing import Dict, Optional, Sequence, Tuple
+import time
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -73,6 +84,10 @@ LIMIT_NONE = ''
 LIMIT_JOINT_POSITION = 'joint_position'
 LIMIT_JOINT_VELOCITY = 'joint_velocity'
 LIMIT_TOOL_SPEED = 'tool_speed'
+LIMIT_LINK_KEEPOUT = 'link_keepout'
+# m: the damper aims this far outside the margin, so the second-order drift of a step
+# along a curved boundary (the linear rows see only the first order) stays outside it.
+KEEPOUT_TARGET_INSIDE = 0.0005
 
 
 @dataclass(frozen=True)
@@ -93,11 +108,15 @@ class SolverParams:
     limit_margin: float = 0.15          # rad: no motion toward a position limit closer than this
     limit_zone: float = 0.35            # rad: the damper starts slowing a joint from here
     velocity_fraction: float = 0.95     # share of each joint velocity limit that is used
+    # s: the link keep-out lets a clearance d fall at most at (d - margin) / keepout_time.
+    # Like the gain, period / keepout_time <= 27/256: no ringing at the boundary with the
+    # reference three cycles old.
+    keepout_time: float = 0.2
 
     def __post_init__(self) -> None:
         for name in ('linear_speed_cap', 'angular_speed_cap', 'period', 'gain',
                      'damping_threshold', 'max_damping', 'orientation_max_damping',
-                     'limit_margin'):
+                     'limit_margin', 'keepout_time'):
             value = getattr(self, name)
             if not (isinstance(value, (int, float)) and math.isfinite(value) and value > 0.0):
                 raise ValueError(f'{name}: expected a finite positive number, got {value!r}')
@@ -105,6 +124,8 @@ class SolverParams:
             raise ValueError('limit_zone must be larger than limit_margin')
         if not 0.0 < self.velocity_fraction <= 1.0:
             raise ValueError('velocity_fraction: expected a value in (0, 1]')
+        if self.period / self.keepout_time > STABLE_GAIN_PERIOD:
+            raise ValueError(f'period / keepout_time must be at most {STABLE_GAIN_PERIOD:.4f}')
         if self.gain * self.period > STABLE_GAIN_PERIOD:
             raise ValueError(f'gain * period must be at most {STABLE_GAIN_PERIOD:.4f}: no '
                              'ringing with the reference up to three cycles old')
@@ -297,6 +318,16 @@ class Solution:
     scale: float                        # the one factor applied to the whole vector
     limit: str                          # LIMIT_*: what limited the command, '' if nothing
     fixed: Tuple[str, ...] = ()         # joints held at a position bound
+    # Link keep-out (G-15). Clearance: the model's smallest clearance at the reference (m;
+    # inf without a model; a lower bound when nothing is within the model's influence).
+    keepout_clearance: float = math.inf
+    keepout_pair: Tuple[str, str] = ('', '')
+    keepout_bound: bool = False         # the keep-out shaped this command
+    # m/s, base frame: tool velocity the position-type constraints (joint position bounds,
+    # keep-out) took out of the command, before the speed scaling. Zero when none bound.
+    blocked: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    keepout_seconds: float = 0.0        # time spent on the keep-out this cycle (model and fix)
+    keepout_cpu_seconds: float = 0.0    # the same, CPU time of the calling thread only
 
     @property
     def damped(self) -> bool:
@@ -305,12 +336,15 @@ class Solution:
 
 
 def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams,
-          feedforward: Optional[Sequence[float]] = None) -> Solution:
+          feedforward: Optional[Sequence[float]] = None, keepout=None,
+          extra: Optional[Mapping[str, float]] = None) -> Solution:
     """
     Return the joint velocities that drive the tool from reference ``q`` toward ``target``.
 
     ``target`` is a 4 x 4 tool pose in the base frame. ``feedforward`` is the target's own
     twist ``(vx, vy, vz, wx, wy, wz)`` in m/s and rad/s, base frame (zero by default).
+    ``keepout`` is a link keep-out model (``keepout.Model``) on the same joints, ``extra``
+    the measured values of the joints it needs that are not arm joints.
     """
     q = np.asarray(q, dtype=float)
     target = np.asarray(target, dtype=float)
@@ -335,16 +369,75 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
     low, high = position_bounds(arm, q, params)
     low_n, high_n = low / arm.velocity, high / arm.velocity
 
-    n = len(q)
+    rows = None
+    clearance, pair = math.inf, ('', '')
+    began, began_cpu = time.perf_counter(), time.thread_time()
+    if keepout is not None:
+        if list(keepout.joint_names) != list(arm.joint_names):
+            raise ValueError("the keep-out model is not on the arm's joints")
+        rows = keepout.evaluate(q, extra)
+        clearance, pair = rows.clearance, rows.nearest
+    model_seconds = time.perf_counter() - began
+    model_cpu = time.thread_time() - began_cpu
+    began, began_cpu = time.perf_counter(), time.thread_time()
+    result = _constrained(arm, jn, yn, low_n, high_n, rows, keepout, params)
+    z, z_first, first_levels, fixed, bound, infeasible = result
+    fix_seconds = time.perf_counter() - began if bound else 0.0
+    fix_cpu = time.thread_time() - began_cpu if bound else 0.0
+    if infeasible:
+        qdot, scale, limit, linear, angular = np.zeros_like(q), 0.0, LIMIT_LINK_KEEPOUT, 0.0, 0.0
+    else:
+        qdot, scale, limit, linear, angular = _scaled(
+            arm, q, jac, current, z, fixed, bound, capped, params)
+    blocked = jac[:3] @ ((z_first - z) * arm.velocity) if (fixed or bound) else np.zeros(3)
+    return Solution(qdot=qdot, conditioning=first_levels.conditioning,
+                    damping=first_levels.damping,
+                    error_translation=float(np.linalg.norm(dp)),
+                    error_rotation=float(np.linalg.norm(dr)),
+                    linear_speed=linear, angular_speed=angular,
+                    scale=scale, limit=limit, fixed=fixed,
+                    keepout_clearance=clearance, keepout_pair=pair, keepout_bound=bound,
+                    blocked=blocked,
+                    keepout_seconds=(model_seconds + fix_seconds) if keepout is not None
+                    else 0.0,
+                    keepout_cpu_seconds=(model_cpu + fix_cpu) if keepout is not None
+                    else 0.0)
+
+
+def _rows_normalised(arm: Arm, rows, keepout, params: SolverParams):
+    """Return ``(A, L)``: the keep-out rows as ``A z >= L`` in normalised joint units."""
+    a = rows.grad * arm.velocity[None, :]
+    target = keepout.margin + KEEPOUT_TARGET_INSIDE
+    lower = -np.maximum(rows.distance - target, 0.0) / params.keepout_time
+    return a, lower
+
+
+def _constrained(arm: Arm, jn: np.ndarray, yn: np.ndarray, low_n: np.ndarray,
+                 high_n: np.ndarray, rows, keepout, params: SolverParams):
+    """
+    Return the solution under the position-type constraints (joint bounds, keep-out rows).
+
+    ``(z, z_first, first_levels, fixed, bound, infeasible)``: ``z_first`` is the first pass
+    (no constraint), ``bound`` whether the keep-out changed the solution, ``infeasible``
+    whether the rows cannot all hold (the command is then zero).
+
+    The joint bounds are handled as before (a joint over its bound is fixed and the rest
+    solved again). If that solution breaks a keep-out row, it is corrected by the smallest
+    change in tool position (orientation weighted ``KEEPOUT_ORIENTATION_WEIGHT``) that
+    satisfies every row and every joint bound: a small convex problem solved exactly.
+    """
+    n = jn.shape[1]
     free = np.ones(n, dtype=bool)
     z = np.zeros(n)
-    first_levels = None
+    first_levels, z_first = None, None
     for _ in range(n + 1):
         rhs = yn - jn[:, ~free] @ z[~free]
         sub, lv = _priority(jn[:, free], rhs, params)
         if first_levels is None:
             first_levels = lv
         z[free] = sub
+        if z_first is None:
+            z_first = z.copy()
         over = free & ((z > high_n + 1e-12) | (z < low_n - 1e-12))
         if not over.any():
             break
@@ -352,8 +445,97 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
         free &= ~over
     z = np.clip(z, low_n, high_n)        # only reached if every pass fixed a joint
     fixed = tuple(name for name, f in zip(arm.joint_names, free) if not f)
-    limit = LIMIT_JOINT_POSITION if fixed else (LIMIT_TOOL_SPEED if capped else LIMIT_NONE)
+    if rows is None or len(rows.distance) == 0:
+        return z, z_first, first_levels, fixed, False, False
+    a, lower = _rows_normalised(arm, rows, keepout, params)
+    if not np.any(lower - a @ z > 1e-9 * (1.0 + np.linalg.norm(a, axis=1))):
+        return z, z_first, first_levels, fixed, False, False
+    # min (z - z*)^T H (z - z*)  s.t.  a z >= lower,  low <= z <= high.
+    # Tool motion across the commanded direction costs more than along it: where the
+    # command cannot be followed, the tool slows on the hand's line rather than leave it.
+    w = np.zeros((6, 6))
+    w[:3, :3] = np.eye(3)
+    speed = float(np.linalg.norm(yn[:3]))
+    if speed > 1e-9:
+        u = yn[:3] / speed
+        w[:3, :3] += KEEPOUT_ACROSS_WEIGHT * (np.eye(3) - np.outer(u, u))
+    w[3:, 3:] = KEEPOUT_ORIENTATION_WEIGHT ** 2 * np.eye(3)
+    h = jn.T @ w @ jn + KEEPOUT_REGULARISATION * np.eye(n)
+    g = np.vstack([a, np.eye(n), -np.eye(n)])
+    bound = np.concatenate([lower, low_n, -high_n])
+    finite = np.isfinite(bound)
+    solved = _least_change(h, z, g[finite], bound[finite])
+    if solved is None:
+        return np.zeros(n), z_first, first_levels, fixed, True, True
+    return solved, z_first, first_levels, fixed, True, False
 
+
+KEEPOUT_ACROSS_WEIGHT = 10.0         # tool motion across the commanded direction, extra
+KEEPOUT_ORIENTATION_WEIGHT = 0.3     # orientation yields to position in the correction
+KEEPOUT_REGULARISATION = 0.05       # weight of joint motion itself (normalised): keeps the
+#                                      correction from trading large joint swings for tool motion
+
+
+def _least_change(h: np.ndarray, start: np.ndarray, g: np.ndarray,
+                  bound: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Return ``z`` minimising ``(z - start)^T h (z - start)`` with ``g z >= bound``, or None.
+
+    None when the constraints contradict each other. Least distance programming
+    (Lawson and Hanson): with ``h = R^T R`` and ``x = R (z - start)`` it is the shortest
+    ``x`` with ``g R^-1 x >= bound - g start``, found by non-negative least squares.
+    """
+    r = np.linalg.cholesky(h).T
+    rinv = np.linalg.inv(r)
+    gg = g @ rinv
+    hh = bound - g @ start
+    n = gg.shape[1]
+    e = np.vstack([gg.T, hh[None, :]])
+    f = np.zeros(n + 1)
+    f[n] = 1.0
+    u = _nnls(e, f)
+    residual = e @ u - f
+    if np.linalg.norm(residual) < 1e-10 or abs(residual[n]) < 1e-12:
+        return None
+    x = -residual[:n] / residual[n]
+    z = start + rinv @ x
+    if np.any(g @ z < bound - 1e-7 * (1.0 + np.abs(bound))):
+        return None
+    return z
+
+
+def _nnls(e: np.ndarray, f: np.ndarray, max_iter: int = 200) -> np.ndarray:
+    """Return ``u >= 0`` minimising ``|e u - f|`` (Lawson and Hanson's active set)."""
+    m = e.shape[1]
+    u = np.zeros(m)
+    passive = np.zeros(m, dtype=bool)
+    w = e.T @ (f - e @ u)
+    tol = 10.0 * np.finfo(float).eps * np.abs(e).sum(axis=0).max() * max(e.shape)
+    for _ in range(max_iter):
+        if passive.all() or not np.any(w[~passive] > tol):
+            break
+        j = int(np.argmax(np.where(passive, -np.inf, w)))
+        passive[j] = True
+        while True:
+            s = np.zeros(m)
+            s[passive] = np.linalg.lstsq(e[:, passive], f, rcond=None)[0]
+            if np.all(s[passive] > tol):
+                break
+            mask = passive & (s <= tol)
+            alpha = np.min(u[mask] / np.maximum(u[mask] - s[mask], 1e-300))
+            u = u + alpha * (s - u)
+            passive &= u > tol
+            u[~passive] = 0.0
+        u = s
+        w = e.T @ (f - e @ u)
+    return u
+
+
+def _scaled(arm: Arm, q: np.ndarray, jac: np.ndarray, current: np.ndarray, z: np.ndarray,
+            fixed, bound: bool, capped: bool, params: SolverParams):
+    """Return ``(qdot, scale, limit, linear, angular)`` after the one scale factor."""
+    limit = LIMIT_JOINT_POSITION if fixed else (
+        LIMIT_LINK_KEEPOUT if bound else (LIMIT_TOOL_SPEED if capped else LIMIT_NONE))
     qdot = z * arm.velocity
     scale = 1.0
     joint_scale = float(np.min(np.where(np.abs(qdot) > 1e-12,
@@ -370,21 +552,21 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
     qdot = qdot * scale
     # The caps hold for the twist J qdot; the step of one cycle follows the arm's curved
     # path, which can be slightly longer. Check the step itself and scale once more.
-    after = tool_pose(arm, q + qdot * params.period)
-    step_p, step_r = pose_error(after, current)
-    linear = float(np.linalg.norm(step_p)) / params.period
-    angular = float(np.linalg.norm(step_r)) / params.period
+    linear, angular = _step_speeds(arm, q, qdot, current, params)
     over = max(linear / params.linear_speed_cap, angular / params.angular_speed_cap)
     if over > 1.0:
         qdot = qdot / over
         scale, limit = scale / over, LIMIT_TOOL_SPEED
         linear, angular = linear / over, angular / over
-    return Solution(qdot=qdot, conditioning=first_levels.conditioning,
-                    damping=first_levels.damping,
-                    error_translation=float(np.linalg.norm(dp)),
-                    error_rotation=float(np.linalg.norm(dr)),
-                    linear_speed=linear, angular_speed=angular,
-                    scale=scale, limit=limit, fixed=fixed)
+    return qdot, scale, limit, linear, angular
+
+
+def _step_speeds(arm: Arm, q: np.ndarray, qdot: np.ndarray, current: np.ndarray,
+                 params: SolverParams) -> Tuple[float, float]:
+    after = tool_pose(arm, q + qdot * params.period)
+    step_p, step_r = pose_error(after, current)
+    return (float(np.linalg.norm(step_p)) / params.period,
+            float(np.linalg.norm(step_r)) / params.period)
 
 
 def twist_between(previous: np.ndarray, current: np.ndarray, period: float) -> np.ndarray:

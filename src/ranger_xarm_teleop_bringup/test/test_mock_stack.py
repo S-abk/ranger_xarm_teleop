@@ -27,8 +27,8 @@ from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 
-from stack_helpers import (child_environment, Probe, Process, READY, replay,
-                           replay_with_clean_input)
+from stack_helpers import (BODY_OBSTACLE, BODY_OBSTACLE_LINK, child_environment, INTO_BODY_START,
+                           Probe, Process, READY, replay, replay_with_clean_input)
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
 ELSEWHERE = [0.3, -0.4, -0.9, 0.2, 1.1, -0.3]
@@ -233,9 +233,13 @@ def test_handing_back_to_moveit_does_not_jump_and_moveit_works_again(stack):
 def test_target_into_self_collision_ends_in_a_stop_reported_in_teleop_state(stack):
     probe, env, logs, _ = stack
     probe.disarm()
-    probe.move_to(READY)
+    probe.move_to(INTO_BODY_START)
+    probe.scene_box(*BODY_OBSTACLE, attach_to=BODY_OBSTACLE_LINK)
     start_tool = probe.tool_position()
-    states = run_replay(probe, env, logs, 'clutch_into_body', 10.0)
+    try:
+        states = run_replay(probe, env, logs, 'clutch_into_body', 10.0)
+    finally:
+        probe.remove_scene_box(BODY_OBSTACLE[0], attach_to=BODY_OBSTACLE_LINK)
     engaged = [s for s in states if s.clutch_engaged]
     assert len(engaged) > 60
     # MoveIt Servo slowed the arm near the collision (reported as the active limit) ...
@@ -255,6 +259,59 @@ def test_target_into_self_collision_ends_in_a_stop_reported_in_teleop_state(stac
     last = [s.measured_tool_pose.position.x for s in states[-40:]]
     assert max(last) - min(last) < 0.001
     assert math.isclose(end_tool[0], last[-1], abs_tol=0.002)
+    probe.disarm()
+
+
+def test_slowly_into_a_free_scene_object_ends_in_the_stuck_release(stack):
+    """
+    An obstacle in the world, not part of the robot: the session 2 behaviour.
+
+    The link keep-out does not know a free planning-scene object, and MoveIt Servo only
+    slows the arm near it (exponentially within its 20 mm scene band; it halts at contact
+    only). The hand pulls slowly, so the arm cannot cross the band into contact between two
+    of Servo's collision checks: it crawls, and the teleop node's own release of an arm stuck
+    near a collision ends the engagement, before any contact.
+    """
+    probe, env, logs, _ = stack
+    probe.disarm()
+    probe.move_to(INTO_BODY_START)
+    start_tool = probe.tool_position()
+    probe.scene_box(*BODY_OBSTACLE)
+    try:
+        # A release on late input data before the grip ends says nothing about the
+        # obstacle: such a run is repeated, and printed. (The stuck release is not a
+        # late-data release, so it is never repeated.)
+        start, _ = replay_with_clean_input(
+            probe, env, str(logs / 'replay_into_body_slow.log'), 'clutch_into_body_slow',
+            expected_engaged_s=11.0, before=lambda: probe.move_to(INTO_BODY_START))
+        time.sleep(1.0)
+        states = probe.states_since(start)
+    finally:
+        probe.remove_scene_box(BODY_OBSTACLE[0])
+    engaged = [s for s in states if s.clutch_engaged]
+    assert len(engaged) > 60
+    released = [i for i, s in enumerate(states)
+                if s.hold_reason == TeleopState.HOLD_SERVO_HALTED]
+    assert released, 'the arm was never released'
+    first = released[0]
+    # Released by the node while MoveIt Servo was still slowing the arm, not halted ...
+    assert states[first].servo_status == ServoStatus.DECELERATE_FOR_COLLISION
+    # ... and the arm never reached contact. servo_status is the latest code received: in the
+    # first engaged cycle it can still show how the previous test's engagement ended, until
+    # MoveIt Servo reports again (no warning: the arm starts well away from the box).
+    since = next((i for i, s in enumerate(states)
+                  if s.clutch_engaged and s.servo_status == ServoStatus.NO_WARNING), None)
+    assert since is not None and since < first, 'MoveIt Servo never reported while engaged'
+    assert not any(s.servo_status == ServoStatus.HALT_FOR_COLLISION for s in states[since:])
+    # MoveIt Servo's slowing is reported (while it crawls, the gate's lead clamp, which this
+    # node reports in preference, alternates with it).
+    assert any(s.clutch_engaged and s.active_limit == TeleopState.LIMIT_SERVO
+               for s in states[:first])
+    assert not any(s.clutch_engaged for s in states[first:])    # grip held: latched
+    end_tool = probe.tool_position()
+    assert 0.05 < start_tool[0] - end_tool[0] < 0.23
+    last = [s.measured_tool_pose.position.x for s in states[-40:]]
+    assert max(last) - min(last) < 0.001
     probe.disarm()
 
 

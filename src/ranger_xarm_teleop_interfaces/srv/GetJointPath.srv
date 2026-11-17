@@ -1,0 +1,8 @@
+# The joint path the teleop node recorded while teleop was armed, oldest point first: the
+# measured joint positions, a point whenever a joint had moved by at least 2 mrad, each with
+# its time (time_from_start from header.stamp, the first point's joint-state stamp).
+# Bounded to the last 60 s and 3000 points. Read by the retreat tool.
+---
+trajectory_msgs/JointTrajectory path
+# Why the path is empty, or how it was bounded.
+string message

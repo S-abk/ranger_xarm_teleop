@@ -66,6 +66,7 @@ LIMITS = {
     'max_lead_translation_m': 0.05,
     'max_lead_rotation_deg': 12.0,
     'max_translation_scale': 2.0,
+    'link_keepout_margin_m': 0.025,
 }
 TIP_IN_TOOL = Pose((0.0, 0.0, -0.10), (0.0, 0.0, 0.0, 1.0))
 TCP_START = pose_from_matrix(dls.tool_pose(
@@ -1019,6 +1020,17 @@ def test_slow_and_late_cycles_are_counted_once_a_minute():
     assert 'longest 13 ms, target and joint command 12 ms (solve 0.4 ms)' in text
     assert '1 cycles started over 30 ms after the previous one (longest 50 ms)' in text
     assert counter.report(200.0) == ''                      # nothing counted since
+
+
+def test_the_cycle_summary_since_the_last_one_is_given_at_shutdown():
+    counter = teleop_node.CycleCounter()
+    counter.started(0.0, 0.02)
+    counter.keepout_step(0.001, 0.0008)
+    counter.reference_age(0.011)
+    assert counter.report(40.0) == ''                       # not due yet ...
+    text = counter.report(40.0, final=True)                 # ... but given at shutdown
+    assert text.startswith('link keep-out: 1 steps, median 1.00 ms')
+    assert 'CPU of this thread: median 0.80 ms' in text and 'age: median 11 ms' in text
 
 
 def test_frames_keep_their_buttons_through_a_30_ms_executor_stall(ros):

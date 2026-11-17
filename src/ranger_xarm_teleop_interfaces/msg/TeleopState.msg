@@ -48,6 +48,7 @@ uint8 LIMIT_LEAD = 5               # G-14: target clamped to the lead limit, exc
 uint8 LIMIT_TOOL_SPEED = 6         # G-8: joint command scaled to the tool speed caps
 uint8 LIMIT_JOINT_VELOCITY = 7     # G-8: joint command scaled to the joint velocity limits
 uint8 LIMIT_JOINT_POSITION = 8     # G-8: a joint held at its position bound, the rest re-solved
+uint8 LIMIT_LINK_KEEPOUT = 9       # G-15: motion toward the robot's fixed structure removed
 uint8 active_limit
 
 # Latest moveit_msgs/ServoStatus code; -1 when none was received.
@@ -95,3 +96,23 @@ float64 commanded_angular_speed
 # not: while engaged it is the scale in use, otherwise the one the next engagement uses.
 # Hand translation is multiplied by it; rotation is never scaled.
 float64 translation_scale
+
+# G-15 link keep-out: the arm's links (and the tool) against the robot's own fixed structure,
+# from a model built from the robot description at start-up (spheres covering each moving
+# link; it never reports more clearance than the collision geometry has).
+# Clearance (m): the smallest over all pairs, at the measured joint state (updated at 10 Hz,
+# 2 Hz while engaged). Exact within the keep-out's influence distance (the margin + 60 mm);
+# larger values are a lower bound. NaN when there is no model or no joint state.
+float64 keepout_clearance
+# The pair with that clearance: a moving link (arm or tool) and a fixed link (or, for the
+# tool, an arm link). Empty when the clearance is not exact.
+string keepout_link
+string keepout_obstacle
+# G-12: the same at the solver's reference (MoveIt Servo's commanded state) while the clutch
+# is engaged; NaN otherwise.
+float64 keepout_clearance_commanded
+# The keep-out shaped this cycle's joint command (also when another limit is reported in
+# active_limit).
+bool keepout_bound
+# The margin in use (m), from the limits.
+float64 keepout_margin
