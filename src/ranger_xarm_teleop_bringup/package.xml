@@ -9,6 +9,7 @@
 
   <exec_depend>ranger_xarm_teleop_servo</exec_depend>
   <exec_depend>ranger_xarm_teleop_bridge</exec_depend>
+  <exec_depend>ranger_xarm_teleop_record</exec_depend>
   <exec_depend>ranger_xarm_moveit_config</exec_depend>
   <exec_depend>ranger_xarm_description</exec_depend>
   <exec_depend>moveit_servo</exec_depend>

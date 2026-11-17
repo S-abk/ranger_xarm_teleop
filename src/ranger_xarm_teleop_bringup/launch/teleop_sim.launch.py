@@ -49,6 +49,13 @@ def generate_launch_description():
         DeclareLaunchArgument('teleop_params_file', default_value=''),
         DeclareLaunchArgument('tool_frame', default_value='xarm_link_tcp'),
         DeclareLaunchArgument('gripper_enabled', default_value='true'),
+        DeclareLaunchArgument(
+            'record', default_value='false',
+            description='Start the demonstration recorder and episode node (paused until X).'),
+        DeclareLaunchArgument('record_profile', default_value='gazebo'),
+        DeclareLaunchArgument('record_data_dir', default_value=''),
+        DeclareLaunchArgument('record_session', default_value=''),
+        DeclareLaunchArgument('record_extra', default_value=''),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(isaac_share, 'launch', 'moveit.launch.py')),
@@ -68,4 +75,15 @@ def generate_launch_description():
                 'gripper_enabled': LaunchConfiguration('gripper_enabled'),
                 'moveit_gripper_controller': 'xarm_xarm_gripper_traj_controller',
             }.items()),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(share, 'launch', 'record.launch.py')),
+            launch_arguments={
+                'profile': LaunchConfiguration('record_profile'),
+                'data_dir': LaunchConfiguration('record_data_dir'),
+                'session': LaunchConfiguration('record_session'),
+                'record_extra': LaunchConfiguration('record_extra'),
+                'limits_file': os.path.join(share, 'config', 'SIMULATION_ONLY_limits.yaml'),
+                'tool_frame': LaunchConfiguration('tool_frame'),
+            }.items(),
+            condition=IfCondition(LaunchConfiguration('record'))),
     ])

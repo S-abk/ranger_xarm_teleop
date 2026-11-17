@@ -144,12 +144,34 @@ def git_root(path: str) -> Optional[str]:
         p = parent
 
 
-def data_dir_problem(path: str) -> Optional[str]:
-    """Return why ``path`` may not hold recordings (inside a git checkout), or None."""
-    root = git_root(path)
-    if root is not None:
-        return (f'the data directory {path} is inside the git checkout {root}; '
-                'recordings must stay out of any repository')
+def _ignored(root: str, path: str) -> bool:
+    """Return True when git would ignore ``path`` in the work tree ``root``."""
+    import subprocess
+    try:
+        done = subprocess.run(['git', '-C', root, 'check-ignore', '-q', path],
+                              capture_output=True, timeout=10.0, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def data_dir_problem(path: str, code_root: Optional[str] = None) -> Optional[str]:
+    """
+    Return why ``path`` may not hold recordings, or None.
+
+    Never inside this code's own checkout (``code_root``, default: the tree holding this
+    file), even in an ignored folder; inside any other git work tree only where that
+    tree ignores the path, so a recording can never be committed by accident.
+    """
+    p = os.path.abspath(os.path.expanduser(path))
+    own = code_root if code_root is not None else git_root(os.path.realpath(__file__))
+    if own is not None and (p == own or p.startswith(own.rstrip(os.sep) + os.sep)):
+        return (f'the data directory {path} is inside the code checkout {own}; '
+                'recordings must stay out of the repository')
+    root = git_root(p)
+    if root is not None and not _ignored(root, p):
+        return (f'the data directory {path} is inside the git work tree {root} and not '
+                'ignored there; recordings must never be committable')
     return None
 
 

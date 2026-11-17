@@ -39,6 +39,11 @@ setup(
     entry_points={
         'console_scripts': [
             'episode_node = ranger_xarm_teleop_record.episode_node:main',
+            'episode_labels = ranger_xarm_teleop_record.cli:labels_main',
+            'episode_check = ranger_xarm_teleop_record.cli:check_main',
+            'episode_export = ranger_xarm_teleop_record.cli:export_main',
+            'episode_purge = ranger_xarm_teleop_record.cli:purge_main',
+            'record_commission = ranger_xarm_teleop_record.commission:main',
         ],
     },
 )

@@ -11,8 +11,8 @@ frames:
   base: xarm_link_base
   tool: xarm_link_tcp           # default; the tool_frame parameter in force is recorded too
 recorder:
-  node: episode_recorder
-  namespace: /teleop
+  node: teleop_episode_recorder
+  namespace: ""
   storage: mcap
   storage_preset: zstd_fast     # MCAP chunk compression, lossless
   max_cache_size_mb: 512

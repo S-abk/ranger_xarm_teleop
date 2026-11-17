@@ -107,14 +107,18 @@ def viewer(orientation: Quat = (0.0, 0.0, 0.0, 1.0), emulated: bool = False) -> 
 
 
 def line(i: int, right: Optional[Dict[str, Any]], head: Optional[Dict[str, Any]],
-         reset_count: int = 0, seq: Optional[int] = None, session_id: int = SESSION_ID) -> str:
-    """Return one recording line for frame index ``i``."""
+         reset_count: int = 0, seq: Optional[int] = None, session_id: int = SESSION_ID,
+         left: Optional[Dict[str, Any]] = None) -> str:
+    """Return one recording line for frame index ``i`` (``left``: the left controller)."""
     t_xr = round(T_XR_START_MS + i * 1000.0 / RATE_HZ, 6)
     jitter = 0.0004 * math.sin(1.7 * i) + 0.0002 * math.sin(0.37 * i)
+    controllers = {} if right is None else {'right': right}
+    if left is not None:
+        controllers['left'] = left
     frame = {'type': 'xr_frame', 't_client': round(t_xr + 0.4, 6), 't_xr': t_xr,
              'seq': i if seq is None else seq, 'reset_count': reset_count,
              'session_id': session_id,
-             'controllers': {} if right is None else {'right': right}, 'viewer': head}
+             'controllers': controllers, 'viewer': head}
     return json.dumps({'t_recv': round(T_RECV_START + i / RATE_HZ + jitter, 6), 'msg': frame},
                       ensure_ascii=False, allow_nan=False)
 
@@ -564,6 +568,95 @@ def gripper_speed_closed() -> List[str]:
 def arm_only() -> List[str]:
     """Calibrate and arm, then hold the controller still without gripping (3 s)."""
     return record(3.0, lambda t: (START, yaw(CAL_YAW_DEG)), lambda t: False)
+
+
+# Demonstration episodes (not written by main(): the recording tests generate them into a
+# temporary directory, they are too long to keep as files). The left controller rests 0.3 m to the left of the right one; its
+# X and Y buttons are the xr-standard slots 4 and 5 (the same slots as A and B on the right),
+# its trigger is slot 0. X starts and stops an episode, Y keeps it, Y held 1 s discards it,
+# the left trigger marks a moment.
+
+
+def left_hand(x: bool = False, y: bool = False, trigger: float = 0.0) -> Dict[str, Any]:
+    """Return the left controller entry, at rest, with X, Y and its trigger."""
+    return hand(at_offset(0.0, 0.30), yaw(CAL_YAW_DEG), False, a=x, b=y, trigger=trigger)
+
+
+def within(t: float, windows: List[Tuple[float, float]]) -> bool:
+    """Return True when ``t`` lies in one of the (start, end) windows."""
+    return any(a <= t < b for a, b in windows)
+
+
+EPISODE_PERIOD = 6.0
+EPISODE_DIRECTIONS = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0),
+                      (0.7, 0.7, 0.0), (0.7, -0.7, 0.0), (0.7, 0.0, 0.7), (0.0, 0.7, 0.7),
+                      (0.0, -0.7, 0.7), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+
+
+def episodes_ten() -> List[str]:
+    """
+    Ten kept demonstration episodes and one discarded, scripted on the left controller.
+
+    Calibrate and arm (A, B) as in every fixture; episode k starts at 1.5 + 6 k s: X
+    (start) at +0.0, the clutch held +0.6 to +3.8 with the hand 70 mm out along the
+    episode's direction (+0.9, 1.0 s) and back (+2.3, 1.0 s), turning 10 deg about the
+    vertical on episodes 4 to 6; the right trigger closes the gripper at +1.0 and opens
+    it at +2.6; the left trigger marks at +1.8; X (stop) at +4.2; Y at +4.8 for 0.2 s
+    (keep), on the eleventh episode for 1.2 s (discard). 67.5 s in all.
+    """
+    starts = [1.5 + EPISODE_PERIOD * k for k in range(len(EPISODE_DIRECTIONS))]
+
+    def episode(t: float):
+        k = max((j for j, s0 in enumerate(starts) if t >= s0), default=None)
+        return (k, t - starts[k]) if k is not None else (None, 0.0)
+
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        k, u = episode(t)
+        if k is None:
+            return START, HELD
+        d = 0.07 * (smooth(u, 0.9, 1.0) - smooth(u, 2.3, 1.0))
+        dx, dy, dz = (d * c for c in EPISODE_DIRECTIONS[k])
+        turn = 10.0 * (smooth(u, 0.9, 1.0) - smooth(u, 2.3, 1.0)) if 4 <= k <= 6 else 0.0
+        return at_offset(dx, dy, dz), qmul(yaw(CAL_YAW_DEG + turn), TILT)
+
+    def grip(t: float) -> bool:
+        k, u = episode(t)
+        return k is not None and 0.6 <= u < 3.8
+
+    def change(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        k, u = episode(t)
+        if k is None:
+            return line(i, right, viewer(), left=left_hand())
+        trig = ramp(u, [(1.0, 0.0), (1.05, 1.0), (2.6, 1.0), (2.65, 0.0)])
+        if trig:
+            right['buttons'] = buttons(right['buttons'][1]['p'], False, False, trig)
+        y_end = 6.0 if k == len(starts) - 1 else 5.0
+        left = left_hand(x=within(u, [(0.0, 0.15), (4.2, 4.35)]), y=4.8 <= u < y_end,
+                         trigger=0.8 if 1.8 <= u < 2.0 else 0.0)
+        return line(i, right, viewer(), left=left)
+    return record(starts[-1] + EPISODE_PERIOD, motion, grip, change)
+
+
+def episode_marks_engaged() -> List[str]:
+    """
+    Every episode press while the clutch is held and the hand moving (INV-1 of recording).
+
+    Grip held 1.2-13.0 s; the hand sways 30 mm forward and back (period 4 s) from 1.5 s.
+    X at 2.0 (start), left trigger mark at 3.0, X at 4.5 (stop), Y at 5.0 (keep); X at 6.0
+    (start), X at 8.0 (stop), Y held 8.5-9.8 (discard); X at 10.5 (start), X at 12.0 (stop),
+    Y at 12.4 (keep). Released at 13.0.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        return at_offset(0.03 * smooth(t, 1.5, 1.0) * math.sin(2.0 * math.pi * (t - 1.5) / 4.0)), \
+            HELD
+
+    def change(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        x = within(t, [(2.0, 2.15), (4.5, 4.65), (6.0, 6.15), (8.0, 8.15), (10.5, 10.65),
+                       (12.0, 12.15)])
+        y = within(t, [(5.0, 5.2), (8.5, 9.8), (12.4, 12.6)])
+        left = left_hand(x=x, y=y, trigger=0.8 if 3.0 <= t < 3.2 else 0.0)
+        return line(i, right, viewer(), left=left)
+    return record(13.5, motion, held_until(13.0), change)
 
 
 def generate() -> Dict[str, List[str]]:
