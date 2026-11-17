@@ -540,6 +540,27 @@ def gripper_absent_release() -> List[str]:
                   with_trigger(trigger, gap))
 
 
+def speed_motion(t: float) -> Tuple[Vec, Quat]:
+    """Return 0.12 m forward over 3.2-4.4 s and back over 4.6-5.8 s (peak 0.19 m/s)."""
+    return along(0.12 * (smooth(t, 3.2, 1.2) - smooth(t, 4.6, 1.2))), HELD
+
+
+def gripper_speed_open() -> List[str]:
+    """
+    Return the tool speed reference: grip 3.0-6.2 s, ``speed_motion``, trigger released.
+
+    ``gripper_speed_closed`` is the same hand motion with the gripper closed: the arm must
+    move the same with the gripper open and closed.
+    """
+    return record(6.6, speed_motion, lambda t: 3.0 <= t < 6.2)
+
+
+def gripper_speed_closed() -> List[str]:
+    """Return ``gripper_speed_open`` with the trigger pressed at 1.8 s (closed by 2.7 s)."""
+    return record(6.6, speed_motion, lambda t: 3.0 <= t < 6.2,
+                  with_trigger([(1.8, 0.0), (1.85, 1.0)]))
+
+
 def arm_only() -> List[str]:
     """Calibrate and arm, then hold the controller still without gripping (3 s)."""
     return record(3.0, lambda t: (START, yaw(CAL_YAW_DEG)), lambda t: False)
@@ -555,7 +576,7 @@ def generate() -> Dict[str, List[str]]:
               gate_absent,
               gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
               gate_seq_backwards, gripper_clutch_strokes, gripper_dropout, gripper_stall,
-              gripper_absent_release]
+              gripper_absent_release, gripper_speed_open, gripper_speed_closed]
     return {maker.__name__: maker() for maker in makers}
 
 

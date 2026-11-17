@@ -14,6 +14,7 @@
 """Fixed Joy layout: names, index mapping and zero filling."""
 
 import json
+import math
 
 from parse_helpers import button, hand, valid_frame
 from ranger_xarm_teleop_bridge import joy_layout
@@ -54,6 +55,15 @@ def test_output_lengths_and_types():
     assert set(buttons) == {0}
 
 
+NAN = float('nan')
+
+
+def same(a, b):
+    """Tuple equality in which NaN equals NaN (a trigger axis without a controller)."""
+    return len(a) == len(b) and all(x == y or (math.isnan(x) and math.isnan(y))
+                                    for x, y in zip(a, b))
+
+
 def test_right_hand_mapping():
     frame = valid_frame()
     right = frame['controllers']['right']
@@ -90,24 +100,25 @@ def test_analog_value_is_independent_of_pressed():
     assert axes[4] == 0.4 and buttons[5] == 0
 
 
-def test_missing_hand_gives_zero_block():
+def test_missing_hand_gives_zero_block_with_a_nan_trigger():
     frame = valid_frame()
     frame['controllers']['left']['buttons'][0] = button(True, 1.0)
     frame['controllers']['right']['buttons'][0] = button(True, 1.0)
     frame['controllers']['right']['axes'] = [0.0, 0.0, 0.5, 0.5]
     del frame['controllers']['right']
     axes, buttons = build_joy_arrays(parsed(frame))
-    assert axes == (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    assert same(axes, (1.0, 0.0, 0.0, 0.0, NAN, 0.0, 0.0, 0.0))
     assert buttons == (1, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     frame['controllers'] = {}
-    assert build_joy_arrays(parsed(frame)) == ((0.0,) * 8, (0,) * 10)
+    axes, buttons = build_joy_arrays(parsed(frame))
+    assert same(axes, (NAN, 0.0, 0.0, 0.0, NAN, 0.0, 0.0, 0.0)) and buttons == (0,) * 10
 
 
-def test_hand_tracked_gives_zero_block():
+def test_hand_tracked_gives_zero_block_with_a_nan_trigger():
     frame = valid_frame()
     frame['controllers']['left'] = {'hand_tracked': True}
     axes, buttons = build_joy_arrays(parsed(frame))
-    assert axes[:4] == (0.0,) * 4 and buttons[:5] == (0,) * 5
+    assert same(axes[:4], (NAN, 0.0, 0.0, 0.0)) and buttons[:5] == (0,) * 5
 
 
 def test_short_button_list_gives_zeros_for_the_missing_buttons():
@@ -126,8 +137,8 @@ def test_source_with_fewer_than_four_axes_is_not_a_controller():
     frame['controllers']['right'] = hand(
         buttons=[button(True, 1.0), button(True, 1.0)], axes=[0.1, 0.2, 0.3])
     axes, buttons = build_joy_arrays(parsed(frame))
-    assert axes[4:] == (0.0,) * 4 and buttons[5:] == (0,) * 5
+    assert same(axes[4:], (NAN, 0.0, 0.0, 0.0)) and buttons[5:] == (0,) * 5
     frame['controllers']['right'] = hand(buttons=[button(True, 1.0)] * 10, axes=[])
     axes, buttons = build_joy_arrays(parsed(frame))
-    assert axes[4:] == (0.0,) * 4 and buttons[5:] == (0,) * 5
+    assert same(axes[4:], (NAN, 0.0, 0.0, 0.0)) and buttons[5:] == (0,) * 5
     assert axes[:4] == (0.0,) * 4 and buttons[:5] == (0,) * 5   # left untouched: unpressed

@@ -85,6 +85,7 @@ from ranger_xarm_teleop_interfaces.srv import GetJointPath, SetArmOwner
 from ranger_xarm_teleop_servo import gripper as grip
 from ranger_xarm_teleop_servo import keepout as ko
 from ranger_xarm_teleop_servo import params as gate_params
+from ranger_xarm_teleop_servo import rigid_pairs
 from ranger_xarm_teleop_servo import solver as dls
 from ranger_xarm_teleop_servo.frames import (ARM_BUTTON, CALIBRATE_BUTTON, CLUTCH_BUTTON,
                                              SCALE_BUTTON, TRIGGER_AXIS)
@@ -118,8 +119,6 @@ JOINT_PATH_SERVICE = '/teleop/joint_path'
 KEEPOUT_INFO_SERVICE = '/teleop/keepout_info'
 GRIPPER_COMMAND_TOPIC = '/teleop/gripper/command'
 GRIPPER_HELD_TOPIC = '/teleop/gripper/held'
-# Gate conditions under which the gripper may be commanded: none, or only the grip released.
-GRIPPER_INPUT_OK = (Hold.NONE, Hold.CLUTCH_RELEASED)
 KEEPOUT_SLOW_S = 0.002      # a keep-out step longer than this is reported
 KEEPOUT_FLOOR_SLACK = 1e-4  # m: the clearance falling more below its floor is reported
 TARGET_PERIOD_MS = 20.0     # for the reference-age summary only
@@ -433,6 +432,8 @@ class TeleopNode(Node):
         self._keepout_tried = False
         self.keepout_floor = math.inf       # clearance the next cycle may not fall below
         self.servo_description_compared = False
+        self.servo_pairs_checked = False    # rigid self-collision pairs reported once
+        self.servo_rigid_pairs: Optional[list] = None   # None: not derived (yet)
         self.path = PathRecorder()
         self._idle_count = 0
         self._idle_clearance = None
@@ -617,9 +618,9 @@ class TeleopNode(Node):
             self._diagnose_frame(status, key, now - arrival)
             frame = self.build_frame(status, arrival)
             if (self.gripper_params.enabled
-                    and frame_fault(self.state.frame, frame, self.params) != Hold.NONE):
-                # Every frame counts, clutch held or not: a trip between two cycles
-                # freezes the gripper in the next one.
+                    and frame_fault(self.state.frame, frame) != Hold.NONE):
+                # Every frame counts, clutch held or not: a session or sequence fault
+                # between two cycles freezes the gripper in the next one.
                 self.gripper_tripped = True
             self.state = on_frame(self.state, frame, self.params)
             for store in (self._poses, self._heads, self._joys):
@@ -1151,7 +1152,7 @@ class TeleopNode(Node):
             self.solver_fault = ''
         marks.append(('target and joint command', self.mono()))
         if self.gripper_params.enabled:
-            self.gripper_cycle(now, owner, output, joints, stamp)
+            self.gripper_cycle(now, owner, joints, stamp, tool_age)
             marks.append(('gripper', self.mono()))
         self.publish_calibration(stamp)
         self.manage_servo(now, output.want_servo_active)
@@ -1207,8 +1208,14 @@ class TeleopNode(Node):
 
         return clearance
 
-    def gripper_cycle(self, now: float, owner: int, output, joints, stamp) -> None:
-        """Run the gripper logic for this cycle and publish its command with ``stamp``."""
+    def gripper_cycle(self, now: float, owner: int, joints, stamp,
+                      joint_age: float = math.inf) -> None:
+        """
+        Run the gripper logic for this cycle and publish its command with ``stamp``.
+
+        ``joint_age``: the age of the newest joint state, by local arrival and by its stamp,
+        the larger (``measured``); beyond ``tool_pose_timeout`` the gripper freezes.
+        """
         owned = owner == ArmOwner.OWNER_TELEOP and self.owner_gripper
         if not owned:
             self.gripper_owner_since = None
@@ -1218,10 +1225,12 @@ class TeleopNode(Node):
         latest = self.gripper_held
         if owned and latest is not None and latest[0] > self.gripper_owner_since:
             held = latest[1]        # produced after teleop's controller became active
+        # Joint states recent enough to check the finger keep-out: the same age, by arrival
+        # and by stamp, and the same timeout as the arm's measured tool pose.
+        joints_fresh = joint_age <= self.params.tool_pose_timeout
         measured = None
         sample = self.gripper_measured()
-        if (sample is not None and self.joint_state_arrival is not None
-                and now - self.joint_state_arrival <= self.params.tool_pose_timeout):
+        if sample is not None and joints_fresh:
             measured = sample[0]
         frame = self.state.frame
         inputs = grip.GripperInputs(
@@ -1229,10 +1238,12 @@ class TeleopNode(Node):
             armed=(self.params.motion_enabled and self.state.want_armed
                    and not self.state.arm_pending),
             owner=owned,
-            input_ok=output.condition in GRIPPER_INPUT_OK and not self.gripper_tripped,
+            input_ok=grip.input_ok(frame is not None,
+                                   now - frame.arrival if frame is not None else math.inf,
+                                   self.params.input_timeout, self.gripper_tripped),
             trigger=frame.trigger if frame is not None else None,
             held=held, measured=measured, clearance=self.gripper_clearance(joints),
-            margin=self.keepout_margin)
+            margin=self.keepout_margin, joints_fresh=joints_fresh)
         self.gripper_tripped = False
         self.gripper_state, out = grip.step(self.gripper_state, inputs, self.gripper_params)
         self.gripper_output = out
@@ -1633,6 +1644,58 @@ class TeleopNode(Node):
         self.servo_refusal = ''
         self.servo_verified = True
         self.compare_servo_description()
+        self.check_servo_rigid_pairs()
+
+    def check_servo_rigid_pairs(self) -> None:
+        """
+        Ask MoveIt Servo once for its description and SRDF; log the rigid pairs it checks.
+
+        A pair with no joint of the servoed group between its links keeps its distance
+        however the arm moves, yet MoveIt Servo slows every joint while it is within the
+        self-collision threshold (a closed gripper). Such pairs are derived from the
+        description (``rigid_pairs``) and listed at start-up as SRDF lines, so they can be
+        disabled where MoveIt reads its collision matrix. Nothing is taken out of any check
+        here: Servo follows move_group's collision matrix, not this node.
+        """
+        if self.servo_pairs_checked or not self.servo_description_client.service_is_ready():
+            return
+        self.servo_pairs_checked = True
+        future = self.servo_description_client.call_async(GetParameters.Request(
+            names=['robot_description', 'robot_description_semantic',
+                   'moveit_servo.move_group_name']))
+
+        def answered(done) -> None:
+            log = self.get_logger()
+            try:
+                values = done.result().values
+            except Exception as err:  # noqa: B902 - reported; nothing depends on it
+                log.warning(f'MoveIt Servo description and SRDF not read: {err}')
+                self.servo_pairs_checked = False
+                return
+            texts = [v.string_value for v in values] if len(values) == 3 else []
+            if not texts or not all(texts):
+                log.warning('MoveIt Servo reports no robot_description, '
+                            'robot_description_semantic or move_group_name; its '
+                            'self-collision pairs were not checked')
+                return
+            try:
+                pairs = rigid_pairs.rigid_pairs(*texts)
+            except rigid_pairs.DescriptionError as err:
+                log.warning(f"MoveIt Servo's self-collision pairs were not checked: {err}")
+                return
+            self.servo_rigid_pairs = pairs
+            if not pairs:
+                log.info(f'MoveIt Servo: no enabled self-collision pair without a joint of '
+                         f'{texts[2]!r} between its links')
+                return
+            log.warning(
+                f'MoveIt Servo checks {len(pairs)} self-collision pairs with no joint of '
+                f'{texts[2]!r} between the two links: arm motion cannot change their '
+                'distance, yet Servo slows every joint while one is within its '
+                'self-collision threshold (for example with the gripper closed). Disable '
+                "them in the SRDF move_group reads (Servo follows move_group's collision "
+                'matrix):\n' + '\n'.join(rigid_pairs.srdf_lines(pairs)))
+        future.add_done_callback(answered)
 
     def compare_servo_description(self) -> None:
         """Ask MoveIt Servo once for its robot description and compare it with the model's."""

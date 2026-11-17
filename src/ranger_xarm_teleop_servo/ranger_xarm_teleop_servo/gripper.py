@@ -21,9 +21,12 @@ not the trigger, is the recorded action.
 
 When the gripper may be commanded ("active"): gripper teleop is enabled, teleop is
 armed, teleop owns the gripper (the mux swaps it with the arm), the input is valid
-(the gate's clutch-independent condition holds and no frame since the last cycle tripped
-anything) and the newest frame carries a trigger value in [0, 1]. The clutch is not
-part of it: the trigger works while the clutch is released.
+(``input_ok``: a frame, fresh by local arrival, and no session or sequence fault in any
+frame since the last cycle), the newest frame carries a trigger value in [0, 1], and the
+joint states are fresh enough to check the finger keep-out. The trigger is a button, not
+a pose: the clutch, the pose-only conditions (controller out of view, emulated position,
+input jump, headset pose) and the arm-side conditions (solver, MoveIt Servo, tool pose,
+target step) are not part of it.
 
 Freeze: any cycle that is not active sends nothing, so the gripper holds the last
 command it was given. On becoming active again (arming, or the end of a freeze):
@@ -78,6 +81,7 @@ class Hold(IntEnum):
     NO_REFERENCE = 5        # waiting for the opening the controller holds
     AWAIT_TRIGGER = 6       # active, holding the reference until the trigger crosses
     KEEP_OUT = 7            # a step toward the robot's fixed structure was not taken
+    JOINTS_STALE = 8        # joint states too old to check the finger keep-out
 
 
 class Request(IntEnum):
@@ -235,7 +239,7 @@ class GripperInputs:
     now: float                              # monotonic s
     armed: bool
     owner: bool                             # teleop owns the gripper
-    input_ok: bool                          # gate condition holds, no trip since the last cycle
+    input_ok: bool                          # see ``input_ok()``
     trigger: Optional[float]                # newest frame's trigger, None when missing
     held: Optional[float] = None            # controller's held reference after the switch
     measured: Optional[float] = None        # measured opening, None when unknown
@@ -243,6 +247,7 @@ class GripperInputs:
     # None when there is no keep-out. NaN (cannot be evaluated) holds the command.
     clearance: Optional[Callable[[float], float]] = None
     margin: float = 0.0
+    joints_fresh: bool = True               # joint states recent enough for the keep-out
 
 
 @dataclass(frozen=True)
@@ -255,6 +260,20 @@ class GripperOutput:
     source: Source
     hold: Hold
     events: Tuple[str, ...] = ()
+
+
+def input_ok(frame_present: bool, input_age: float, input_timeout: float,
+             tripped: bool) -> bool:
+    """
+    Return whether the input may command the gripper this cycle.
+
+    ``frame_present``: a frame has arrived; ``input_age``: s since the newest frame arrived
+    (local clock), stale beyond ``input_timeout``; ``tripped``: a frame since the last
+    cycle showed a session or sequence fault (``gate.frame_fault``). Nothing else about the
+    input counts: the trigger is a button, so pose-only and arm-side conditions do not
+    freeze the gripper.
+    """
+    return bool(frame_present) and input_age <= input_timeout and not tripped
 
 
 def _toward(value: float, goal: float, step: float) -> float:
@@ -296,6 +315,8 @@ def step(state: GripperState, inputs: GripperInputs,
         hold = Hold.NOT_OWNER
     elif not inputs.input_ok or trigger is None:
         hold = Hold.INPUT
+    elif not inputs.joints_fresh:
+        hold = Hold.JOINTS_STALE
     if hold != Hold.NONE:
         if state.active:
             events.append(f'gripper frozen: {hold.name}')

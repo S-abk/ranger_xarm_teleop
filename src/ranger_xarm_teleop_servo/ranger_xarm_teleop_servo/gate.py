@@ -258,20 +258,22 @@ def _pose_reason(frame: Frame, params: GateParams) -> Hold:
     return Hold.NONE
 
 
-def frame_fault(prev: Optional[Frame], frame: Frame, params: GateParams) -> Hold:
+def frame_fault(prev: Optional[Frame], frame: Frame) -> Hold:
     """
-    Return what one frame trips with the clutch set aside, or NONE.
+    Return the session or sequence fault one frame shows against the previous one, or NONE.
 
-    The same checks ``on_frame`` makes against the previous frame (session, reset count,
-    sequence, time) and on the frame itself (G-4 pose conditions), whether or not the
-    clutch is held. A raw controller jump (INPUT_JUMP) is left out: it concerns the pose
-    only, and while the clutch is held it trips the gate itself. Used by the gripper.
+    Used by the gripper, for every frame, clutch held or not: the XR session id changed
+    (SESSION_CHANGED), or the sequence number or the headset time did not move forward
+    (SEQ_BACKWARDS). Pose-only conditions (G-4 pose reasons, a raw jump, a reference-space
+    reset) are not faults of the gripper's input: the trigger is a button.
     """
-    if prev is not None:
-        tripped, _ = _between_frames(prev, frame, params)
-        if tripped not in (Hold.NONE, Hold.INPUT_JUMP):
-            return tripped
-    return _pose_reason(frame, params)
+    if prev is None:
+        return Hold.NONE
+    if frame.session_id != prev.session_id:
+        return Hold.SESSION_CHANGED
+    if frame.seq <= prev.seq or frame.xr_time - prev.xr_time <= 0.0:
+        return Hold.SEQ_BACKWARDS
+    return Hold.NONE
 
 
 def _between_frames(prev: Frame, frame: Frame, params: GateParams) -> Tuple[Hold, str]:

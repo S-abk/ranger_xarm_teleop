@@ -13,7 +13,7 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 | `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, damped least-squares solver, MoveIt Servo joint-jog commands), command mux node, gripper relay node, and the pure modules behind them with their tests |
 | `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator, simulation-only limit values |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
-| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py` |
+| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py`, `servo_rigid_pairs.py` |
 | `recordings/` | Local headset recordings (git-ignored) |
 
 ## Build and test
@@ -106,7 +106,9 @@ Axes (float), left block then right block:
 | | L trigger value | L grip value | L stick x | L stick y | R trigger value | R grip value | R stick x | R stick y |
 
 Values are the raw WebXR `xr-standard` gamepad values, not flipped. A missing hand, or a
-source that is not a real controller, gives zeros for its block.
+source that is not a real controller (a tracked hand), gives zeros for its block, except the
+trigger value: it is NaN whenever there is no trigger value (no controller, or a controller
+that sends none), never 0.0, which would read as released.
 
 **Verified on a Quest 3 Touch Plus** (`recordings/button_clip.jsonl`, right controller, each
 control operated once in the order trigger, grip, thumbstick click, A, B, then the four stick
@@ -385,12 +387,17 @@ carries a fixed tool in the gripper can never have it opened by teleop.
   `/teleop/state`. `/teleop/state` carries the command in force in every cycle
   (`gripper_command`, also while frozen) and, separately, the measured opening
   (`gripper_measured`, from `/joint_states`, with that message's stamp).
-- **When it is commanded.** Armed, teleop owns the gripper (see Command mux), the input is
-  valid (no gate condition other than the released grip, and no frame since the last cycle
-  that trips the gate: absent, emulated or out-of-view controller, headset pose, session,
-  reset count, sequence), and the newest frame has a trigger value in [0, 1]. Otherwise
+- **When it is commanded.** The trigger is a button, not a pose: the gripper depends on the
+  trigger and on what concerns the gripper. It is commanded while armed, teleop owns the
+  gripper (see Command mux), the input is fresh (a frame within the input timeout, by
+  arrival) with no session or sequence fault in any frame since the last cycle, the newest
+  frame has a trigger value in [0, 1] (a lost or put-down controller has none), and the joint
+  states are recent enough (`tool_pose_timeout_s`) to check the finger keep-out. Otherwise
   nothing is sent and the gripper holds its last command (`gripper_hold`: `NOT_ARMED`,
-  `NOT_OWNER`, `INPUT`).
+  `NOT_OWNER`, `INPUT`, `JOINTS_STALE`). Pose-only conditions (controller out of view,
+  emulated position, a raw input jump, the headset pose, a reference-space reset, no
+  calibration) and arm-side conditions (solver, MoveIt Servo, tool pose, a rejected target
+  step) hold the arm but not the gripper, clutch held or not.
 - **Arming never moves it.** The first command is the opening the gripper is already holding:
   teleop's own last command after an interruption, else what the controller holds after the
   owner switch (the previous owner's last command, reported by the gripper relay on
@@ -409,6 +416,29 @@ carries a fixed tool in the gripper can never have it opened by teleop.
   no command timeout, so a finger blocked on an object keeps its squeeze) and reports the
   opening that controller holds. The hardware adapter (a `GripperCommand` action client) is
   not built; the relay refuses `mode:=action`.
+
+#### A closed gripper and MoveIt Servo's speed
+
+MoveIt Servo slows every joint while any self-collision pair its collision matrix leaves
+enabled is within `self_collision_proximity_threshold` (10 mm in `config/servo.yaml`), in
+every direction of motion. Pairs inside the gripper, or between a finger and the link the
+gripper is mounted on, keep their distance however the arm moves, but a closed gripper brings
+some within 10 mm: with the robot workspace's description a finger is 7.8 mm from the gripper
+base when closed (14.5 mm open), and while such pairs were enabled the arm ran at about a fifth
+of the commanded speed. The robot workspace's SRDF now disables them.
+
+Such pairs are derived from the description, with no link names (`rigid_pairs.py`): both
+links have collision geometry, are moved by the arm, have no joint of MoveIt Servo's group
+between them, and are left enabled by the SRDF. The teleop node logs them at start-up as
+`<disable_collisions>` lines; `tools/servo_rigid_pairs.py --urdf FILE --srdf FILE` prints the
+same. They belong in the SRDF move_group reads: MoveIt Servo takes move_group's collision
+matrix (it asks move_group for the planning scene when it starts), so an SRDF given to Servo
+alone has no effect. For move_group, disabling them changes nothing for arm plans; for the
+gripper's own motion it gives up the check of those pairs; with the robot workspace's
+description, sampled every 0.01 rad over the gripper's range, none comes closer than 7.8 mm.
+The mock and Gazebo stack tests that compare the tool speed with the gripper open and closed,
+and the mock test that drives the closed gripper into the robot's body, skip, naming the
+pairs, while any is left enabled.
 
 ### Measuring a run
 

@@ -51,7 +51,13 @@ def test_controller_without_buttons_has_a_nan_trigger():
     assert axes[TRIGGER + 1] == 0.0          # the grip value keeps its zero filling
 
 
-def test_absent_hand_keeps_its_zero_block():
+def test_absent_or_hand_tracked_right_hand_has_a_nan_trigger():
+    # Released would be 0.0: losing the controller must not open the gripper.
     frame = valid_frame()
     del frame['controllers']['right']
-    assert axes_of(frame)[4:] == (0.0,) * 4
+    axes = axes_of(frame)
+    assert math.isnan(axes[TRIGGER]) and axes[TRIGGER + 1:] == (0.0,) * 3
+    frame = valid_frame()
+    frame['controllers']['right'] = {'hand_tracked': True}
+    axes = axes_of(frame)
+    assert math.isnan(axes[TRIGGER]) and axes[TRIGGER + 1:] == (0.0,) * 3
