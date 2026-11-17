@@ -44,28 +44,38 @@ def frame(**kw):
 @pytest.mark.parametrize('change, expected', [
     ({}, Hold.NONE),
     ({'session_id': 2}, Hold.SESSION_CHANGED),
-    ({'reset_count': 1}, Hold.RESET_CHANGED),
     ({'seq': 5}, Hold.SEQ_BACKWARDS),
-    ({'controller_present': False}, Hold.POSE_ABSENT),
-    ({'controller_emulated': True}, Hold.POSE_EMULATED),
-    ({'head_emulated': True}, Hold.HEAD_EMULATED),
+    ({'seq': 10}, Hold.SEQ_BACKWARDS),
+    ({'xr_time': 0.0}, Hold.SEQ_BACKWARDS),
+    ({'session_id': 2, 'reset_count': 1}, Hold.SESSION_CHANGED),
+    ({'reset_count': 1, 'seq': 5}, Hold.SEQ_BACKWARDS),
 ])
-def test_frame_fault_sees_every_trip_whatever_the_clutch(change, expected):
+def test_frame_fault_sees_session_and_sequence_faults_whatever_the_clutch(change, expected):
     prev = frame(arrival=0.0, xr_time=0.0)
     now = replace(frame(arrival=0.011, xr_time=0.011, seq=11), **change)
-    assert frame_fault(prev, now, PARAMS) == expected
+    assert frame_fault(prev, now) == expected
 
 
-def test_frame_fault_leaves_a_raw_controller_jump_to_the_gate():
+@pytest.mark.parametrize('change', [
+    {'reset_count': 1},
+    {'controller_present': False},
+    {'controller': None},
+    {'controller_emulated': True},
+    {'head_present': False},
+    {'head': None},
+    {'head_emulated': True},
+    {'controller': Pose((HAND.p[0] + 0.3, HAND.p[1], HAND.p[2]), HAND.q)},    # raw jump
+    {'controller': Pose((HAND.p[0], HAND.p[1] - 1.0, HAND.p[2] + 2.0), HAND.q)},   # out of view
+])
+def test_frame_fault_ignores_pose_only_conditions(change):
     prev = frame(arrival=0.0, xr_time=0.0)
-    jumped = frame(arrival=0.011, xr_time=0.011, seq=11,
-                   controller=Pose((HAND.p[0] + 0.3, HAND.p[1], HAND.p[2]), HAND.q))
-    assert frame_fault(prev, jumped, PARAMS) == Hold.NONE
+    now = replace(frame(arrival=0.011, xr_time=0.011, seq=11), **change)
+    assert frame_fault(prev, now) == Hold.NONE
 
 
-def test_frame_fault_of_the_first_frame_is_its_pose_condition():
-    assert frame_fault(None, frame(), PARAMS) == Hold.NONE
-    assert frame_fault(None, frame(controller=None), PARAMS) == Hold.POSE_ABSENT
+def test_frame_fault_of_the_first_frame_is_none():
+    assert frame_fault(None, frame()) == Hold.NONE
+    assert frame_fault(None, frame(controller=None, controller_present=False)) == Hold.NONE
 
 
 def test_gate_output_reports_the_condition_with_the_grip_set_aside():

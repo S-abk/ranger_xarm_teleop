@@ -30,7 +30,7 @@ values but never ``pressed``; ``[2]``, ``[6]`` and the left controller's extra
 
 Output, left block then right block. A missing hand, a source that is not a
 real controller (``ParsedFrame.controller``), or a missing button or axis, gives
-zeros.
+zeros, except on the trigger axes (below).
 
 Buttons (10 ints, 1 when ``pressed``):
 
@@ -46,8 +46,10 @@ Index  Name              Index  Name
 
 Axes (8 floats): per hand, trigger and grip are the analog ``value`` of
 ``buttons[0]`` and ``buttons[1]``; the thumbstick x and y are ``axes[2]`` and
-``axes[3]``. A present controller that sends no trigger, or no analog value for it, gets NaN
-on its trigger axis (never 0.0, which means released); an absent hand gets zeros.
+``axes[3]``. A trigger axis is NaN, never 0.0 (which means released), whenever there is no
+trigger value: no controller for that hand (missing, or a tracked hand), or a controller that
+sends no trigger or no analog value for it. The gripper reads the trigger as a level and
+freezes on a missing value; it does not depend on the controller's pose.
 
 =====  ===================  =====  ====================
 Index  Name                 Index  Name
@@ -100,10 +102,11 @@ def _hand_axes(hand: Optional[HandSample]) -> Tuple[float, ...]:
         return float(hand.buttons[index].value)
 
     def trigger() -> float:
-        # A present controller whose trigger or its analog value is missing reports NaN, never
-        # 0.0: the gripper reads the trigger as a level, and 0.0 would mean "released".
+        # No controller, or a controller whose trigger or its analog value is missing:
+        # NaN, never 0.0. The gripper reads the trigger as a level, and 0.0 would mean
+        # "released" (it would open the gripper when the controller is lost).
         if hand is None:
-            return 0.0
+            return math.nan
         buttons = hand.buttons
         if XR_BUTTON_TRIGGER >= len(buttons) or not buttons[XR_BUTTON_TRIGGER].value_sent:
             return math.nan

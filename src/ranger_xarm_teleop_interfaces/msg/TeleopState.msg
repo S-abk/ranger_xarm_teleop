@@ -129,10 +129,11 @@ uint8 GRIPPER_HOLD_NONE = 0
 uint8 GRIPPER_HOLD_DISABLED = 1
 uint8 GRIPPER_HOLD_NOT_ARMED = 2
 uint8 GRIPPER_HOLD_NOT_OWNER = 3      # teleop does not own the gripper (the mux swaps it with the arm)
-uint8 GRIPPER_HOLD_INPUT = 4          # a gate condition or trip, stale input, or no valid trigger value
+uint8 GRIPPER_HOLD_INPUT = 4          # stale input, a session or sequence fault, or no valid trigger value
 uint8 GRIPPER_HOLD_NO_REFERENCE = 5   # waiting for the opening the controller holds
 uint8 GRIPPER_HOLD_AWAIT_TRIGGER = 6  # after arming or a freeze: holding until the trigger crosses a threshold
 uint8 GRIPPER_HOLD_KEEP_OUT = 7       # G-15: a step toward the robot's fixed structure was not taken
+uint8 GRIPPER_HOLD_JOINTS_STALE = 8   # joint states too old to check the finger keep-out
 uint8 gripper_hold
 # The command in force, every cycle: the last command teleop sent (or the reference it holds)
 # while teleop owns the gripper. When teleop holds none (not the owner yet or any more, or the

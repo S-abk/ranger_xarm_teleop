@@ -72,6 +72,7 @@ class GripperHarness(Harness):
         self.force_owner = None         # ArmOwner value to report regardless of arming
         self.short_axes = False         # Joy without the trigger axis
         self.relay = True               # the relay reports the held reference
+        self.joints_paused = False      # no new joint state arrives (stale joint states)
         self.cycles = []                # per cycle: (t, targets, grips, state)
         self.actions = {}               # time -> callable, run before that cycle
 
@@ -100,10 +101,11 @@ class GripperHarness(Harness):
         owned = node.owner == ArmOwner.OWNER_TELEOP and node.owner_gripper
         if owned and self.relay:
             node.gripper_held = (now, self.controller)      # the relay's report
-        stamp_ns = node.get_clock().now().nanoseconds
-        node.joint_state = (now, stamp_ns, {**dict(zip(JOINTS, self.measured_q)),
-                                            JOINT: self.measured_gripper})
-        node.joint_state_arrival = now
+        if not self.joints_paused:
+            stamp_ns = node.get_clock().now().nanoseconds
+            node.joint_state = (now, stamp_ns, {**dict(zip(JOINTS, self.measured_q)),
+                                                JOINT: self.measured_gripper})
+            node.joint_state_arrival = now
         before = (len(self.targets), len(self.grips), len(self.states))
         super().tick(now)
         grips = self.grips[before[1]:]
@@ -361,7 +363,7 @@ def ramping(h, start=2.0, end=2.3):
     return commands[-1]
 
 
-def freeze(h, after, until):
+def freeze(h, after, until, hold=TeleopState.GRIPPER_HOLD_INPUT):
     """Return (first frozen cycle time, part-closed command, last frozen cycle time)."""
     frozen = [c for c in h.cycles if after <= c[0] < until and not c[2]]
     assert frozen
@@ -372,7 +374,7 @@ def freeze(h, after, until):
     assert OPEN < part < CLOSED
     # The command in force stays in the state while nothing is sent (approval addition 1).
     assert all(c[3].gripper_command == part for c in window)
-    assert all(c[3].gripper_hold == TeleopState.GRIPPER_HOLD_INPUT for c in window)
+    assert all(c[3].gripper_hold == hold for c in window)
     return first, part, last
 
 
@@ -471,6 +473,130 @@ def test_freeze_on_a_gate_trip_between_frames_with_the_clutch_released(harness):
     assert_held_awaiting(h, 2.6, 3.5, part)
 
 
+def test_freeze_on_a_session_change_with_the_clutch_released(harness):
+    h = harness()
+
+    def edit(t, parsed):
+        # From 2.2 s the frames carry a new XR session id (G-4), clutch released.
+        return replace(parsed, session_id=parsed.session_id + 1) if t >= 2.19 else parsed
+    h.play('gripper_dropout', edit=edit)
+    first, part, last = freeze(h, 2.15, 2.3)
+    assert 2.18 <= first <= 2.24
+    assert_held_awaiting(h, last + 0.03, 2.3, part)
+
+
+def test_freeze_on_stale_joint_states_mid_ramp(harness):
+    h = harness()
+    # Closing between clutch strokes (trigger pressed at 2.7 s); no joint state 2.9-3.1 s.
+    h.actions[2.9] = lambda hh: setattr(hh, 'joints_paused', True)
+    h.actions[3.1] = lambda hh: setattr(hh, 'joints_paused', False)
+    h.play('gripper_clutch_strokes')
+    first, part, last = freeze(h, 2.9, 3.15, hold=TeleopState.GRIPPER_HOLD_JOINTS_STALE)
+    assert 2.98 <= first <= 3.04                    # tool_pose_timeout (0.1 s) after the last
+    assert 3.08 <= last <= 3.12
+    # Held until the trigger crosses again (the re-grip wobble rises through 0.6 at 3.27 s).
+    assert_held_awaiting(h, last + 0.03, 3.25, part)
+    assert h.commands_between(3.3, 3.4)[-1] > part
+
+
+POSE_ONLY_REASONS = (TeleopState.HOLD_POSE_EMULATED, TeleopState.HOLD_OUT_OF_VIEW,
+                     TeleopState.HOLD_HEAD_ABSENT, TeleopState.HOLD_HEAD_EMULATED,
+                     TeleopState.HOLD_INPUT_JUMP, TeleopState.HOLD_POSE_ABSENT)
+
+
+def _right(parsed, **changes):
+    return replace(parsed, right=replace(parsed.right, **changes))
+
+
+POSE_ONLY_EDITS = {
+    'emulated position': lambda p: _right(p, emulated_position=True),
+    'out of view': lambda p: _right(p, position=(p.right.position[0], p.right.position[1],
+                                                 p.right.position[2] + 1.6)),
+    'headset pose absent': lambda p: replace(p, viewer=None),
+    'headset emulated': lambda p: replace(p, viewer=replace(p.viewer, emulated_position=True)),
+}
+
+
+@pytest.mark.parametrize('name', list(POSE_ONLY_EDITS))
+def test_pose_only_conditions_do_not_freeze_the_gripper_clutch_released(harness, name):
+    h = harness()
+    change = POSE_ONLY_EDITS[name]
+    # gripper_absent_release: clutch released, pressed at 1.5 s, closing until about
+    # 2.4 s; the condition is on 1.8-2.0 s, mid-ramp.
+    h.play('gripper_absent_release', edit=lambda t, p: change(p) if 1.8 <= t < 2.0 else p)
+    window = [c for c in h.cycles if 1.83 <= c[0] < 2.0]
+    reasons = {c[3].hold_reason for c in window}
+    assert reasons and reasons <= set(POSE_ONLY_REASONS), reasons
+    # Every cycle of the condition sends a command, and the ramp goes on.
+    assert all(c[2] for c in window)
+    assert all(c[3].gripper_hold == TeleopState.GRIPPER_HOLD_NONE for c in window)
+    closing = [g.position for c in window for g in c[2]]
+    assert closing == sorted(closing) and closing[-1] - closing[0] > 0.1
+    assert h.commands_between(2.6, 2.9)[-1] == CLOSED
+
+
+def test_a_missing_controller_pose_with_the_trigger_present_does_not_freeze_it(harness):
+    h = harness()
+    # The pose message of 1.8-2.0 s never arrives (POSE_ABSENT); the Joy, with the
+    # trigger, does.
+    in_window = {}
+
+    def edit(t, parsed):
+        in_window[parsed.seq] = 1.8 <= t < 2.0
+        return parsed
+    h.play('gripper_absent_release', edit=edit,
+           drop=lambda parsed: ('pose',) if in_window.get(parsed.seq) else ())
+    window = [c for c in h.cycles if 1.86 <= c[0] < 2.0]
+    assert {c[3].hold_reason for c in window} == {TeleopState.HOLD_POSE_ABSENT}
+    assert all(c[2] for c in window)
+    assert all(c[3].gripper_hold == TeleopState.GRIPPER_HOLD_NONE for c in window)
+    assert h.commands_between(2.6, 2.9)[-1] == CLOSED
+
+
+def test_a_raw_input_jump_does_not_freeze_the_gripper(harness):
+    h = harness()
+
+    def edit(t, parsed):
+        if 1.8 <= t < 1.82:
+            return _right(parsed, position=(parsed.right.position[0] + 0.3,
+                                            parsed.right.position[1], parsed.right.position[2]))
+        return parsed
+    h.play('gripper_absent_release', edit=edit)
+    window = [c for c in h.cycles if 1.78 <= c[0] < 1.9]
+    assert all(c[2] for c in window)
+    assert all(c[3].gripper_hold == TeleopState.GRIPPER_HOLD_NONE for c in window)
+    assert h.commands_between(2.6, 2.9)[-1] == CLOSED
+
+
+def test_a_pose_only_trip_under_the_clutch_does_not_freeze_the_gripper(harness):
+    h = harness()
+
+    def edit(t, parsed):
+        # Stroke 3 (clutch held 5.2-6.4 s): the position is emulated 5.7-5.95 s, which
+        # trips the arm's gate until the next grip; the trigger is released at 5.8-5.9 s.
+        return _right(parsed, emulated_position=True) if 5.7 <= t < 5.95 else parsed
+    h.play('gripper_clutch_strokes', edit=edit)
+    tripped = [c for c in h.cycles if 5.75 <= c[0] < 6.3]
+    assert all(c[3].hold_reason in POSE_ONLY_REASONS for c in tripped)
+    assert all(c[2] for c in tripped)
+    assert h.commands_between(5.8, 5.85)[0] == CLOSED
+    assert h.commands_between(6.7, 6.8)[-1] == OPEN        # opened during the trip
+
+
+def test_arm_side_conditions_do_not_freeze_the_gripper(harness):
+    h = harness()
+    # Stroke 3: MoveIt Servo's output stops at 5.5 s (SERVO_NOT_READY under the clutch);
+    # the trigger is released at 5.8-5.9 s.
+    h.actions[5.5] = lambda hh: setattr(hh, 'output_on', False)
+    h.play('gripper_clutch_strokes')
+    held = [c for c in h.cycles if 5.75 <= c[0] < 6.3]
+    reasons = {c[3].hold_reason for c in held}
+    assert reasons and reasons.isdisjoint({TeleopState.HOLD_NONE,
+                                           TeleopState.HOLD_CLUTCH_RELEASED}), reasons
+    assert all(c[2] for c in held)
+    assert h.commands_between(6.7, 6.8)[-1] == OPEN
+
+
 def test_a_release_during_an_absence_does_not_open_the_gripper(harness):
     h = harness()
     h.play('gripper_absent_release')
@@ -556,10 +682,6 @@ NEAR_MAST = [2.4, -0.769, -0.81, 2.124, 1.204, 1.359]   # opening the fingers ne
 AWAY = [0.0, -0.6, -0.7, 0.0, 1.3, 0.0]
 
 
-class _Output:
-    condition = teleop_node.Hold.CLUTCH_RELEASED
-
-
 def keepout_gripper_node(ros):
     values = {**LIMITS, **GRIPPER, 'gripper_joint': 'finger_left_joint',
               'gripper_open_position': 0.04, 'gripper_closed_position': 0.0,
@@ -579,8 +701,10 @@ def run_cycles(node, q, finger, triggers, now, published):
         node.joint_state = (now, node.get_clock().now().nanoseconds,
                             {**dict(zip(KO_JOINTS, q)), 'finger_left_joint': finger[0]})
         node.joint_state_arrival = now
-        node.state = replace(node.state, frame=replace(node.state.frame, trigger=trigger))
-        node.gripper_cycle(now, ArmOwner.OWNER_TELEOP, _Output(), np.array(q),
+        # A fresh frame every cycle (the input is not stale).
+        node.state = replace(node.state, frame=replace(node.state.frame, trigger=trigger,
+                                                       arrival=now))
+        node.gripper_cycle(now, ArmOwner.OWNER_TELEOP, np.array(q),
                            node.get_clock().now().to_msg())
         if node.gripper_output.publish:
             finger[0] = node.gripper_output.command

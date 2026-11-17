@@ -33,6 +33,7 @@ pushed fully up (forward, away from the user) and nothing else: ``axes[3]`` is -
 settles the sign of stick y (negative up, as in the Gamepad API convention).
 """
 
+import math
 import os
 
 from parse_helpers import FIXTURE_DIR
@@ -73,7 +74,9 @@ def test_hands_clip_is_not_present_for_the_bridge():
             assert f.controller(side) is None
             assert f.is_hand_tracked(side) is True
         axes, buttons = build_joy_arrays(f)
-        assert axes == (0.0,) * 8 and buttons == (0,) * 10
+        # No controller: the trigger axes are NaN (missing, not released), the rest zeros.
+        assert all(math.isnan(axes[i]) for i in (0, 4))
+        assert [axes[i] for i in (1, 2, 3, 5, 6, 7)] == [0.0] * 6 and buttons == (0,) * 10
 
 
 def test_hands_clip_contains_a_pinch_that_never_reaches_joy():
@@ -163,17 +166,20 @@ def test_buttons_clip_confirms_the_joy_layout_in_the_recorded_order(name, hand, 
             axes, buttons = build_joy_arrays(f)
             pressed = {BUTTON_NAMES[i] for i, v in enumerate(buttons) if v}
             assert pressed == ({f'{hand}_{button}'} if button else set())
-            large = {AXIS_NAMES[i]: v for i, v in enumerate(axes) if abs(v) > 0.5}
+            large = {AXIS_NAMES[i]: v for i, v in enumerate(axes)
+                     if not math.isnan(v) and abs(v) > 0.5}
             assert set(large) == ({f'{hand}_{axis}'} if axis else set())
             if axis:
                 assert large[f'{hand}_{axis}'] * sign > 0.5
             sample = getattr(f, hand)
             if xr_index is not None:
                 assert [i for i, b in enumerate(sample.buttons) if b.pressed] == [xr_index]
-            # The other hand's block stays at zero; only this hand's block is used.
+            # The other hand is not in these clips: its block stays at zero, its trigger
+            # is missing (NaN); only this hand's block is used.
             other_buttons = buttons[:5] if hand == 'right' else buttons[5:]
             other_axes = axes[:4] if hand == 'right' else axes[4:]
-            assert other_buttons == (0,) * 5 and other_axes == (0.0,) * 4
+            assert other_buttons == (0,) * 5 and other_axes[1:] == (0.0,) * 3
+            assert math.isnan(other_axes[0])
 
 
 @pytest.mark.parametrize('name, hand, button_count', BUTTON_CLIPS)
@@ -194,7 +200,8 @@ def test_stick_up_clip_settles_the_y_sign():
         assert not any(b.pressed for b in f.right.buttons)
         axes, buttons = build_joy_arrays(f)
         assert buttons == (0,) * 10
-        assert axes[:7] == (0.0,) * 7 and axes[7] < -0.99
+        assert math.isnan(axes[0])                  # no left controller: trigger missing
+        assert axes[1:7] == (0.0,) * 6 and axes[7] < -0.99
         assert AXIS_NAMES[7] == 'right_thumbstick_y'
 
 

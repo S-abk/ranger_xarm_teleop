@@ -18,8 +18,8 @@ import math
 import pytest
 from ranger_xarm_teleop_servo.gripper import (build_gripper_params, check_joint_range,
                                               GripperInputs, GripperParams, GripperState,
-                                              Hold, MissingGripperValue, Request, Source, step,
-                                              valid_trigger)
+                                              Hold, input_ok, MissingGripperValue, Request,
+                                              Source, step, valid_trigger)
 
 OPEN, CLOSED, SPEED, PERIOD = 0.0, 0.849, 1.0, 0.02
 PARAMS = GripperParams(enabled=True, joint='xarm_drive_joint', open_position=OPEN,
@@ -28,10 +28,10 @@ STEP = SPEED * PERIOD
 
 
 def inputs(trigger=0.0, now=0.0, armed=True, owner=True, input_ok=True, held=None,
-           measured=None, clearance=None, margin=0.025):
+           measured=None, clearance=None, margin=0.025, joints_fresh=True):
     return GripperInputs(now=now, armed=armed, owner=owner, input_ok=input_ok,
                          trigger=trigger, held=held, measured=measured, clearance=clearance,
-                         margin=margin)
+                         margin=margin, joints_fresh=joints_fresh)
 
 
 class Run:
@@ -219,8 +219,8 @@ def test_without_reference_and_measurement_nothing_is_sent():
 
 FREEZES = {
     'disarm': {'armed': False},
-    'gate trip or condition': {'input_ok': False},
-    'stale input': {'input_ok': False},
+    'stale input, session or sequence fault': {'input_ok': False},
+    'joint states stale': {'joints_fresh': False},
     'missing trigger': {'trigger': None},
     'trigger not finite': {'trigger': math.nan},
     'trigger out of range': {'trigger': 1.5},
@@ -240,8 +240,8 @@ def test_a_freeze_sends_nothing_and_the_trigger_has_no_effect(name):
         kw.setdefault('trigger', value)
         out = run.cycle(**kw)
         assert not out.publish
-        expected_hold = {'disarm': Hold.NOT_ARMED, 'owner lost': Hold.NOT_OWNER}.get(
-            name, Hold.INPUT)
+        expected_hold = {'disarm': Hold.NOT_ARMED, 'owner lost': Hold.NOT_OWNER,
+                         'joint states stale': Hold.JOINTS_STALE}.get(name, Hold.INPUT)
         assert out.hold == expected_hold
         if name == 'owner lost':
             assert math.isnan(out.command)     # someone else may command it now
@@ -299,9 +299,42 @@ def test_a_crossing_during_a_freeze_is_not_acted_on():
 # ---- INV-2: the clutch is not an input of this module ----
 
 def test_the_command_follows_the_trigger_only_whatever_the_clutch_does():
-    # The module has no clutch input: the node passes input_ok from the gate's
-    # clutch-independent condition, so a release changes nothing here (node test).
+    # The module has no clutch input, and input_ok() takes none: a release changes
+    # nothing here (node test).
     assert 'clutch' not in GripperInputs.__dataclass_fields__
+
+
+# ---- input_ok: what about the input may freeze the gripper ----
+
+@pytest.mark.parametrize('present, age, tripped, expected', [
+    (True, 0.0, False, True),
+    (True, 0.1, False, True),           # at the timeout: still fresh
+    (True, 0.1001, False, False),       # stale by local arrival
+    (True, math.inf, False, False),
+    (True, math.nan, False, False),
+    (False, 0.0, False, False),         # no frame yet
+    (True, 0.0, True, False),           # a session or sequence fault since the last cycle
+])
+def test_input_ok(present, age, tripped, expected):
+    assert input_ok(present, age, 0.1, tripped) is expected
+
+
+def test_input_ok_has_no_pose_or_arm_side_inputs():
+    # The trigger is a button: pose-only and arm-side conditions are not inputs (G-4,
+    # solver, MoveIt Servo, tool pose), so they cannot freeze the gripper.
+    import inspect
+    assert list(inspect.signature(input_ok).parameters) == [
+        'frame_present', 'input_age', 'input_timeout', 'tripped']
+
+
+def test_stale_joint_states_freeze_after_the_input_checks():
+    run = active_run(OPEN)
+    out = run.cycle(trigger=0.0, joints_fresh=False, input_ok=False)
+    assert out.hold == Hold.INPUT and not out.publish
+    out = run.cycle(trigger=0.0, joints_fresh=False)
+    assert out.hold == Hold.JOINTS_STALE and not out.publish
+    out = run.cycle(trigger=0.9)
+    assert out.publish and out.hold == Hold.AWAIT_TRIGGER     # re-pickup unchanged
 
 
 # ---- keep-out ----

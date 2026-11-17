@@ -106,7 +106,9 @@ Axes (float), left block then right block:
 | | L trigger value | L grip value | L stick x | L stick y | R trigger value | R grip value | R stick x | R stick y |
 
 Values are the raw WebXR `xr-standard` gamepad values, not flipped. A missing hand, or a
-source that is not a real controller, gives zeros for its block.
+source that is not a real controller (a tracked hand), gives zeros for its block, except the
+trigger value: it is NaN whenever there is no trigger value (no controller, or a controller
+that sends none), never 0.0, which would read as released.
 
 **Verified on a Quest 3 Touch Plus** (`recordings/button_clip.jsonl`, right controller, each
 control operated once in the order trigger, grip, thumbstick click, A, B, then the four stick
@@ -385,12 +387,17 @@ carries a fixed tool in the gripper can never have it opened by teleop.
   `/teleop/state`. `/teleop/state` carries the command in force in every cycle
   (`gripper_command`, also while frozen) and, separately, the measured opening
   (`gripper_measured`, from `/joint_states`, with that message's stamp).
-- **When it is commanded.** Armed, teleop owns the gripper (see Command mux), the input is
-  valid (no gate condition other than the released grip, and no frame since the last cycle
-  that trips the gate: absent, emulated or out-of-view controller, headset pose, session,
-  reset count, sequence), and the newest frame has a trigger value in [0, 1]. Otherwise
+- **When it is commanded.** The trigger is a button, not a pose: the gripper depends on the
+  trigger and on what concerns the gripper. It is commanded while armed, teleop owns the
+  gripper (see Command mux), the input is fresh (a frame within the input timeout, by
+  arrival) with no session or sequence fault in any frame since the last cycle, the newest
+  frame has a trigger value in [0, 1] (a lost or put-down controller has none), and the joint
+  states are recent enough (`tool_pose_timeout_s`) to check the finger keep-out. Otherwise
   nothing is sent and the gripper holds its last command (`gripper_hold`: `NOT_ARMED`,
-  `NOT_OWNER`, `INPUT`).
+  `NOT_OWNER`, `INPUT`, `JOINTS_STALE`). Pose-only conditions (controller out of view,
+  emulated position, a raw input jump, the headset pose, a reference-space reset, no
+  calibration) and arm-side conditions (solver, MoveIt Servo, tool pose, a rejected target
+  step) hold the arm but not the gripper, clutch held or not.
 - **Arming never moves it.** The first command is the opening the gripper is already holding:
   teleop's own last command after an interruption, else what the controller holds after the
   owner switch (the previous owner's last command, reported by the gripper relay on
