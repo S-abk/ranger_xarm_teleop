@@ -78,20 +78,24 @@ def along(distance: float) -> Vec:
     return tuple(START[k] + distance * FORWARD[k] for k in range(3))
 
 
-def buttons(grip: bool, a: bool, b: bool) -> List[Dict[str, Any]]:
-    """Return seven xr-standard buttons: [1] grip, [4] A, [5] B."""
+def buttons(grip: bool, a: bool, b: bool, trigger: float = 0.0) -> List[Dict[str, Any]]:
+    """Return seven xr-standard buttons: [0] trigger (analog), [1] grip, [4] A, [5] B."""
     pressed = {1: grip, 4: a, 5: b}
-    return [{'p': pressed.get(k, False), 't': pressed.get(k, False),
-             'v': 1.0 if pressed.get(k, False) else 0.0} for k in range(7)]
+    out = [{'p': pressed.get(k, False), 't': pressed.get(k, False),
+            'v': 1.0 if pressed.get(k, False) else 0.0} for k in range(7)]
+    if trigger:
+        value = round(float(trigger), 4)
+        out[0] = {'p': value >= 0.5, 't': True, 'v': value}
+    return out
 
 
 def hand(position: Vec, orientation: Quat, grip: bool, a: bool = False, b: bool = False,
-         emulated: bool = False) -> Dict[str, Any]:
+         emulated: bool = False, trigger: float = 0.0) -> Dict[str, Any]:
     """Return one controller entry of a frame."""
     return {'position': [round(v, 6) for v in position],
             'orientation': [round(v, 8) for v in orientation],
             'emulated_position': emulated,
-            'buttons': buttons(grip, a, b),
+            'buttons': buttons(grip, a, b, trigger),
             'axes': [0.0, 0.0, 0.0, 0.0],
             'profiles': ['meta-quest-touch-plus', 'generic-trigger-squeeze-thumbstick']}
 
@@ -444,6 +448,98 @@ def clutch_keepout_reverse() -> List[str]:
     return record(7.2, motion, held_until(6.8), looking_down)
 
 
+def ramp(t: float, points: List[Tuple[float, float]]) -> float:
+    """Piecewise-linear value at ``t`` through ``(time, value)`` points, flat outside."""
+    if t <= points[0][0]:
+        return points[0][1]
+    for (t0, v0), (t1, v1) in zip(points, points[1:]):
+        if t <= t1:
+            return v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+    return points[-1][1]
+
+
+def with_trigger(points: List[Tuple[float, float]],
+                 then: Optional[Callable[[int, float, Dict[str, Any]], Optional[str]]] = None
+                 ) -> Callable[[int, float, Dict[str, Any]], Optional[str]]:
+    """Return a ``change`` that sets the right trigger along ``points`` (then ``then``)."""
+    def change(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        value = ramp(t, points)
+        if value:
+            right['buttons'] = buttons(right['buttons'][1]['p'], right['buttons'][4]['p'],
+                                       right['buttons'][5]['p'], value)
+        if then is not None:
+            return then(i, t, right)
+        return line(i, right, viewer())
+    return change
+
+
+STROKES = [(GRIP_ON, 2.4), (3.2, 4.4), (5.2, 6.4)]     # clutch held in each window
+
+
+def gripper_clutch_strokes() -> List[str]:
+    """
+    Close the gripper between clutch strokes, hold it across re-grips, open it mid-stroke.
+
+    Three strokes (grip 1.2-2.4, 3.2-4.4, 5.2-6.4 s), 30 mm forward each. The trigger is
+    pressed between strokes 1 and 2 (0 to 1 over 2.7-2.8 s: the gripper closes, 0.85 s at
+    1 rad/s); at each re-grip it relaxes into the hysteresis band (0.4 at 3.15-3.25 and at
+    5.15-5.25 s), which must not open it; it is released during stroke 3 (1 to 0 over
+    5.8-5.9 s: the gripper opens while the arm moves).
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        return at_offset(moves(t, [(1.5, 0.6, 0.03), (3.5, 0.6, 0.03), (5.5, 0.6, 0.03)])), HELD
+
+    trigger = [(2.7, 0.0), (2.8, 1.0), (3.15, 1.0), (3.17, 0.4), (3.25, 0.4), (3.27, 1.0),
+               (5.15, 1.0), (5.17, 0.4), (5.25, 0.4), (5.27, 1.0), (5.8, 1.0), (5.9, 0.0)]
+    return record(7.6, motion, lambda t: any(a <= t < b for a, b in STROKES),
+                  with_trigger(trigger))
+
+
+def gripper_dropout() -> List[str]:
+    """
+    Drop the input while the gripper is closing, the trigger held throughout.
+
+    Clutch released all along. The trigger is pressed at 2.0 s (the gripper starts closing);
+    the controller is absent from 2.3 to 2.5 s (G-4): the gripper stops part-closed and the
+    still-pressed trigger does nothing (AWAIT_TRIGGER) until it is released at 3.5 s (the
+    gripper opens) and pressed again at 4.5 s (it closes).
+    """
+    trigger = [(2.0, 0.0), (2.05, 1.0), (3.5, 1.0), (3.55, 0.0), (4.5, 0.0), (4.55, 1.0)]
+
+    def gap(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        return line(i, None if 2.3 <= t < 2.5 else right, viewer())
+    return record(6.0, lambda t: (START, yaw(CAL_YAW_DEG)), lambda t: False,
+                  with_trigger(trigger, gap))
+
+
+def gripper_stall() -> List[str]:
+    """As ``gripper_dropout`` but no frame at all arrives from 2.3 to 2.5 s (G-3, stale)."""
+    trigger = [(2.0, 0.0), (2.05, 1.0), (3.5, 1.0), (3.55, 0.0), (4.5, 0.0), (4.55, 1.0)]
+
+    def gap(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        return '' if 2.3 <= t < 2.5 else line(i, right, viewer())
+    return record(6.0, lambda t: (START, yaw(CAL_YAW_DEG)), lambda t: False,
+                  with_trigger(trigger, gap))
+
+
+def gripper_absent_release() -> List[str]:
+    """
+    Release the trigger while the controller is absent: the gripper must not open.
+
+    Pressed at 1.5 s (closes by about 2.4 s); the controller is absent from 3.0 to 3.5 s and
+    the trigger is released at 3.2 s, inside the gap. Afterwards it stays released: no
+    crossing is seen, so the gripper stays closed. Pressed and released again at 4.5 and
+    5.0 s: now it opens.
+    """
+    trigger = [(1.5, 0.0), (1.55, 1.0), (3.2, 1.0), (3.25, 0.0), (4.5, 0.0), (4.55, 1.0),
+               (5.0, 1.0), (5.05, 0.0)]
+
+    def gap(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        return line(i, None if 3.0 <= t < 3.5 else right, viewer())
+    return record(6.4, lambda t: (START, yaw(CAL_YAW_DEG)), lambda t: False,
+                  with_trigger(trigger, gap))
+
+
 def arm_only() -> List[str]:
     """Calibrate and arm, then hold the controller still without gripping (3 s)."""
     return record(3.0, lambda t: (START, yaw(CAL_YAW_DEG)), lambda t: False)
@@ -458,7 +554,8 @@ def generate() -> Dict[str, List[str]]:
               clutch_into_body_slow, arm_only,
               gate_absent,
               gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
-              gate_seq_backwards]
+              gate_seq_backwards, gripper_clutch_strokes, gripper_dropout, gripper_stall,
+              gripper_absent_release]
     return {maker.__name__: maker() for maker in makers}
 
 

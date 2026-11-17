@@ -139,6 +139,9 @@ class Frame:
     calibrate: bool
     arm: bool
     scale_toggle: bool = False        # right thumbstick click: fine <-> coarse translation scale
+    # Right trigger, analog 0..1; None when the frame's Joy has no such value. Read only by
+    # the gripper logic (gripper.py); the arm's mapping never uses it.
+    trigger: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +207,10 @@ class Output:
     # in the arm base frame: the hand's motion after filter and bounds, without any
     # measured motion in it. None when no target is published.
     feedforward: Optional[Tuple[float, ...]] = None
+    # The first condition that forbids motion this cycle with the grip set aside (NONE when
+    # only the grip, or a latched release, holds the arm). The gripper may be commanded
+    # only while this is NONE or CLUTCH_RELEASED; the arm's outputs do not depend on it.
+    condition: Hold = Hold.NONE
 
 
 def controller_valid(frame: Frame) -> bool:
@@ -249,6 +256,22 @@ def _pose_reason(frame: Frame, params: GateParams) -> Hold:
                   params.view_cone_tilt) > params.view_cone_angle:
         return Hold.OUT_OF_VIEW
     return Hold.NONE
+
+
+def frame_fault(prev: Optional[Frame], frame: Frame, params: GateParams) -> Hold:
+    """
+    Return what one frame trips with the clutch set aside, or NONE.
+
+    The same checks ``on_frame`` makes against the previous frame (session, reset count,
+    sequence, time) and on the frame itself (G-4 pose conditions), whether or not the
+    clutch is held. A raw controller jump (INPUT_JUMP) is left out: it concerns the pose
+    only, and while the clutch is held it trips the gate itself. Used by the gripper.
+    """
+    if prev is not None:
+        tripped, _ = _between_frames(prev, frame, params)
+        if tripped not in (Hold.NONE, Hold.INPUT_JUMP):
+            return tripped
+    return _pose_reason(frame, params)
 
 
 def _between_frames(prev: Frame, frame: Frame, params: GateParams) -> Tuple[Hold, str]:
@@ -572,12 +595,14 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
     if state.buttons is not None and not grip_seen:
         latched = Hold.NONE
 
+    reason = _condition(state, env, params, age)
+
     def out(new_state: GateState, target: Optional[Pose], hold: Hold, limit: Limit,
             want_servo: bool, feedforward=None) -> Tuple[GateState, Output]:
+        condition = Hold.STEP_REJECTED if hold == Hold.STEP_REJECTED else reason
         return new_state, Output(target, new_state.engaged, hold, limit, want_servo, age, seq,
-                                 tuple(events), feedforward)
+                                 tuple(events), feedforward, condition)
 
-    reason = _condition(state, env, params, age)
     if reason == Hold.CLUTCH_RELEASED:
         # The grip was seen open on a frame since the last cycle. Not latched: if it is
         # closed again, the next cycle engages afresh, with new per-engagement state.

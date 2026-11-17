@@ -18,12 +18,18 @@ Two trajectory controllers claim the arm joints; ros2_control allows only one of
 to be active, so the owner is whoever feeds the active one. The mux asks for a switch
 only when the arm is stopped, no trajectory goal is executing and teleop is idle. A
 refused or failed switch leaves the owner as it was.
+
+With gripper teleop, a second pair of controllers claims the gripper joint, and the
+owner is one for both: MoveIt's pair or teleop's pair, swapped in the same switch. A
+mixed state (the arm with one side, the gripper with the other, or both of a pair
+active) is a split: no owner, never switched to teleop, only back to MoveIt. A pair with
+neither controller active (still loading) is incomplete: no owner either.
 """
 
 from dataclasses import dataclass
 from enum import IntEnum
 import math
-from typing import Mapping, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence, Tuple
 
 
 class Owner(IntEnum):
@@ -60,9 +66,8 @@ class MuxParams:
     joint_state_timeout: float = 0.2   # s, newest joint state no older than this
 
 
-def owner_of(states: Mapping[str, str], moveit_controller: str,
-             teleop_controller: str) -> Owner:
-    """Return the owner implied by the controller manager's controller states."""
+def _pair_owner(states: Mapping[str, str], moveit_controller: str,
+                teleop_controller: str) -> Owner:
     moveit = states.get(moveit_controller) == 'active'
     teleop = states.get(teleop_controller) == 'active'
     if moveit and not teleop:
@@ -70,6 +75,55 @@ def owner_of(states: Mapping[str, str], moveit_controller: str,
     if teleop and not moveit:
         return Owner.TELEOP
     return Owner.NONE
+
+
+def owner_of(states: Mapping[str, str], moveit_controller: str, teleop_controller: str,
+             moveit_gripper: str = '', teleop_gripper: str = '') -> Owner:
+    """
+    Return the owner implied by the controller manager's controller states.
+
+    With a gripper pair, the arm's and the gripper's owner must agree, else NONE.
+    """
+    arm = _pair_owner(states, moveit_controller, teleop_controller)
+    if not (moveit_gripper and teleop_gripper):
+        return arm
+    gripper = _pair_owner(states, moveit_gripper, teleop_gripper)
+    return arm if arm == gripper else Owner.NONE
+
+
+def split_of(states: Mapping[str, str], pairs: Sequence[Tuple[str, str]]) -> str:
+    """
+    Return why the controllers are split between owners, or '' when they are not.
+
+    ``pairs``: (MoveIt's controller, teleop's controller) per joint group. Split: both
+    controllers of a pair active, or one pair on MoveIt's side and another on teleop's. A
+    pair with neither active (for example still loading) is incomplete, not split: there
+    is no owner, and a switch activates what is missing.
+    """
+    both = any(states.get(m) == 'active' and states.get(t) == 'active' for m, t in pairs)
+    owners = {_pair_owner(states, m, t) for m, t in pairs} - {Owner.NONE}
+    if not both and len(owners) <= 1:
+        return ''
+    described = ', '.join(f'{name} {states.get(name, "not loaded")}'
+                          for pair in pairs for name in pair)
+    return f'controllers split between owners: {described}'
+
+
+def switch_lists(states: Mapping[str, str], pairs: Sequence[Tuple[str, str]],
+                 wanted: Owner) -> Tuple[Optional[Tuple[List[str], List[str]]], str]:
+    """
+    Return ``((activate, deactivate), '')`` for one strict switch to ``wanted``.
+
+    Return ``(None, why)`` when the switch must not be made: a split is never switched
+    to teleop, only resolved back to MoveIt.
+    """
+    side = 0 if wanted == Owner.MOVEIT else 1
+    split = split_of(states, pairs)
+    if split and wanted == Owner.TELEOP:
+        return None, split
+    activate = [pair[side] for pair in pairs if states.get(pair[side]) != 'active']
+    deactivate = [pair[1 - side] for pair in pairs if states.get(pair[1 - side]) == 'active']
+    return (activate, deactivate), ''
 
 
 def any_goal_active(statuses: Sequence[int]) -> bool:

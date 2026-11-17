@@ -178,6 +178,21 @@ def state_row(msg: Any) -> Dict[str, Any]:
                    keepout_pair=[str(msg.keepout_link), str(msg.keepout_obstacle)],
                    keepout_bound=bool(msg.keepout_bound),
                    keepout_commanded=commanded if math.isfinite(commanded) else None)
+    if hasattr(msg, 'gripper_enabled'):
+        # Gripper teleop: the command in force (None when teleop holds none) and the measured
+        # opening (None when unknown) as separate fields, with the measurement's stamp.
+        command = float(msg.gripper_command)
+        stamp = msg.gripper_measured_stamp
+        row.update(gripper_enabled=bool(msg.gripper_enabled),
+                   gripper_active=bool(msg.gripper_active),
+                   gripper_hold=int(msg.gripper_hold),
+                   gripper_command=command if math.isfinite(command) else None,
+                   gripper_request=int(msg.gripper_request),
+                   gripper_source=int(msg.gripper_reference_source),
+                   gripper_measured=(float(msg.gripper_measured)
+                                     if msg.gripper_measured_valid else None),
+                   gripper_measured_stamp=(int(stamp.sec) + int(stamp.nanosec) * 1e-9
+                                           if msg.gripper_measured_valid else None))
     return row
 
 
@@ -224,6 +239,13 @@ def command_row(msg: Any) -> Dict[str, Any]:
     """Row for the node's joint command, a ``control_msgs/JointJog``: names and rad/s."""
     return {'k': 'command', 'stamp': _stamp(msg), 'names': [str(n) for n in msg.joint_names],
             'v': [float(v) for v in msg.velocities]}
+
+
+def gripper_row(msg: Any) -> Dict[str, Any]:
+    """Row for the gripper command, a ``GripperCommand`` (part of the recorded action)."""
+    return {'k': 'gripper', 'stamp': _stamp(msg), 'joint': str(msg.joint_name),
+            'position': float(msg.position), 'request': int(msg.request),
+            'source': int(msg.reference_source)}
 
 
 def joy_row(msg: Any) -> Dict[str, Any]:

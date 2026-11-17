@@ -26,6 +26,9 @@ Published
   <servo>/delta_joint_cmds       control_msgs/JointJog, joint velocities (rad/s) for the target,
                                  same stamp; one zero command in the cycle the clutch releases
   /tf_static                     arm base -> quest_world, at each calibration
+  /teleop/gripper/command        GripperCommand, only with gripper_enabled: the gripper command
+                                 (part of the recorded action), in every cycle where gripper
+                                 teleop is active, same stamp as that cycle's target and state
 
 The measured tool pose (engagement, G-14 lead, state) is the forward kinematics of the
 newest ``/joint_states`` on the chain of ``/robot_description`` (base frame to the servo
@@ -51,6 +54,11 @@ of this machine: a frame's age is measured from its local arrival, never by comp
 header stamps from another clock. ``header.stamp`` of the outputs is this node's ROS
 time (simulation time under ``use_sim_time``), which is what MoveIt Servo checks.
 
+Gripper (``gripper.py``). The right trigger opens and closes the gripper while armed, clutch
+or not. ``gripper_enabled`` defaults to false; off, no gripper publisher exists and the
+trigger is not read. The opening the gripper's controller holds arrives on
+``/teleop/gripper/held`` (sensor_msgs/JointState, from the backend's gripper relay).
+
 Safety. ``motion_enabled`` defaults to false (G-1). The limit values have no defaults:
 the node exits when one is missing. Values marked simulation-only are refused unless the
 robot description shows simulator hardware only.
@@ -72,14 +80,16 @@ from moveit_msgs.srv import ServoCommandType
 import numpy as np
 from ranger_xarm_teleop_bridge.bridge_node import (HEAD_POSE_TOPIC, JOY_TOPIC,
                                                    POSE_TOPICS, STATUS_QOS, STATUS_TOPIC)
-from ranger_xarm_teleop_interfaces.msg import ArmOwner, InputStatus, TeleopState
+from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, InputStatus, TeleopState
 from ranger_xarm_teleop_interfaces.srv import GetJointPath, SetArmOwner
+from ranger_xarm_teleop_servo import gripper as grip
 from ranger_xarm_teleop_servo import keepout as ko
 from ranger_xarm_teleop_servo import params as gate_params
 from ranger_xarm_teleop_servo import solver as dls
 from ranger_xarm_teleop_servo.frames import (ARM_BUTTON, CALIBRATE_BUTTON, CLUTCH_BUTTON,
-                                             SCALE_BUTTON)
-from ranger_xarm_teleop_servo.gate import Env, Frame, GateState, Limit, on_frame, tick
+                                             SCALE_BUTTON, TRIGGER_AXIS)
+from ranger_xarm_teleop_servo.gate import (Env, Frame, frame_fault, GateState, Hold, Limit,
+                                           on_frame, tick)
 from ranger_xarm_teleop_servo.kinematics import ChainError
 from ranger_xarm_teleop_servo.retreat import PathRecorder
 from ranger_xarm_teleop_servo.rotations import (inverse, Pose, pose_from_matrix, pose_to_matrix,
@@ -106,6 +116,10 @@ SET_OWNER_SERVICE = '/teleop/mux/set_owner'
 DISARM_SERVICE = '/teleop/disarm'
 JOINT_PATH_SERVICE = '/teleop/joint_path'
 KEEPOUT_INFO_SERVICE = '/teleop/keepout_info'
+GRIPPER_COMMAND_TOPIC = '/teleop/gripper/command'
+GRIPPER_HELD_TOPIC = '/teleop/gripper/held'
+# Gate conditions under which the gripper may be commanded: none, or only the grip released.
+GRIPPER_INPUT_OK = (Hold.NONE, Hold.CLUTCH_RELEASED)
 KEEPOUT_SLOW_S = 0.002      # a keep-out step longer than this is reported
 KEEPOUT_FLOOR_SLACK = 1e-4  # m: the clearance falling more below its floor is reported
 TARGET_PERIOD_MS = 20.0     # for the reference-age summary only
@@ -332,6 +346,13 @@ class TeleopNode(Node):
         # of the two is used.
         self.declare_parameter('joint_velocity_limit_names', Parameter.Type.STRING_ARRAY)
         self.declare_parameter('joint_velocity_limits', Parameter.Type.DOUBLE_ARRAY)
+        # Gripper teleop: off by default (G-1); its range and speed have no default.
+        self.declare_parameter('gripper_enabled', False)
+        self.declare_parameter('gripper_joint', grip.DEFAULTS['gripper_joint'])
+        for name in grip.REQUIRED_WHEN_ENABLED + ('gripper_close_threshold',
+                                                  'gripper_open_threshold',
+                                                  'gripper_reference_timeout_s'):
+            self.declare_parameter(name, Parameter.Type.DOUBLE)
 
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.tool_frame = str(self.get_parameter('tool_frame').value)
@@ -347,6 +368,17 @@ class TeleopNode(Node):
         try:
             self.params = gate_params.build_params(values)
         except ValueError as err:           # MissingValue included
+            raise StartupRefused(str(err)) from err
+        gripper_values = {'gripper_enabled': bool(self.get_parameter('gripper_enabled').value),
+                          'gripper_joint': str(self.get_parameter('gripper_joint').value)}
+        for name in grip.REQUIRED_WHEN_ENABLED + ('gripper_close_threshold',
+                                                  'gripper_open_threshold',
+                                                  'gripper_reference_timeout_s'):
+            gripper_values[name] = self._value_or_none(name)
+        try:
+            self.gripper_params = grip.build_gripper_params(gripper_values,
+                                                            self.params.target_period)
+        except ValueError as err:           # MissingGripperValue included
             raise StartupRefused(str(err)) from err
         tuning = {}
         for name, field in SOLVER_TUNING.items():
@@ -468,6 +500,22 @@ class TeleopNode(Node):
         self.stuck_near_collision = False
         self.last_hold = None
 
+        # Gripper teleop.
+        self.gripper_state = grip.GripperState()
+        self.gripper_output: Optional[grip.GripperOutput] = None
+        self.gripper_tripped = False        # a frame since the last cycle tripped (any clutch)
+        self.owner_gripper = False          # the mux swaps the gripper with the arm
+        self.gripper_owner_since: Optional[float] = None    # monotonic, teleop owns it since
+        self.gripper_held = None            # (arrival, position) from the gripper relay
+        self.gripper_keepout: Optional[ko.Model] = None     # the pairs the fingers move
+        self.gripper_moved: frozenset = frozenset()          # the gripper joint and its mimics
+        self.gripper_last_hold = None
+        self.gripper_pub = None
+        if self.gripper_params.enabled:
+            self.gripper_pub = self.create_publisher(GripperCommand, GRIPPER_COMMAND_TOPIC, 10)
+            self.watcher.create_subscription(JointState, GRIPPER_HELD_TOPIC,
+                                             self._on_gripper_held, 10)
+
         self.target_pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 10)
         self.state_pub = self.create_publisher(TeleopState, STATE_TOPIC, 10)
         self.servo_pub = self.create_publisher(JointJog, f'{servo}/delta_joint_cmds', 10)
@@ -505,6 +553,14 @@ class TeleopNode(Node):
             f'{self.params.max_translation_scale:g})')
         if not self.params.motion_enabled:
             self.get_logger().warning('motion_enabled is false: no target will be published')
+        gp = self.gripper_params
+        if gp.enabled:
+            self.get_logger().info(
+                f'gripper teleop: joint {gp.joint}, open {gp.open_position:g}, closed '
+                f'{gp.closed_position:g}, at most {gp.max_speed:g}/s; trigger closes above '
+                f'{gp.close_threshold:g}, opens below {gp.open_threshold:g}')
+        else:
+            self.get_logger().info('gripper teleop disabled: the trigger has no effect')
 
     def _value_or_none(self, name: str, strings: bool = False):
         try:
@@ -559,7 +615,13 @@ class TeleopNode(Node):
                 return
             self._pending.popleft()
             self._diagnose_frame(status, key, now - arrival)
-            self.state = on_frame(self.state, self.build_frame(status, arrival), self.params)
+            frame = self.build_frame(status, arrival)
+            if (self.gripper_params.enabled
+                    and frame_fault(self.state.frame, frame, self.params) != Hold.NONE):
+                # Every frame counts, clutch held or not: a trip between two cycles
+                # freezes the gripper in the next one.
+                self.gripper_tripped = True
+            self.state = on_frame(self.state, frame, self.params)
             for store in (self._poses, self._heads, self._joys):
                 for old in [k for k in store if k <= key]:
                     del store[old]
@@ -609,6 +671,9 @@ class TeleopNode(Node):
                                           SCALE_BUTTON)
         controller = self._poses.get(key) if have_buttons else None
         head = self._heads.get(key)
+        trigger = None
+        if joy is not None and len(joy.axes) > TRIGGER_AXIS:
+            trigger = float(joy.axes[TRIGGER_AXIS])
         return Frame(
             arrival=arrival,
             xr_time=float(status.xr_time_ms) / 1000.0,
@@ -625,6 +690,7 @@ class TeleopNode(Node):
             calibrate=have_buttons and bool(buttons[CALIBRATE_BUTTON]),
             arm=have_buttons and bool(buttons[ARM_BUTTON]),
             scale_toggle=have_buttons and bool(buttons[SCALE_BUTTON]),
+            trigger=trigger,
         )
 
     # ---- robot side ----
@@ -693,6 +759,26 @@ class TeleopNode(Node):
         if not model.pair_list:
             self.get_logger().warning('link keep-out: the description has no pair of arm '
                                       'and fixed collision geometry; nothing is kept out')
+        if self.gripper_params.enabled:
+            joint = self.gripper_params.joint
+            indices = model.pairs_moved_by(joint)
+            self.gripper_moved = frozenset(
+                {joint} | {name for name, (source, _, _) in model.extra_joints.items()
+                           if source == joint})
+            self.gripper_keepout = model.subset(indices) if indices else None
+            self.get_logger().info(
+                f'link keep-out: {len(indices)} pairs move with {joint}; a gripper step '
+                'toward the margin is not taken')
+
+    def _check_gripper_joint(self) -> None:
+        """Refuse the start when the gripper's range is not within its joint's limits."""
+        if not self.gripper_params.enabled:
+            return
+        try:
+            lower, upper = grip.joint_limits(self.urdf, self.gripper_params.joint)
+            grip.check_joint_range(self.gripper_params, lower, upper)
+        except ValueError as err:
+            raise StartupRefused(f'gripper: {err}') from err
 
     def _compare_description(self, text: str, source: str) -> None:
         """Disable teleop if ``text`` has other geometry than the keep-out model's."""
@@ -772,13 +858,22 @@ class TeleopNode(Node):
                 f'simulation-only limits accepted: hardware {sorted(set(plugins))}')
         if self.urdf is None:
             self.urdf = msg.data
+            self._check_gripper_joint()
             self._build_arm()
         elif msg.data != self.urdf and self.keepout is not None:
             self._compare_description(msg.data, 'a later /robot_description')
 
     def _on_owner(self, msg: ArmOwner) -> None:
         self.owner = msg.owner
+        self.owner_gripper = bool(msg.gripper)
         self.owner_arrival = self.mono()
+
+    def _on_gripper_held(self, msg: JointState) -> None:
+        try:
+            value = float(msg.position[list(msg.name).index(self.gripper_params.joint)])
+        except (ValueError, IndexError):
+            return
+        self.gripper_held = (self.mono(), value)
 
     def _on_servo_status(self, msg: ServoStatus) -> None:
         self.servo_status = int(msg.code)
@@ -1055,6 +1150,9 @@ class TeleopNode(Node):
             self.stop_command(stamp)
             self.solver_fault = ''
         marks.append(('target and joint command', self.mono()))
+        if self.gripper_params.enabled:
+            self.gripper_cycle(now, owner, output, joints, stamp)
+            marks.append(('gripper', self.mono()))
         self.publish_calibration(stamp)
         self.manage_servo(now, output.want_servo_active)
         marks.append(('servo calls', self.mono()))
@@ -1078,6 +1176,80 @@ class TeleopNode(Node):
         summary = self._cycles.report(now)
         if summary:
             self.get_logger().info(summary)
+
+    def gripper_measured(self):
+        """Return ``(position, stamp ns)`` of the gripper joint's newest state, or None."""
+        latest = self.joint_state
+        if latest is None:
+            return None
+        value = latest[2].get(self.gripper_params.joint)
+        if value is None or not math.isfinite(value):
+            return None
+        return float(value), latest[1]
+
+    def gripper_clearance(self, joints):
+        """Return the gripper's keep-out clearance as a function of its commanded position."""
+        model = self.gripper_keepout
+        if model is None:
+            return None             # the fingers have no pair: nothing to keep apart
+        latest = self.joint_state
+        if joints is None or latest is None:
+            return lambda position: math.nan
+        others = {k: v for k, v in latest[2].items() if k not in self.gripper_moved}
+
+        def clearance(position: float) -> float:
+            values = dict(others)
+            values[self.gripper_params.joint] = position
+            try:
+                return float(model.clearance(joints, model.extra_values(values))[0])
+            except (ko.ModelError, ValueError):
+                return math.nan
+
+        return clearance
+
+    def gripper_cycle(self, now: float, owner: int, output, joints, stamp) -> None:
+        """Run the gripper logic for this cycle and publish its command with ``stamp``."""
+        owned = owner == ArmOwner.OWNER_TELEOP and self.owner_gripper
+        if not owned:
+            self.gripper_owner_since = None
+        elif self.gripper_owner_since is None:
+            self.gripper_owner_since = now
+        held = None
+        latest = self.gripper_held
+        if owned and latest is not None and latest[0] > self.gripper_owner_since:
+            held = latest[1]        # produced after teleop's controller became active
+        measured = None
+        sample = self.gripper_measured()
+        if (sample is not None and self.joint_state_arrival is not None
+                and now - self.joint_state_arrival <= self.params.tool_pose_timeout):
+            measured = sample[0]
+        frame = self.state.frame
+        inputs = grip.GripperInputs(
+            now=now,
+            armed=(self.params.motion_enabled and self.state.want_armed
+                   and not self.state.arm_pending),
+            owner=owned,
+            input_ok=output.condition in GRIPPER_INPUT_OK and not self.gripper_tripped,
+            trigger=frame.trigger if frame is not None else None,
+            held=held, measured=measured, clearance=self.gripper_clearance(joints),
+            margin=self.keepout_margin)
+        self.gripper_tripped = False
+        self.gripper_state, out = grip.step(self.gripper_state, inputs, self.gripper_params)
+        self.gripper_output = out
+        for event in out.events:
+            self.get_logger().info(event)
+        if out.hold != self.gripper_last_hold:
+            self.get_logger().info(f'gripper: {out.hold.name}')
+            self.gripper_last_hold = out.hold
+        if out.publish:
+            msg = GripperCommand()
+            msg.header.stamp = stamp
+            msg.header.frame_id = self.base_frame
+            msg.joint_name = self.gripper_params.joint
+            msg.position = float(out.command)
+            msg.request = int(out.request)
+            msg.reference_source = int(out.source)
+            self.gripper_pub.publish(msg)
 
     def publish_target(self, target: Pose, stamp) -> None:
         """Publish the tool-frame target (the recorded action)."""
@@ -1318,7 +1490,29 @@ class TeleopNode(Node):
         if solution is not None:
             msg.keepout_bound = bool(solution.keepout_bound)
             msg.keepout_clearance_commanded = float(solution.keepout_clearance)
+        self.fill_gripper_state(msg)
         return msg
+
+    def fill_gripper_state(self, msg: TeleopState) -> None:
+        """Fill the gripper fields: command in force and measured opening, separately."""
+        msg.gripper_enabled = self.gripper_params.enabled
+        msg.gripper_command = math.nan
+        out = self.gripper_output
+        if not self.gripper_params.enabled or out is None:
+            msg.gripper_hold = int(grip.Hold.DISABLED if not self.gripper_params.enabled
+                                   else grip.Hold.NOT_ARMED)
+            return
+        msg.gripper_active = bool(out.publish)
+        msg.gripper_hold = int(out.hold)
+        msg.gripper_command = float(out.command)
+        msg.gripper_request = int(out.request)
+        msg.gripper_reference_source = int(out.source)
+        sample = self.gripper_measured()
+        if sample is not None:
+            msg.gripper_measured_valid = True
+            msg.gripper_measured = sample[0]
+            msg.gripper_measured_stamp.sec = int(sample[1] // 1_000_000_000)
+            msg.gripper_measured_stamp.nanosec = int(sample[1] % 1_000_000_000)
 
     def idle_clearance(self):
         """

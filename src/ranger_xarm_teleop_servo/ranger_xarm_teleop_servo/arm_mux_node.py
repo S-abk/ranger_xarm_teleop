@@ -14,6 +14,11 @@
 """
 Command mux: gives either MoveIt or teleop exclusive ownership of the arm (G-9).
 
+With gripper teleop configured (``moveit_gripper_controller`` and
+``teleop_gripper_controller``), the gripper has the same owner as the arm: MoveIt's and
+teleop's gripper controllers are swapped in the same strict switch, the gripper joints
+count in "stopped", and a goal on MoveIt's gripper controller refuses the switch.
+
 Two trajectory controllers claim the arm joints: MoveIt's and the one MoveIt Servo
 feeds. ros2_control lets only one be active, and an inactive trajectory controller
 rejects action goals and ignores its command topic, so the active controller defines
@@ -50,7 +55,8 @@ from controller_manager_msgs.srv import ListControllers, SwitchController
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
 from ranger_xarm_teleop_servo.ownership import (any_goal_active, check_switch, MuxParams,
-                                                MuxStatus, Owner, owner_of, StillnessTracker)
+                                                MuxStatus, Owner, owner_of, split_of,
+                                                StillnessTracker, switch_lists)
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
@@ -83,11 +89,29 @@ class ArmMuxNode(Node):
         self.declare_parameter('joint_state_timeout_s', MuxParams.joint_state_timeout)
         self.declare_parameter('switch_timeout_s', 3.0)
         self.declare_parameter('still_wait_s', 1.0)
+        # Gripper teleop: both names, or neither (the switch is then the arm's alone).
+        self.declare_parameter('moveit_gripper_controller', '')
+        self.declare_parameter('teleop_gripper_controller', '')
+        self.declare_parameter('gripper_joints', ['xarm_drive_joint'])
 
         self.moveit_controller = str(self.get_parameter('moveit_controller').value)
         self.teleop_controller = str(self.get_parameter('teleop_controller').value)
         manager = str(self.get_parameter('controller_manager').value).rstrip('/')
         self.joints = [str(j) for j in self.get_parameter('joints').value]
+        self.moveit_gripper = str(self.get_parameter('moveit_gripper_controller').value)
+        self.teleop_gripper = str(self.get_parameter('teleop_gripper_controller').value)
+        if bool(self.moveit_gripper) != bool(self.teleop_gripper):
+            raise ValueError('moveit_gripper_controller and teleop_gripper_controller: set '
+                             'both (gripper teleop) or neither')
+        self.gripper = bool(self.teleop_gripper)
+        self.pairs = [(self.moveit_controller, self.teleop_controller)]
+        if self.gripper:
+            self.pairs.append((self.moveit_gripper, self.teleop_gripper))
+            gripper_joints = [str(j) for j in self.get_parameter('gripper_joints').value]
+            if not gripper_joints:
+                raise ValueError('gripper_joints: the gripper teleop needs its joints')
+            self.joints = self.joints + [j for j in gripper_joints if j not in self.joints]
+        self.split = ''
         self.switch_timeout = float(self.get_parameter('switch_timeout_s').value)
         self.still_wait = float(self.get_parameter('still_wait_s').value)
         self.tracker = StillnessTracker(MuxParams(
@@ -112,7 +136,7 @@ class ArmMuxNode(Node):
         # Deep enough that a stall of this process loses no sample (150 Hz for over 1 s).
         self.observer.create_subscription(JointState, '/joint_states', self._on_joint_state,
                                           200)
-        for controller in (self.moveit_controller, self.teleop_controller):
+        for controller in [name for pair in self.pairs for name in pair]:
             self.observer.create_subscription(
                 GoalStatusArray, f'/{controller}/follow_joint_trajectory/_action/status',
                 lambda msg, name=controller: self._on_goal_status(name, msg),
@@ -125,7 +149,9 @@ class ArmMuxNode(Node):
         self.create_service(SetArmOwner, SET_OWNER_SERVICE, self._on_set_owner)
         self.create_timer(0.1, self._on_timer, clock=Clock(clock_type=ClockType.STEADY_TIME))
         self.get_logger().info(
-            f'controllers: MoveIt {self.moveit_controller}, teleop {self.teleop_controller}')
+            f'controllers: MoveIt {self.moveit_controller}, teleop {self.teleop_controller}'
+            + (f'; gripper: MoveIt {self.moveit_gripper}, teleop {self.teleop_gripper}'
+               if self.gripper else '; no gripper'))
 
     # ---- observations ----
 
@@ -177,13 +203,27 @@ class ArmMuxNode(Node):
             self.get_logger().error(f'controller manager call failed: {err}')
             return None
 
-    def read_owner(self) -> Optional[Owner]:
-        """Return the owner from the controller manager; ``None`` when it did not answer."""
+    def read_states(self) -> Optional[Dict[str, str]]:
+        """Return the controller states; ``None`` when the controller manager did not answer."""
         result = self._call(self.list_client, ListControllers.Request())
         if result is None:
             return None
-        states = {c.name: c.state for c in result.controller}
-        return owner_of(states, self.moveit_controller, self.teleop_controller)
+        return {c.name: c.state for c in result.controller}
+
+    def owner_from(self, states: Optional[Dict[str, str]]) -> Optional[Owner]:
+        """Return the owner the controller states imply; ``None`` for no answer."""
+        if states is None:
+            return None
+        split = split_of(states, self.pairs) if self.gripper else ''
+        if split and split != self.split:
+            self.get_logger().error(split)
+        self.split = split
+        return owner_of(states, self.moveit_controller, self.teleop_controller,
+                        self.moveit_gripper, self.teleop_gripper)
+
+    def read_owner(self) -> Optional[Owner]:
+        """Return the owner from the controller manager; ``None`` when it did not answer."""
+        return self.owner_from(self.read_states())
 
     def _on_timer(self) -> None:
         if not self.switching:
@@ -197,6 +237,7 @@ class ArmMuxNode(Node):
             msg.owner = int(Owner.SWITCHING if self.switching else self.owner)
             msg.status = int(self.status)
             msg.detail = self.detail
+        msg.gripper = self.gripper
         self.owner_pub.publish(msg)
 
     # ---- the switch ----
@@ -229,7 +270,8 @@ class ArmMuxNode(Node):
                 self.switching = False
 
     def _switch(self, wanted: Owner):
-        current = self.read_owner()
+        states = self.read_states()
+        current = self.owner_from(states)
         if current is None:
             return MuxStatus.SWITCH_FAILED, 'the controller manager did not answer'
         with self.lock:
@@ -261,11 +303,11 @@ class ArmMuxNode(Node):
                 MuxStatus.REFUSED_TELEOP_ACTIVE: 'the teleop clutch is engaged',
                 MuxStatus.STALE_JOINT_STATE: 'no fresh joint state',
             }[status]
-        target = self.teleop_controller if wanted == Owner.TELEOP else self.moveit_controller
-        other = self.moveit_controller if wanted == Owner.TELEOP else self.teleop_controller
+        lists, why = switch_lists(states, self.pairs, wanted)
+        if lists is None:
+            return MuxStatus.SWITCH_FAILED, why
         request = SwitchController.Request()
-        request.activate_controllers = [target]
-        request.deactivate_controllers = [other] if current != Owner.NONE else []
+        request.activate_controllers, request.deactivate_controllers = lists
         request.strictness = SwitchController.Request.STRICT
         request.activate_asap = True
         request.timeout.sec = int(self.switch_timeout)

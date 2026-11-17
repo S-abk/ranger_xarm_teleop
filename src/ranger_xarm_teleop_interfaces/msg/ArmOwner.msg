@@ -10,6 +10,10 @@ uint8 OWNER_TELEOP = 2      # the teleop (MoveIt Servo) trajectory controller is
 uint8 OWNER_SWITCHING = 3   # a switch was requested and is not confirmed yet
 uint8 owner
 
+# The mux also swaps the gripper's two controllers (MoveIt's and teleop's) in the same switch,
+# so the owner above owns the gripper too. False when gripper teleop is not configured.
+bool gripper
+
 # Result of the last ownership request. A refused or failed request leaves the owner as it was.
 uint8 STATUS_OK = 0
 uint8 STATUS_REFUSED_MOVING = 1         # an arm joint was moving
