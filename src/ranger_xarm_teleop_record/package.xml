@@ -24,6 +24,7 @@
   <depend>rosbag2_storage_mcap</depend>
   <depend>rosbag2_compression_zstd</depend>
   <depend>ros2bag</depend>
+  <depend>rosidl_runtime_py</depend>
   <depend>ament_index_python</depend>
   <depend>python3-numpy</depend>
   <depend>python3-yaml</depend>

@@ -117,11 +117,22 @@ def test_gap_in_images_fails(clean):
 
 
 def test_rate_drop_fails(clean):
-    report = run(synth.drop_rows(clean, 'joint_command', range(0, 428, 2)))
+    # The publisher itself sent half as many: the episode node counted half as many too.
+    ep = synth.drop_rows(clean, 'joint_command', range(0, 428, 2))
+    if 'joint_command' in ep.sidecar['counts']:
+        ep.sidecar['counts']['joint_command']['count'] -= 214
+    report = run(ep)
     assert report['verdict'] == 'FAIL'
     assert 'joint_command: rate' in reasons(report)
     assert report['streams']['joint_command']['rate_ok'] is False
     assert flags(report, 'DATA_LOST') == []
+
+
+def test_actions_lost_by_the_recorder_are_data_lost(clean):
+    ep = synth.drop_rows(clean, 'target', range(40, 43))          # three actions in a row
+    report = run(ep)
+    assert report['verdict'] == 'FAIL'
+    assert 'target: ' in flags(report, 'DATA_LOST')[0]['reason']
 
 
 def test_short_gate_span_is_not_rate_checked(clean):
@@ -433,7 +444,32 @@ def test_sidecar_flags_are_copied(clean):
     report = run(ep)
     assert [f['flag'] for f in report['flags']] == ['DISK_LOW', 'TELEOP_STATE_LOST']
     assert report['flags'][0]['time'] == 5.0 and report['flags'][1]['time'] is None
-    assert report['verdict'] == 'PASS'
+    # TELEOP_STATE_LOST is a fail flag (checks.yaml); DISK_LOW alone is not
+    assert report['verdict'] == 'FAIL'
+    assert any(r.startswith('TELEOP_STATE_LOST') for r in report['reasons'])
+    ep.sidecar['episode']['flags'] = ep.sidecar['episode']['flags'][:1]
+    assert run(ep)['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('where', ['start', 'end'])
+def test_a_stall_at_the_start_or_end_of_the_window_is_a_gap(clean, where):
+    ep = copy.deepcopy(clean)
+    w0, w1 = ep.streams['state'].stamp[0], ep.streams['state'].stamp[-1]
+    for name in ('camera_wrist', 'camera_wrist_info'):
+        s = ep.streams[name]
+        keep = s.stamp > w0 + 0.5 if where == 'start' else s.stamp < w1 - 0.5
+        ep.streams[name] = type(s)(name=s.name, topic=s.topic, kind=s.kind, stamp=s.stamp[keep],
+                                   recv=s.recv[keep],
+                                   fields={k: v[keep] for k, v in s.fields.items()},
+                                   frame_id=[f for f, k in zip(s.frame_id, keep) if k],
+                                   labels={k: [x for x, kk in zip(v, keep) if kk]
+                                           for k, v in s.labels.items()},
+                                   joint_names=s.joint_names, has_header=s.has_header)
+    for key in ('camera_wrist_info',):
+        ep.sidecar['counts'].pop(key, None)
+    report = run(ep)
+    assert report['verdict'] == 'FAIL'
+    assert any('camera_wrist' in r and 'gap' in r for r in report['reasons']), report['reasons']
 
 
 def test_consistency_failure_fails_the_episode(clean):

@@ -151,12 +151,24 @@ def purge_main(argv=None) -> int:
                        if os.path.exists(os.path.join(root, d, 'session.json'))))
     total = 0
     for session in sessions:
-        for path in md.iter_episodes(session):
-            sidecar = md.read_json(path)
+        sidecars = [(p, md.read_json(p)) for p in md.iter_episodes(session)]
+        # A file any other episode refers to is never deleted (two episodes can share one
+        # when the recorder failed to split between them).
+        others = {}
+        for _, sc in sidecars:
+            e = sc.get('episode', {})
+            if e.get('status') != 'discarded':
+                others.setdefault(e.get('file'), []).append(e.get('index'))
+        for path, sidecar in sidecars:
             e = sidecar.get('episode', {})
             if e.get('status') != 'discarded' or e.get('purged'):
                 continue
             bag = os.path.join(session, e.get('file') or '')
+            if not e.get('file') or e.get('file') in others:
+                shared = others.get(e.get('file'))
+                print(f'kept: {os.path.basename(session)}/{e.get("file")} (episode '
+                      f'{e.get("index")}) is also the file of episode(s) {shared}')
+                continue
             size = _size(bag)
             total += size
             action = 'would delete'

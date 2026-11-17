@@ -262,7 +262,13 @@ def _window_stats(stamps: np.ndarray, ctx: _Context) -> dict:
     sel = stamps[(stamps >= w0 - 1e-9) & (stamps <= w1 + 1e-9)]
     span = float(np.max(sel) - np.min(sel)) if len(sel) >= 2 else 0.0
     rate = (len(sel) - 1) / span if span > 0.0 else None
-    return {'n_window': len(sel), 'rate_hz': rate, 'max_gap_s': _max_gap(sel), 'n_spans': None}
+    # The stretches before the first sample and after the last count as gaps too: a stream
+    # that stalls at the start or the end of an episode is missing data there.
+    if len(sel):
+        gap = max(_max_gap(sel), float(np.min(sel)) - w0, w1 - float(np.max(sel)))
+    else:
+        gap = w1 - w0
+    return {'n_window': len(sel), 'rate_hz': rate, 'max_gap_s': gap, 'n_spans': None}
 
 
 def _check_stream(name: str, spec: dict, ctx: _Context, reasons: List[str],
@@ -639,6 +645,12 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     if report['consistency']['verdict'] == 'FAIL':
         reasons.append('CONSISTENCY: ' + '; '.join(report['consistency'].get('reasons', [])))
 
+    # Flags that mean the data cannot be trusted fail the episode (checks.yaml fail_flags).
+    for flag in sorted({f['flag'] for f in flags}
+                       & set(checks.get('flags', {}).get('fail_flags', []))):
+        if not any(r.startswith(flag + ':') for r in reasons):
+            reasons.append(f'{flag}: ' + '; '.join(
+                f['reason'] for f in flags if f['flag'] == flag)[:300])
     other = [r for r in reasons if not r.startswith('MISSING_METADATA')]
     if absent:
         report['verdict'] = 'REFUSED'

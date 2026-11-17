@@ -45,6 +45,7 @@ from rclpy.qos import (DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data,
                        ReliabilityPolicy)
 from rosbag2_interfaces.msg import WriteSplitEvent
 from rosbag2_interfaces.srv import Pause, Resume, SplitBagfile
+from rosidl_runtime_py.utilities import get_message
 from sensor_msgs.msg import CameraInfo, JointState, Joy
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
@@ -66,6 +67,8 @@ LATCHED_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=History
 TF_STATIC_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                            history=HistoryPolicy.KEEP_LAST, depth=100,
                            durability=DurabilityPolicy.TRANSIENT_LOCAL)
+COUNT_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                       history=HistoryPolicy.KEEP_LAST, depth=50)
 STATE_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST,
                        depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
@@ -191,12 +194,21 @@ class EpisodeNode(Node):
         self._last_pair = 0.0
         self._not_ready: List[str] = ['starting']
         self._call = None                     # (kind, monotonic start) of a recorder call
+        self._split_owed = False              # the last episode's file is not closed yet
+        self._last_split_try = 0.0
+        self._stop_owed: Optional[str] = None  # a stop that came while START was in flight
 
         for name, spec in self.streams.items():
-            if spec['kind'] not in SUBSCRIBED_KINDS:
-                continue
-            self.watch[name] = StreamWatch(name, spec)
-            self._subscribe(name, spec)
+            if spec['kind'] in SUBSCRIBED_KINDS:
+                self.watch[name] = StreamWatch(name, spec)
+                self._subscribe(name, spec)
+            elif spec.get('count') and spec.get('clock') != 'none':
+                # Counted only (the actions): any type with a header, best effort, so a
+                # publisher of either reliability matches.
+                self.watch[name] = StreamWatch(name, spec)
+                self.create_subscription(get_message(spec['type']), spec['topic'],
+                                         lambda m, n=name: self._note(n, m.header.stamp),
+                                         COUNT_QOS)
         self.create_subscription(String, '/robot_description', self.on_description, LATCHED_QOS)
         self.create_subscription(TFMessage, '/tf_static', self.on_tf_static, TF_STATIC_QOS)
         rec = str(gp('recorder').value).rstrip('/')
@@ -294,6 +306,10 @@ class EpisodeNode(Node):
         if self.episode is None or self.control.state != State.RECORDING:
             return
         t = _secs(msg.header.stamp)
+        if self.control.busy and prev is not None and prev.armed and not msg.armed:
+            self._flag('DISARMED', 'teleop disarmed while the episode was starting', t)
+            self._stop_owed = 'disarmed'
+            return
         log = self.ep_log
         if msg.armed:
             log['input_age'].append(msg.input_age)
@@ -341,6 +357,8 @@ class EpisodeNode(Node):
                 p = self.watch[spec['info']].problem(now)
                 if p:
                     out.append(f'{name} (by its camera_info) {p}')
+        if self._split_owed:
+            out.append("the recorder has not closed the last episode's file yet")
         if self.urdf is None:
             out.append('no robot description yet')
         if 'teleop' not in self.session['limits']['parameters']:
@@ -359,6 +377,12 @@ class EpisodeNode(Node):
         labels, problem = md.read_labels(self.data_dir)
         if problem:
             out.append(problem)
+        for repo in ('teleop_repo', 'robot_workspace'):
+            if self.session['software'][repo].get('commit') is None:
+                out.append(f'the commit of {repo} is unknown (set the {repo} parameter)')
+        if not self.session['limits'].get('file'):
+            out.append('no limits file given (limits_file): the episode would not be '
+                       'interpretable')
         s = self.state
         if s is None or not s.armed:
             out.append('teleop is not armed')
@@ -464,6 +488,9 @@ class EpisodeNode(Node):
         self._pair()
         self.control.done(True)
         self._write_episode()
+        if self._stop_owed:
+            reason, self._stop_owed = self._stop_owed, None
+            self.on_events(self.control.auto_stop(reason))
         self.publish_state()
 
     def end(self, reason: str) -> None:
@@ -475,6 +502,7 @@ class EpisodeNode(Node):
         self.episode['episode']['stop'] = self._now()
         self.episode['episode']['stop_reason'] = reason
         self._status('pending')
+        self._split_owed = True
         self._call = ('pause', time.monotonic())
         future = self.pause_cli.call_async(Pause.Request())
         future.add_done_callback(self._paused)
@@ -492,9 +520,18 @@ class EpisodeNode(Node):
             return
         if future.exception() is not None:
             self._flag('RECORDER_ERROR', f'split failed: {future.exception()}', None)
+        else:
+            self._split_owed = False
         self._finish()
         self.control.done(True)
         self.publish_state()
+
+    def _split_retried(self, future) -> None:
+        if not self._expect('split_retry'):
+            return
+        if future.exception() is None:
+            self._split_owed = False
+            self.get_logger().info('recorder: the owed split went through')
 
     def _finish(self) -> None:
         ep = self.episode
@@ -558,10 +595,22 @@ class EpisodeNode(Node):
             self.get_logger().error(f'recorder: {why}')
             if kind == 'resume':
                 self._start_failed(why)
-            else:
+            elif kind == 'pause':
+                self._flag('RECORDER_ERROR', why, None)
+                self._call = ('split', now)
+                self.split_cli.call_async(SplitBagfile.Request()).add_done_callback(self._split)
+            elif kind == 'split':
                 self._flag('RECORDER_ERROR', why, None)
                 self._finish()
                 self.control.done(True)
+            else:                                   # a retried split for a finished episode
+                self.get_logger().error(f'recorder: {why}')
+        if self._split_owed and self._call is None and self.episode is None \
+                and now - self._last_split_try >= 5.0:
+            self._last_split_try = now
+            self._call = ('split_retry', now)
+            self.split_cli.call_async(SplitBagfile.Request()).add_done_callback(
+                self._split_retried)
         problems = self.ready_problems(now)
         self.control.set_ready(not problems, '; '.join(problems))
         self._not_ready = problems

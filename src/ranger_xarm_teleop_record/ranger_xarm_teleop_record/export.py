@@ -43,6 +43,7 @@ RULE = ('causal zero-order hold: each field is the newest sample not later than 
         'with its age; nothing is interpolated. A cycle with the clutch released means hold: '
         'no new target, the arm finishes the points it already has; action_valid is False '
         'there. gripper_action_valid is False in cycles where teleop held no gripper command')
+SOURCE_MEASURED = 3      # GripperCommand.SOURCE_MEASURED / TeleopState.gripper_reference_source
 TIME_EPS = 1e-9          # a stamp this far past a tick still counts as not later (float noise)
 STATE_FIELDS = ('armed', 'clutch_engaged', 'hold_reason', 'active_limit', 'damped',
                 'translation_scale', 'input_age', 'measured_tool_pose',
@@ -214,7 +215,10 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
         arrays['action_pose_age'] = np.full(n, np.nan)
         arrays['action_valid'] = np.zeros(n, dtype=bool)
 
-    arrays['gripper_action_valid'] = held('gripper_active').astype(bool)
+    # Contract (Recording): gripper cycles marked MEASURED are never actions, also when teleop
+    # commanded from the measured opening (no held reference arrived): masked conservatively.
+    arrays['gripper_action_valid'] = (held('gripper_active').astype(bool)
+                                      & (held('gripper_reference_source') != SOURCE_MEASURED))
     arrays['gripper_command'] = held('gripper_command').astype(float)
     arrays['gripper_request'] = held('gripper_request').astype(np.int64)
     arrays['gripper_source'] = held('gripper_reference_source').astype(np.int64)

@@ -17,6 +17,7 @@ flags:
   base_moved_rad: 0.0175        # ... or this rotation, or any nonzero /cmd_vel
   link_input_age_p99_s: 0.1     # LINK_DEGRADED above this p99 input age, or any reconnect or sequence gap
   reconnect_gap_s: 1.0          # a status gap longer than this (wall) counts as a reconnect
+  fail_flags: [DATA_LOST, RECORDER_ERROR, TELEOP_STATE_LOST]   # these flags fail an episode
 consistency:
   lag_grid_s: [-0.3, 0.3, 0.005]   # lag search grid: start, stop, step
   lag_min_s: 0.04               # the measured motion must follow the command by at least ...

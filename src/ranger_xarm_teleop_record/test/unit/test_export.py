@@ -195,6 +195,12 @@ def test_gripper_action_valid_is_false_for_a_measured_stand_in(built, clean):
     ep.streams['state'].fields['gripper_active'] = np.zeros(len(ep.streams['state']), dtype=bool)
     off, _ = export.build_export(ep, CHECKS)
     assert not off['gripper_action_valid'].any()
+    # Commanding from the measured opening (source MEASURED while active) is masked too.
+    ep = copy.deepcopy(clean)
+    ep.streams['state'].fields['gripper_reference_source'] = np.full(
+        len(ep.streams['state']), 3)
+    measured, _ = export.build_export(ep, CHECKS)
+    assert not measured['gripper_action_valid'].any()
 
 
 def test_tick_valid_false_across_a_joint_state_gap(clean):

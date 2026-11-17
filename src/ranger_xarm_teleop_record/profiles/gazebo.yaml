@@ -27,9 +27,9 @@ disk:
 # count: the episode node counts publications in the episode, compared with the recording.
 streams:
   state:            {topic: /teleop/state, kind: teleop_state, type: ranger_xarm_teleop_interfaces/msg/TeleopState, required: true, rate_hz: 50, clock: robot, count: true}
-  target:           {topic: /teleop/target_pose, kind: pose, type: geometry_msgs/msg/PoseStamped, required: true, rate_hz: 50, clock: robot, gate: engaged}
-  gripper_command:  {topic: /teleop/gripper/command, kind: gripper_command, type: ranger_xarm_teleop_interfaces/msg/GripperCommand, required: false, rate_hz: 50, clock: robot, gate: gripper_active}
-  joint_command:    {topic: /servo_node/delta_joint_cmds, kind: joint_command, type: control_msgs/msg/JointJog, required: true, rate_hz: 50, clock: robot, gate: engaged}
+  target:           {topic: /teleop/target_pose, kind: pose, type: geometry_msgs/msg/PoseStamped, required: true, rate_hz: 50, clock: robot, gate: engaged, count: true}
+  gripper_command:  {topic: /teleop/gripper/command, kind: gripper_command, type: ranger_xarm_teleop_interfaces/msg/GripperCommand, required: false, rate_hz: 50, clock: robot, gate: gripper_active, count: true}
+  joint_command:    {topic: /servo_node/delta_joint_cmds, kind: joint_command, type: control_msgs/msg/JointJog, required: true, rate_hz: 50, clock: robot, gate: engaged, count: true}
   joint_states:     {topic: /joint_states, kind: joint_states, type: sensor_msgs/msg/JointState, required: true, rate_hz: 142.857, clock: robot, count: true}
   gripper_held:     {topic: /teleop/gripper/held, kind: other, type: control_msgs/msg/JointTrajectoryControllerState, required: false, rate_hz: null, clock: robot}
   owner:            {topic: /teleop/mux/owner, kind: owner, type: ranger_xarm_teleop_interfaces/msg/ArmOwner, required: false, rate_hz: null, clock: robot}

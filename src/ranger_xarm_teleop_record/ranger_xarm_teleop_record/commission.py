@@ -148,6 +148,18 @@ def main(argv=None) -> int:
                '--max-cache-size', str(int(rec['max_cache_size_mb']) * 1024 * 1024),
                '--node-name', 'record_commission_recorder'] + topics
     rclpy.init()
+    probe = Node('record_commission_probe')
+    end = time.monotonic() + 3.0
+    while time.monotonic() < end:                       # let discovery settle
+        rclpy.spin_once(probe, timeout_sec=0.1)
+    busy = [s['topic'] for s in list(images.values()) + list(infos.values())
+            if probe.count_publishers(s['topic']) > 0]
+    probe.destroy_node()
+    if busy:
+        rclpy.shutdown()
+        print('refused: these topics already have publishers (a camera or a session is '
+              f'running here): {", ".join(busy)}. Run the commissioning on its own.')
+        return 3
     node = Publisher(dict(images, **infos), args.content, False)
     log = open(os.path.join(work, 'recorder.log'), 'w')
     recorder = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
