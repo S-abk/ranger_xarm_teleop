@@ -135,7 +135,9 @@ uint8 GRIPPER_HOLD_AWAIT_TRIGGER = 6  # after arming or a freeze: holding until 
 uint8 GRIPPER_HOLD_KEEP_OUT = 7       # G-15: a step toward the robot's fixed structure was not taken
 uint8 gripper_hold
 # The command in force, every cycle: the last command teleop sent (or the reference it holds)
-# while teleop owns the gripper; NaN when teleop holds none (not the owner, or no reference yet).
+# while teleop owns the gripper. When teleop holds none (not the owner yet or any more, or the
+# held reference not yet arrived) the measured opening stands in, with the source MEASURED.
+# NaN only with gripper teleop off or no measured opening.
 float64 gripper_command
 # GripperCommand.REQUEST_* and SOURCE_* of the command in force.
 uint8 gripper_request

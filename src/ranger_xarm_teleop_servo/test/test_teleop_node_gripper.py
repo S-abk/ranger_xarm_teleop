@@ -336,8 +336,20 @@ def test_state_carries_the_command_in_force_every_cycle_also_while_frozen(harnes
     assert OPEN < part < CLOSED
     assert all(c[3].gripper_command == part for c in frozen)
     assert all(c[3].gripper_hold == TeleopState.GRIPPER_HOLD_INPUT for c in frozen)
-    armed = [c for c in h.cycles if c[0] > 1.2]
-    assert all(not math.isnan(c[3].gripper_command) for c in armed)
+    assert all(not math.isnan(c[3].gripper_command) for c in h.cycles)
+
+
+def test_state_carries_a_command_in_every_cycle_of_the_arming_window(harness):
+    """From the arm press to the first command: not the owner, then no reference yet."""
+    h = harness(held=0.3)
+    h.relay = False                     # the measured fallback after 0.5 s: a long window
+    h.play('arm_only')
+    window = [c[3] for c in h.cycles if not c[2] and c[3].gripper_hold in (
+        TeleopState.GRIPPER_HOLD_NOT_OWNER, TeleopState.GRIPPER_HOLD_NO_REFERENCE)]
+    assert len(window) >= 25
+    assert all(s.gripper_command == pytest.approx(0.3) for s in window)
+    assert all(s.gripper_reference_source == GripperCommand.SOURCE_MEASURED for s in window)
+    assert all(not math.isnan(c[3].gripper_command) for c in h.cycles)
 
 
 # ---- INV-1: one test per trigger ----
@@ -430,7 +442,9 @@ def test_freeze_on_owner_loss_mid_ramp(harness):
     after = [c for c in h.cycles if c[0] >= 2.26]
     assert all(c[2] == [] for c in after)
     assert all(c[3].gripper_hold == TeleopState.GRIPPER_HOLD_NOT_OWNER for c in after)
-    assert all(math.isnan(c[3].gripper_command) for c in after)
+    # Teleop holds no command any more: the measured opening stands in, marked as such.
+    assert all(c[3].gripper_command == c[3].gripper_measured for c in after)
+    assert all(c[3].gripper_reference_source == GripperCommand.SOURCE_MEASURED for c in after)
 
 
 def test_freeze_when_the_mux_does_not_swap_the_gripper(harness):

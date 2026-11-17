@@ -1494,20 +1494,31 @@ class TeleopNode(Node):
         return msg
 
     def fill_gripper_state(self, msg: TeleopState) -> None:
-        """Fill the gripper fields: command in force and measured opening, separately."""
+        """
+        Fill the gripper fields: command in force and measured opening, separately.
+
+        The command in force is teleop's own command (or the reference it holds). When teleop
+        holds none (not the owner yet or any more, or the held reference not yet arrived),
+        what the gripper's controller holds is not known here; the measured opening stands
+        in for it, with the reference source MEASURED. NaN only when gripper teleop is off
+        or nothing is measured.
+        """
         msg.gripper_enabled = self.gripper_params.enabled
         msg.gripper_command = math.nan
-        out = self.gripper_output
-        if not self.gripper_params.enabled or out is None:
-            msg.gripper_hold = int(grip.Hold.DISABLED if not self.gripper_params.enabled
-                                   else grip.Hold.NOT_ARMED)
+        if not self.gripper_params.enabled:
+            msg.gripper_hold = int(grip.Hold.DISABLED)
             return
-        msg.gripper_active = bool(out.publish)
-        msg.gripper_hold = int(out.hold)
-        msg.gripper_command = float(out.command)
-        msg.gripper_request = int(out.request)
-        msg.gripper_reference_source = int(out.source)
+        out = self.gripper_output
         sample = self.gripper_measured()
+        msg.gripper_hold = int(out.hold if out is not None else grip.Hold.NOT_ARMED)
+        if out is not None:
+            msg.gripper_active = bool(out.publish)
+            msg.gripper_command = float(out.command)
+            msg.gripper_request = int(out.request)
+            msg.gripper_reference_source = int(out.source)
+        if not math.isfinite(msg.gripper_command) and sample is not None:
+            msg.gripper_command = sample[0]
+            msg.gripper_reference_source = int(grip.Source.MEASURED)
         if sample is not None:
             msg.gripper_measured_valid = True
             msg.gripper_measured = sample[0]
