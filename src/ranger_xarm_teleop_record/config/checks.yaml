@@ -24,6 +24,8 @@ consistency:
   arm_p99_m: 0.015
   arm_rot_p99_deg: 3.0
   gripper_abs_rad: 0.05
+  gripper_lag_min_s: 0.01       # the gripper's own lag range: its controller follows within a
+  gripper_lag_max_s: 0.30       # cycle or two (mock execution echoes the command one cycle late)
   gripper_min_travel_rad: 0.1   # less command travel than this: the gripper lag is not fitted
 export:
   rate_hz: 30.0

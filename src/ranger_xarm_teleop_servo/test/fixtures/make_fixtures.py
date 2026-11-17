@@ -659,6 +659,27 @@ def episode_marks_engaged() -> List[str]:
     return record(13.5, motion, held_until(13.0), change)
 
 
+def episode_disarm() -> List[str]:
+    """
+    Disarm during an episode, a refused start, and one frame lost inside a press.
+
+    X at 2.0-2.2 s (start; the frame at 2.1 s is dropped, so the press arrives with a hole);
+    grip 2.5-3.6 s with 40 mm forward and back; B (disarm) at 4.0 s: the episode stops by
+    itself, flagged DISARMED; Y at 5.0 s (keep); X at 6.0 s: refused, teleop is not armed.
+    """
+    def motion(t: float) -> Tuple[Vec, Quat]:
+        return at_offset(0.04 * (smooth(t, 2.6, 0.4) - smooth(t, 3.1, 0.4))), HELD
+
+    def change(i: int, t: float, right: Dict[str, Any]) -> Optional[str]:
+        if abs(t - 2.1) < 0.5 / RATE_HZ:
+            return ''
+        if 4.0 <= t < 4.15:
+            right['buttons'] = buttons(False, False, True)
+        left = left_hand(x=within(t, [(2.0, 2.2), (6.0, 6.15)]), y=5.0 <= t < 5.2)
+        return line(i, right, viewer(), left=left)
+    return record(6.8, motion, lambda t: 2.5 <= t < 3.6, change)
+
+
 def generate() -> Dict[str, List[str]]:
     """Return fixture name -> exact file lines (without newlines)."""
     makers = [clutch_line, clutch_circle, clutch_rotation, clutch_reengage, clutch_jump,

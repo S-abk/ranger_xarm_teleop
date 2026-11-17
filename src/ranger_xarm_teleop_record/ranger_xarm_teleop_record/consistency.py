@@ -281,6 +281,8 @@ def closed_direction(position: np.ndarray, request: np.ndarray) -> Optional[int]
 
 def _gripper(ep: Episode, tol: dict) -> dict:
     """Compare the gripper command with the measured opening."""
+    tol = dict(tol, lag_min_s=tol.get('gripper_lag_min_s', tol['lag_min_s']),
+               lag_max_s=tol.get('gripper_lag_max_s', tol['lag_max_s']))
     out: dict = {'verdict': 'NOT_JUDGED', 'reasons': [], 'applicable': False}
     command = ep.get('gripper_command')
     if command is None or len(command) == 0:

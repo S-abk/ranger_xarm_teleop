@@ -21,7 +21,8 @@ import sys
 import pytest
 
 PKG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-MODULES = ['streams', 'profile', 'metadata', 'checker', 'consistency', 'export']
+MODULES = ['streams', 'profile', 'metadata', 'checker', 'consistency', 'export', 'episode',
+           'extrinsics', 'linkstats', 'provenance']
 FORBIDDEN = ['rclpy', 'geometry_msgs', 'sensor_msgs', 'std_msgs', 'std_srvs', 'tf2_ros',
              'tf2_msgs', 'nav_msgs', 'moveit_msgs', 'control_msgs', 'controller_manager_msgs',
              'action_msgs', 'trajectory_msgs', 'rcl_interfaces', 'builtin_interfaces',

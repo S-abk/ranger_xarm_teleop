@@ -76,6 +76,7 @@ SUBSCRIBED_KINDS = ('teleop_state', 'joint_states', 'camera_info', 'input_status
 RATE_WINDOW_S = 2.0
 PUBLISH_PERIOD_S = 0.2
 CLOCK_PAIR_PERIOD_S = 1.0
+RECORDER_TIMEOUT_S = 5.0
 
 
 def _secs(stamp) -> float:
@@ -189,6 +190,7 @@ class EpisodeNode(Node):
         self._disk_sample = None
         self._last_pair = 0.0
         self._not_ready: List[str] = ['starting']
+        self._call = None                     # (kind, monotonic start) of a recorder call
 
         for name, spec in self.streams.items():
             if spec['kind'] not in SUBSCRIBED_KINDS:
@@ -382,9 +384,11 @@ class EpisodeNode(Node):
                 self.resolve('kept' if o.event == Event.KEEP else 'discarded')
             elif o.event == Event.MARK and self.episode is not None:
                 self.episode['episode']['marks'].append(self._now())
-            log = self.get_logger().warning if o.event == Event.REFUSED else \
-                self.get_logger().info
-            log(f'episode {self.index}: {o.event.name}' + (f' ({o.detail})' if o.detail else ''))
+            text = f'episode {self.index}: {o.event.name}' + (f' ({o.detail})' if o.detail else '')
+            if o.event == Event.REFUSED:
+                self.get_logger().warning(text)
+            else:
+                self.get_logger().info(text)
             self.publish_state()
 
     def _now(self) -> dict:
@@ -426,18 +430,32 @@ class EpisodeNode(Node):
                        'calibration_changed': False, 'pairs': []}
         self._status('recording')
         self._write_episode()
+        self._call = ('resume', time.monotonic())
         future = self.resume_cli.call_async(Resume.Request())
         future.add_done_callback(self._resumed)
 
+    def _expect(self, kind: str) -> bool:
+        """Return True when the pending recorder call is ``kind`` (a late reply is ignored)."""
+        if self._call is None or self._call[0] != kind:
+            self.get_logger().warning(f'late recorder reply to {kind} ignored')
+            return False
+        self._call = None
+        return True
+
+    def _start_failed(self, why: str) -> None:
+        self.episode['episode']['status'] = 'failed'
+        self._flag('RECORDER_ERROR', f'resume failed: {why}', None)
+        self._write_episode()                 # the failed attempt keeps its sidecar
+        self.episode = None
+        self.pause_cli.call_async(Pause.Request())     # in case it did resume
+        self.on_events(self.control.done(False, why))
+
     def _resumed(self, future) -> None:
+        if not self._expect('resume'):
+            return
         ok = future.exception() is None and future.result() is not None
         if not ok:
-            self.episode['episode']['status'] = 'failed'
-            self._flag('RECORDER_ERROR', f'resume failed: {future.exception()}', None)
-            self._write_episode()
-            self.episode = None
-            self.index -= 1
-            self.on_events(self.control.done(False, str(future.exception())))
+            self._start_failed(str(future.exception()))
             return
         self.episode['episode']['start']['acknowledged'] = self._now()
         for w in self.watch.values():
@@ -457,15 +475,21 @@ class EpisodeNode(Node):
         self.episode['episode']['stop'] = self._now()
         self.episode['episode']['stop_reason'] = reason
         self._status('pending')
+        self._call = ('pause', time.monotonic())
         future = self.pause_cli.call_async(Pause.Request())
         future.add_done_callback(self._paused)
 
     def _paused(self, future) -> None:
+        if not self._expect('pause'):
+            return
         if future.exception() is not None:
             self._flag('RECORDER_ERROR', f'pause failed: {future.exception()}', None)
+        self._call = ('split', time.monotonic())
         self.split_cli.call_async(SplitBagfile.Request()).add_done_callback(self._split)
 
     def _split(self, future) -> None:
+        if not self._expect('split'):
+            return
         if future.exception() is not None:
             self._flag('RECORDER_ERROR', f'split failed: {future.exception()}', None)
         self._finish()
@@ -528,6 +552,16 @@ class EpisodeNode(Node):
     def on_timer(self) -> None:
         """Readiness, auto-stops, the Y hold, clock pairs, disk, the state message."""
         now = time.monotonic()
+        if self._call is not None and now - self._call[1] > RECORDER_TIMEOUT_S:
+            kind, self._call = self._call[0], None
+            why = f'no reply to {kind} within {RECORDER_TIMEOUT_S:g} s'
+            self.get_logger().error(f'recorder: {why}')
+            if kind == 'resume':
+                self._start_failed(why)
+            else:
+                self._flag('RECORDER_ERROR', why, None)
+                self._finish()
+                self.control.done(True)
         problems = self.ready_problems(now)
         self.control.set_ready(not problems, '; '.join(problems))
         self._not_ready = problems
