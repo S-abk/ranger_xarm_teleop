@@ -60,6 +60,8 @@ class Button:
     pressed: bool
     touched: bool
     value: float
+    # False when the client sent no analog value (``value`` is then 0.0).
+    value_sent: bool = True
 
 
 @dataclass(frozen=True)
@@ -271,7 +273,7 @@ def _button(value: Any, name: str) -> Button:
     if not isinstance(touched, bool):
         raise _Invalid(f'{name}.t: expected bool')
     analog = _number(value['v'], f'{name}.v') if 'v' in value else 0.0
-    return Button(pressed=value['p'], touched=touched, value=analog)
+    return Button(pressed=value['p'], touched=touched, value=analog, value_sent='v' in value)
 
 
 def _profiles(obj: dict, prefix: str) -> Tuple[str, ...]:

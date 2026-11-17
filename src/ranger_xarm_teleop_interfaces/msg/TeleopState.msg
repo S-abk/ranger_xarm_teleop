@@ -116,3 +116,35 @@ float64 keepout_clearance_commanded
 bool keepout_bound
 # The margin in use (m), from the limits.
 float64 keepout_margin
+
+# Gripper teleop (right trigger). The command (the recorded action, also on
+# /teleop/gripper/command) and the measured opening are separate fields (G-12).
+# gripper_enabled: the gripper_enabled parameter (default false). False: no gripper command is
+# ever published and the trigger has no effect.
+bool gripper_enabled
+# The gripper was commanded this cycle (a GripperCommand with this header.stamp was published).
+bool gripper_active
+# Why the gripper is not commanded, or not moving.
+uint8 GRIPPER_HOLD_NONE = 0
+uint8 GRIPPER_HOLD_DISABLED = 1
+uint8 GRIPPER_HOLD_NOT_ARMED = 2
+uint8 GRIPPER_HOLD_NOT_OWNER = 3      # teleop does not own the gripper (the mux swaps it with the arm)
+uint8 GRIPPER_HOLD_INPUT = 4          # a gate condition or trip, stale input, or no valid trigger value
+uint8 GRIPPER_HOLD_NO_REFERENCE = 5   # waiting for the opening the controller holds
+uint8 GRIPPER_HOLD_AWAIT_TRIGGER = 6  # after arming or a freeze: holding until the trigger crosses a threshold
+uint8 GRIPPER_HOLD_KEEP_OUT = 7       # G-15: a step toward the robot's fixed structure was not taken
+uint8 gripper_hold
+# The command in force, every cycle: the last command teleop sent (or the reference it holds)
+# while teleop owns the gripper. When teleop holds none (not the owner yet or any more, or the
+# held reference not yet arrived) the measured opening stands in, with the source MEASURED.
+# NaN only with gripper teleop off or no measured opening.
+float64 gripper_command
+# GripperCommand.REQUEST_* and SOURCE_* of the command in force.
+uint8 gripper_request
+uint8 gripper_reference_source
+# Measured opening of the driven joint from /joint_states, with that message's stamp. What
+# "measured" means depends on the backend: a physics simulator measures it; mock execution
+# echoes the command; on the hardware driver it is partly assumed (see the README).
+bool gripper_measured_valid
+float64 gripper_measured
+builtin_interfaces/Time gripper_measured_stamp

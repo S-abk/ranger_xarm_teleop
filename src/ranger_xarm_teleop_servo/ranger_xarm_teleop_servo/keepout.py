@@ -823,6 +823,19 @@ class Model:
             np.minimum.at(out, pair, d)
         return out
 
+    def pairs_moved_by(self, joint: str) -> List[int]:
+        """
+        Return the indices of the pairs whose moving body moves with the non-arm ``joint``.
+
+        A body moves with it when the joint, or a joint that mimics it, is on the body's
+        path beyond the arm chain (for a gripper: its fingers and knuckles).
+        """
+        moved = {joint} | {name for name, (source, _, _) in self.extra_joints.items()
+                           if source == joint}
+        bodies = {i for i, body in enumerate(self.bodies)
+                  if any(j.name in moved for j in body.tail)}
+        return [i for i, pair in enumerate(self.pair_list) if pair[1] in bodies]
+
     def subset(self, indices: Sequence[int]) -> 'Model':
         """Return a copy of the model that evaluates only the pairs ``indices``."""
         out = replace(self, pair_list=[self.pair_list[int(i)] for i in indices])

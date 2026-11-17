@@ -25,7 +25,7 @@ from typing import Callable, Iterable, List, Optional, Tuple
 
 from ranger_xarm_teleop_bridge.axes import xr_pose_to_ros
 from ranger_xarm_teleop_bridge.frame_parse import parse_text, ParsedFrame
-from ranger_xarm_teleop_bridge.joy_layout import build_joy_arrays, BUTTON_NAMES
+from ranger_xarm_teleop_bridge.joy_layout import AXIS_NAMES, build_joy_arrays, BUTTON_NAMES
 from ranger_xarm_teleop_bridge.jsonl_io import iter_records
 
 from .gate import Env, Frame, GateState, on_frame, Output, tick
@@ -37,6 +37,7 @@ CLUTCH_BUTTON = BUTTON_NAMES.index('right_grip')
 CALIBRATE_BUTTON = BUTTON_NAMES.index('right_primary')
 ARM_BUTTON = BUTTON_NAMES.index('right_secondary')
 SCALE_BUTTON = BUTTON_NAMES.index('right_thumbstick')    # click: fine <-> coarse translation
+TRIGGER_AXIS = AXIS_NAMES.index('right_trigger')          # analog 0..1: the gripper
 
 
 def frame_from_parsed(parsed: ParsedFrame, arrival: float) -> Frame:
@@ -48,7 +49,7 @@ def frame_from_parsed(parsed: ParsedFrame, arrival: float) -> Frame:
     head = None
     if parsed.viewer is not None:
         head = Pose(*xr_pose_to_ros(parsed.viewer.position, parsed.viewer.orientation))
-    _, buttons = build_joy_arrays(parsed)
+    axes, buttons = build_joy_arrays(parsed)
     return Frame(
         arrival=float(arrival),
         xr_time=float(parsed.xr_time_ms) / 1000.0,
@@ -65,6 +66,7 @@ def frame_from_parsed(parsed: ParsedFrame, arrival: float) -> Frame:
         calibrate=bool(buttons[CALIBRATE_BUTTON]),
         arm=bool(buttons[ARM_BUTTON]),
         scale_toggle=bool(buttons[SCALE_BUTTON]),
+        trigger=float(axes[TRIGGER_AXIS]),
     )
 
 

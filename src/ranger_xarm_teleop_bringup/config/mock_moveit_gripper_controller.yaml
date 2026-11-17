@@ -1,0 +1,17 @@
+# MOCK EXECUTION ONLY. The robot workspace's mock execution starts no gripper controller and
+# its MoveIt configuration lists none. This stands in for "MoveIt's gripper controller" so the
+# command mux has a second side to swap with teleop's: it has the name the robot workspace
+# uses (Gazebo prefixes it, xarm_xarm_gripper_traj_controller) and is active at start-up, as
+# there. move_group cannot command it in mock; tests send it goals directly.
+xarm_gripper_traj_controller:
+  ros__parameters:
+    type: joint_trajectory_controller/JointTrajectoryController
+    joints:
+      - xarm_drive_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    allow_partial_joints_goal: false
+    action_monitor_rate: 20.0

@@ -21,6 +21,10 @@ side (``ranger_xarm_teleop_bridge`` bridge or replay) is launched separately.
 ``limits_file`` is required: the safety limits have no defaults. A file marked
 simulation-only is refused unless ``simulation:=true``, which only the mock and
 simulator wrappers pass. ``motion_enabled`` defaults to false.
+
+Gripper teleop (``gripper_enabled``, default false): adds the teleop gripper controller
+(inactive), names both gripper controllers to the mux so it swaps them with the arm's,
+and starts the gripper relay. The limits file must then hold the gripper's range and speed.
 """
 
 import os
@@ -32,7 +36,8 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from ranger_xarm_teleop_bringup.limits import check_extra_params_file, check_limits_file
+from ranger_xarm_teleop_bringup.limits import (check_extra_params_file, check_gripper_limits,
+                                               check_limits_file)
 import yaml
 
 
@@ -52,7 +57,13 @@ def launch_setup(context, *args, **kwargs):
     simulation = _true(arg('simulation'))
     use_sim_time = _true(arg('use_sim_time'))
     limits_file = arg('limits_file')
-    check_limits_file(limits_file, simulation)               # raises: the launch stops here
+    limits = check_limits_file(limits_file, simulation)      # raises: the launch stops here
+    gripper = _true(arg('gripper_enabled'))
+    if gripper:
+        check_gripper_limits(limits_file, limits)
+        if not arg('moveit_gripper_controller'):
+            raise ValueError('gripper_enabled: moveit_gripper_controller (the controller '
+                             'MoveIt commands the gripper with) is required')
 
     share = get_package_share_directory('ranger_xarm_teleop_bringup')
     moveit_share = get_package_share_directory('ranger_xarm_moveit_config')
@@ -99,6 +110,32 @@ def launch_setup(context, *args, **kwargs):
         arguments=[teleop_controller, '--inactive', '--param-file', handle.name,
                    '--controller-manager', arg('controller_manager'),
                    '--controller-manager-timeout', '120'])
+    gripper_nodes = []
+    teleop_gripper = arg('teleop_gripper_controller')
+    if gripper:
+        controller = _load(os.path.join(share, 'config', 'teleop_gripper_controller.yaml'))
+        controller_params = controller.pop('teleop_gripper_controller')
+        params = controller_params['ros__parameters']
+        params['use_sim_time'] = use_sim_time
+        joint = arg('gripper_joint')
+        tolerances = params['constraints'].pop('xarm_drive_joint')
+        params['joints'] = [joint]
+        params['constraints'][joint] = tolerances
+        controller[teleop_gripper] = controller_params
+        handle = tempfile.NamedTemporaryFile('w', prefix='teleop_gripper_controller_',
+                                             suffix='.yaml', delete=False)
+        yaml.safe_dump(controller, handle)
+        handle.close()
+        gripper_nodes.append(Node(
+            package='controller_manager', executable='spawner', output='screen',
+            arguments=[teleop_gripper, '--inactive', '--param-file', handle.name,
+                       '--controller-manager', arg('controller_manager'),
+                       '--controller-manager-timeout', '120']))
+        gripper_nodes.append(Node(
+            package='ranger_xarm_teleop_servo', executable='gripper_relay_node',
+            output='screen',
+            parameters=[{'mode': 'trajectory', 'controller': teleop_gripper, 'joint': joint},
+                        sim_time]))
 
     # No ``name=`` here either (see below): MoveIt Servo's planning scene monitor makes a tf
     # TransformListener with a node of its own, which the remap would also rename to
@@ -120,7 +157,11 @@ def launch_setup(context, *args, **kwargs):
         output='screen',
         parameters=[{'moveit_controller': arg('moveit_controller'),
                      'teleop_controller': teleop_controller,
-                     'controller_manager': arg('controller_manager')}, sim_time])
+                     'controller_manager': arg('controller_manager'),
+                     'moveit_gripper_controller': (arg('moveit_gripper_controller')
+                                                   if gripper else ''),
+                     'teleop_gripper_controller': teleop_gripper if gripper else '',
+                     'gripper_joints': [arg('gripper_joint')]}, sim_time])
 
     teleop_parameters = [limits_file]
     if arg('teleop_params_file'):
@@ -132,7 +173,9 @@ def launch_setup(context, *args, **kwargs):
                               'servo_node': '/servo_node',
                               'servo_output_topic': servo['command_out_topic'],
                               'joint_velocity_limit_names': velocity_names,
-                              'joint_velocity_limits': velocity_values})
+                              'joint_velocity_limits': velocity_values,
+                              'gripper_enabled': gripper,
+                              'gripper_joint': arg('gripper_joint')})
     teleop_parameters.append(sim_time)
     # Single-threaded linear algebra: the solver works on 6 x 6 matrices every 20 ms, and
     # BLAS worker threads competing with a simulator stretch a cycle past the time a
@@ -142,7 +185,7 @@ def launch_setup(context, *args, **kwargs):
         output='screen', parameters=teleop_parameters,
         additional_env={'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'})
 
-    return [spawner, servo_node, mux, teleop]
+    return [spawner, servo_node, mux, teleop] + gripper_nodes
 
 
 def generate_launch_description():
@@ -157,6 +200,17 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'motion_enabled', default_value='false',
             description='G-1: no target is published unless this is true.'),
+        DeclareLaunchArgument(
+            'gripper_enabled', default_value='false',
+            description='G-1: the right trigger opens and closes the gripper only if true. '
+                        'Off is safe: nothing is ever sent to the gripper.'),
+        DeclareLaunchArgument('gripper_joint', default_value='xarm_drive_joint'),
+        DeclareLaunchArgument(
+            'moveit_gripper_controller', default_value='',
+            description='The controller MoveIt commands the gripper with (required with '
+                        'gripper_enabled); the mux swaps it with the teleop one.'),
+        DeclareLaunchArgument('teleop_gripper_controller',
+                              default_value='teleop_gripper_controller'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument(
             'description_args', default_value='',

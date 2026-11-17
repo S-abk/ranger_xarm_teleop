@@ -20,10 +20,11 @@ Record a live teleop session and list every MoveIt Servo halt in it.
 
 ``record`` needs a sourced workspace and a running teleop stack. It writes
 ``recordings/NAME.jsonl`` (ignored by git) until Ctrl-C: the teleop state, the tool
-target, the controller and headset poses, the buttons (``/teleop/input/joy``) and input
-status, the joint states, the joint command of the node
-(``/servo_node/delta_joint_cmds``), MoveIt Servo's status, the arm owner and the robot
-description. It only listens: it calls no service and publishes nothing.
+target, the gripper command (``/teleop/gripper/command``), the controller and headset
+poses, the buttons (``/teleop/input/joy``) and input status, the joint states, the joint
+command of the node (``/servo_node/delta_joint_cmds``), MoveIt Servo's status, the arm
+owner and the robot description. It only listens: it calls no service and publishes
+nothing.
 
 Start it BEFORE arming and stop it AFTER releasing the grip. A ROS tool that starts or
 stops while the clutch is held can stall the input and release the clutch, so ``record``
@@ -63,7 +64,8 @@ def record(name: str, directory: str, duration: float, servo_node: str) -> int:
     from control_msgs.msg import JointJog
     from geometry_msgs.msg import PoseStamped
     from moveit_msgs.msg import ServoStatus
-    from ranger_xarm_teleop_interfaces.msg import ArmOwner, InputStatus, TeleopState
+    from ranger_xarm_teleop_interfaces.msg import (ArmOwner, GripperCommand, InputStatus,
+                                                   TeleopState)
     import rclpy
     from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
     from rclpy.qos import ReliabilityPolicy
@@ -136,6 +138,9 @@ def record(name: str, directory: str, duration: float, servo_node: str) -> int:
         node.create_subscription(
             PoseStamped, '/teleop/target_pose',
             lambda msg: write(session.pose_row('target', msg)), 50)
+        node.create_subscription(
+            GripperCommand, '/teleop/gripper/command',
+            lambda msg: write(session.gripper_row(msg)), 50)
         node.create_subscription(
             PoseStamped, '/teleop/input/right/pose',
             lambda msg: write(session.pose_row('input', msg)), qos_profile_sensor_data)

@@ -18,6 +18,8 @@ Start the simulator and its controllers first, for example
 ``ros2 launch ranger_xarm_gazebo sim.launch.py headless:=true``. This file then starts
 move_group (``ranger_xarm_isaac moveit.launch.py``, unless ``start_moveit:=false``) and
 the teleop core with the simulation-only limit values and ``motion_enabled`` true.
+Gripper teleop is on (``gripper_enabled`` true) and swaps with the simulator's
+``xarm_xarm_gripper_traj_controller``.
 
 Clocks: MoveIt Servo, the mux, the teleop node and the teleop controller use simulation
 time (their stamps must agree with the simulator's joint states). The input bridge or
@@ -46,6 +48,7 @@ def generate_launch_description():
         DeclareLaunchArgument('start_moveit', default_value='true'),
         DeclareLaunchArgument('teleop_params_file', default_value=''),
         DeclareLaunchArgument('tool_frame', default_value='xarm_link_tcp'),
+        DeclareLaunchArgument('gripper_enabled', default_value='true'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(isaac_share, 'launch', 'moveit.launch.py')),
@@ -62,5 +65,7 @@ def generate_launch_description():
                 'moveit_controller': 'xarm_xarm6_traj_controller',
                 'tool_frame': LaunchConfiguration('tool_frame'),
                 'teleop_params_file': LaunchConfiguration('teleop_params_file'),
+                'gripper_enabled': LaunchConfiguration('gripper_enabled'),
+                'moveit_gripper_controller': 'xarm_xarm_gripper_traj_controller',
             }.items()),
     ])

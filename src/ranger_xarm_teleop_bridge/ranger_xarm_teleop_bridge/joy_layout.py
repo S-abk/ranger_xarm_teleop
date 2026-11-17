@@ -46,7 +46,8 @@ Index  Name              Index  Name
 
 Axes (8 floats): per hand, trigger and grip are the analog ``value`` of
 ``buttons[0]`` and ``buttons[1]``; the thumbstick x and y are ``axes[2]`` and
-``axes[3]``.
+``axes[3]``. A present controller that sends no trigger, or no analog value for it, gets NaN
+on its trigger axis (never 0.0, which means released); an absent hand gets zeros.
 
 =====  ===================  =====  ====================
 Index  Name                 Index  Name
@@ -58,6 +59,7 @@ Index  Name                 Index  Name
 =====  ===================  =====  ====================
 """
 
+import math
 from typing import Optional, Tuple
 
 from .frame_parse import HandSample, ParsedFrame
@@ -97,12 +99,22 @@ def _hand_axes(hand: Optional[HandSample]) -> Tuple[float, ...]:
             return 0.0
         return float(hand.buttons[index].value)
 
+    def trigger() -> float:
+        # A present controller whose trigger or its analog value is missing reports NaN, never
+        # 0.0: the gripper reads the trigger as a level, and 0.0 would mean "released".
+        if hand is None:
+            return 0.0
+        buttons = hand.buttons
+        if XR_BUTTON_TRIGGER >= len(buttons) or not buttons[XR_BUTTON_TRIGGER].value_sent:
+            return math.nan
+        return float(hand.buttons[XR_BUTTON_TRIGGER].value)
+
     def axis(index: int) -> float:
         if hand is None or index >= len(hand.axes):
             return 0.0
         return float(hand.axes[index])
 
-    return (analog(XR_BUTTON_TRIGGER), analog(XR_BUTTON_GRIP),
+    return (trigger(), analog(XR_BUTTON_GRIP),
             axis(XR_AXIS_THUMBSTICK_X), axis(XR_AXIS_THUMBSTICK_Y))
 
 

@@ -36,6 +36,7 @@ setup(
         'console_scripts': [
             'teleop_node = ranger_xarm_teleop_servo.teleop_node:main',
             'arm_mux_node = ranger_xarm_teleop_servo.arm_mux_node:main',
+            'gripper_relay_node = ranger_xarm_teleop_servo.gripper_relay_node:main',
         ],
     },
 )

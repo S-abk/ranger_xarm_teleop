@@ -49,7 +49,13 @@ RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translat
             'step_rotation_limit_deg', 'linear_speed_cap_m_s', 'angular_speed_cap_rad_s',
             'max_lead_translation_m', 'max_lead_rotation_deg', 'max_translation_scale',
             'link_keepout_margin_m', 'link_keepout_cell_m', 'tool_pose_timeout_s',
-            'joint_velocity_limit_names', 'joint_velocity_limits')
+            'joint_velocity_limit_names', 'joint_velocity_limits',
+            # Gripper teleop: its switch and its safety values.
+            'gripper_enabled', 'gripper_joint', 'gripper_open_position',
+            'gripper_closed_position', 'gripper_max_speed')
+
+# Required in the limits file when gripper teleop is enabled (no default).
+GRIPPER_REQUIRED = ('gripper_open_position', 'gripper_closed_position', 'gripper_max_speed')
 
 
 def check_extra_params_file(path: str) -> None:
@@ -81,3 +87,11 @@ def check_limits_file(path: str, simulation: bool) -> dict:
         if not isinstance(values.get(name), (int, float)) or isinstance(values.get(name), bool):
             raise ValueError(f'{path}: {name} is required and has no default')
     return values
+
+
+def check_gripper_limits(path: str, values: dict) -> None:
+    """Raise ``ValueError`` when gripper teleop is enabled and a gripper value is missing."""
+    for name in GRIPPER_REQUIRED:
+        if not isinstance(values.get(name), (int, float)) or isinstance(values.get(name), bool):
+            raise ValueError(f'{path}: {name} is required with gripper teleop and has no '
+                             'default')

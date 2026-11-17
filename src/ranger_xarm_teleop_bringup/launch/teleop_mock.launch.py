@@ -17,6 +17,11 @@ Teleop against mock execution: no simulator, no hardware.
 Starts ``ranger_xarm_moveit_config fake_execution.launch.py`` (ros2_control with mock
 components, move_group, RViz) and the teleop core with the simulation-only limit values
 and ``motion_enabled`` true. Every node runs on the system clock.
+
+Gripper teleop is on (``gripper_enabled`` true). The robot workspace's mock execution has
+no gripper controller, so this file also starts a stand-in for MoveIt's
+(``xarm_gripper_traj_controller``, config/mock_moveit_gripper_controller.yaml): the mux
+needs a second side to swap. move_group cannot command it in mock.
 """
 
 import os
@@ -24,8 +29,12 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+MOCK_MOVEIT_GRIPPER_CONTROLLER = 'xarm_gripper_traj_controller'
 
 # Must describe the robot fake_execution.launch.py starts.
 MOCK_DESCRIPTION_ARGS = (
@@ -41,8 +50,15 @@ def generate_launch_description():
         DeclareLaunchArgument('motion_enabled', default_value='true'),
         DeclareLaunchArgument('teleop_params_file', default_value=''),
         DeclareLaunchArgument('tool_frame', default_value='xarm_link_tcp'),
+        DeclareLaunchArgument('gripper_enabled', default_value='true'),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(
             os.path.join(moveit_share, 'launch', 'fake_execution.launch.py'))),
+        Node(package='controller_manager', executable='spawner', output='screen',
+             arguments=[MOCK_MOVEIT_GRIPPER_CONTROLLER, '--param-file',
+                        os.path.join(share, 'config', 'mock_moveit_gripper_controller.yaml'),
+                        '--controller-manager', '/controller_manager',
+                        '--controller-manager-timeout', '120'],
+             condition=IfCondition(LaunchConfiguration('gripper_enabled'))),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(share, 'launch', 'teleop_core.launch.py')),
@@ -55,5 +71,7 @@ def generate_launch_description():
                 'moveit_controller': 'xarm6_traj_controller',
                 'tool_frame': LaunchConfiguration('tool_frame'),
                 'teleop_params_file': LaunchConfiguration('teleop_params_file'),
+                'gripper_enabled': LaunchConfiguration('gripper_enabled'),
+                'moveit_gripper_controller': MOCK_MOVEIT_GRIPPER_CONTROLLER,
             }.items()),
     ])
