@@ -433,8 +433,8 @@ between them, and are left enabled by the SRDF. The teleop node logs them at sta
 same. They belong in the SRDF move_group reads: MoveIt Servo takes move_group's collision
 matrix (it asks move_group for the planning scene when it starts), so an SRDF given to Servo
 alone has no effect. For move_group, disabling them changes nothing for arm plans; for the
-gripper's own motion it gives up the check of those pairs, which the description never brings
-closer than 7.8 mm within the joint limits. The mock and Gazebo stack tests that compare the
+gripper's own motion it gives up the check of those pairs; with the robot workspace's
+description, sampled every 0.01 rad over the gripper's range, none comes closer than 7.8 mm. The mock and Gazebo stack tests that compare the
 tool speed with the gripper open and closed skip, naming the pairs, while any is left enabled.
 
 ### Measuring a run

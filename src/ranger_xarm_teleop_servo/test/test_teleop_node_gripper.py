@@ -73,8 +73,13 @@ class GripperHarness(Harness):
         self.short_axes = False         # Joy without the trigger axis
         self.relay = True               # the relay reports the held reference
         self.joints_paused = False      # no new joint state arrives (stale joint states)
+        self.joint_stamp_lag = 0.0      # s: joint states arrive on time but stamped this old
         self.cycles = []                # per cycle: (t, targets, grips, state)
         self.actions = {}               # time -> callable, run before that cycle
+        # The ideal arm's joints and tool pose, with the node's own age of the newest joint
+        # state (local arrival and stamp, the larger): stale joint states show.
+        ideal = node.measured
+        node.measured = lambda: ideal()[:2] + (TeleopNode.measured(node)[2],)
 
     def _ownership(self, now, owner):
         super()._ownership(now, owner)
@@ -102,7 +107,7 @@ class GripperHarness(Harness):
         if owned and self.relay:
             node.gripper_held = (now, self.controller)      # the relay's report
         if not self.joints_paused:
-            stamp_ns = node.get_clock().now().nanoseconds
+            stamp_ns = node.get_clock().now().nanoseconds - int(self.joint_stamp_lag * 1e9)
             node.joint_state = (now, stamp_ns, {**dict(zip(JOINTS, self.measured_q)),
                                                 JOINT: self.measured_gripper})
             node.joint_state_arrival = now
@@ -499,6 +504,17 @@ def test_freeze_on_stale_joint_states_mid_ramp(harness):
     assert h.commands_between(3.3, 3.4)[-1] > part
 
 
+def test_freeze_on_joint_states_with_an_old_stamp(harness):
+    h = harness()
+    # They keep arriving, but stamped 0.3 s old from 2.9 to 3.1 s (the arm's age rule).
+    h.actions[2.9] = lambda hh: setattr(hh, 'joint_stamp_lag', 0.3)
+    h.actions[3.1] = lambda hh: setattr(hh, 'joint_stamp_lag', 0.0)
+    h.play('gripper_clutch_strokes')
+    first, part, last = freeze(h, 2.85, 3.15, hold=TeleopState.GRIPPER_HOLD_JOINTS_STALE)
+    assert 2.88 <= first <= 2.94 and 3.06 <= last <= 3.12
+    assert_held_awaiting(h, last + 0.03, 3.25, part)
+
+
 POSE_ONLY_REASONS = (TeleopState.HOLD_POSE_EMULATED, TeleopState.HOLD_OUT_OF_VIEW,
                      TeleopState.HOLD_HEAD_ABSENT, TeleopState.HOLD_HEAD_EMULATED,
                      TeleopState.HOLD_INPUT_JUMP, TeleopState.HOLD_POSE_ABSENT)
@@ -705,7 +721,7 @@ def run_cycles(node, q, finger, triggers, now, published):
         node.state = replace(node.state, frame=replace(node.state.frame, trigger=trigger,
                                                        arrival=now))
         node.gripper_cycle(now, ArmOwner.OWNER_TELEOP, np.array(q),
-                           node.get_clock().now().to_msg())
+                           node.get_clock().now().to_msg(), joint_age=0.0)
         if node.gripper_output.publish:
             finger[0] = node.gripper_output.command
             published.append((node.gripper_output.command, node.gripper_output.hold))

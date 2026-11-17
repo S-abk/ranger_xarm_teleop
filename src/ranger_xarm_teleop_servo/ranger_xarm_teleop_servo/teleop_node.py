@@ -1152,7 +1152,7 @@ class TeleopNode(Node):
             self.solver_fault = ''
         marks.append(('target and joint command', self.mono()))
         if self.gripper_params.enabled:
-            self.gripper_cycle(now, owner, joints, stamp)
+            self.gripper_cycle(now, owner, joints, stamp, tool_age)
             marks.append(('gripper', self.mono()))
         self.publish_calibration(stamp)
         self.manage_servo(now, output.want_servo_active)
@@ -1208,8 +1208,14 @@ class TeleopNode(Node):
 
         return clearance
 
-    def gripper_cycle(self, now: float, owner: int, joints, stamp) -> None:
-        """Run the gripper logic for this cycle and publish its command with ``stamp``."""
+    def gripper_cycle(self, now: float, owner: int, joints, stamp,
+                      joint_age: float = math.inf) -> None:
+        """
+        Run the gripper logic for this cycle and publish its command with ``stamp``.
+
+        ``joint_age``: the age of the newest joint state, by local arrival and by its stamp,
+        the larger (``measured``); beyond ``tool_pose_timeout`` the gripper freezes.
+        """
         owned = owner == ArmOwner.OWNER_TELEOP and self.owner_gripper
         if not owned:
             self.gripper_owner_since = None
@@ -1219,9 +1225,9 @@ class TeleopNode(Node):
         latest = self.gripper_held
         if owned and latest is not None and latest[0] > self.gripper_owner_since:
             held = latest[1]        # produced after teleop's controller became active
-        # Joint states recent enough to check the finger keep-out (the tool pose timeout).
-        joints_fresh = (self.joint_state_arrival is not None
-                        and now - self.joint_state_arrival <= self.params.tool_pose_timeout)
+        # Joint states recent enough to check the finger keep-out: the same age, by arrival
+        # and by stamp, and the same timeout as the arm's measured tool pose.
+        joints_fresh = joint_age <= self.params.tool_pose_timeout
         measured = None
         sample = self.gripper_measured()
         if sample is not None and joints_fresh:

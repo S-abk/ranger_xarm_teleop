@@ -107,7 +107,12 @@ def test_srdf_lines():
 
 @pytest.mark.parametrize('urdf, semantic, group, message', [
     (robot_urdf(), srdf(), 'nope', 'no group'),
-    (robot_urdf(), srdf(group='<link name="l6"/>'), 'arm', 'no <chain> or <joint>'),
+    (robot_urdf(), srdf(group='<link name="l6"/>'), 'arm', 'only <chain> and <joint>'),
+    (robot_urdf(), srdf(group='<chain base_link="xarm_link_base" tip_link="l3"/>'
+                              '<group name="hand"/>'), 'arm', 'only <chain> and <joint>'),
+    (robot_urdf(), srdf(group='<chain base_link="xarm_link_base" tip_link="l3"/>'
+                              '<link name="l6"/>'), 'arm', 'only <chain> and <joint>'),
+    (robot_urdf(), srdf(group=' '), 'arm', 'no <chain> or <joint>'),
     (robot_urdf(), srdf(group='<chain base_link="l6" tip_link="l1"/>'), 'arm', 'not below'),
     (robot_urdf(), srdf(group='<joint name="ghost"/>'), 'arm', 'does not have'),
     (robot_urdf(), srdf(group='<joint name="tool"/>'), 'arm', 'no movable joint'),

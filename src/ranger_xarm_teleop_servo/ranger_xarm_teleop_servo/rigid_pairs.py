@@ -81,9 +81,9 @@ def group_joints(urdf_text: str, srdf_text: str, group: str) -> Set[str]:
     """
     Return the movable joints of SRDF group ``group``, and the joints that mimic them.
 
-    The group is read from its ``<chain>`` and ``<joint>`` elements. A group given by
-    ``<link>`` or ``<group>`` elements only is refused (``DescriptionError``): its joints
-    are not derived here.
+    The group is read from its ``<chain>`` and ``<joint>`` elements. A group with any other
+    element (``<link>``, ``<group>``) is refused (``DescriptionError``): a joint given that
+    way would be missed, and pairs across it listed.
     """
     urdf, srdf = _parse(urdf_text, 'URDF'), _parse(srdf_text, 'SRDF')
     parent_of, mimics = _tree(urdf)
@@ -91,6 +91,11 @@ def group_joints(urdf_text: str, srdf_text: str, group: str) -> Set[str]:
     element = next((g for g in srdf.findall('group') if g.get('name') == group), None)
     if element is None:
         raise DescriptionError(f'the SRDF has no group {group!r}')
+    others = [child.tag for child in element if child.tag not in ('chain', 'joint')]
+    if others:
+        raise DescriptionError(f'group {group!r} has {sorted(set(others))} elements: only '
+                               '<chain> and <joint> groups are derived (a joint given another '
+                               'way would be missed)')
     names: List[str] = []
     for chain in element.findall('chain'):
         names += _chain_joints(parent_of, chain.get('base_link'), chain.get('tip_link'))
