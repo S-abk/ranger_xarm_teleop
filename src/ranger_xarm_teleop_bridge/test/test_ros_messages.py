@@ -15,6 +15,7 @@
 
 import dataclasses
 import json
+import math
 import os
 
 from builtin_interfaces.msg import Time
@@ -28,6 +29,12 @@ import rclpy
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
 STAMP = Time(sec=1234, nanosec=567)
+
+
+def no_controller_axes(axes):
+    """Both hands without a controller: NaN trigger axes (0 and 4), every other axis 0.0."""
+    return (math.isnan(axes[0]) and math.isnan(axes[4])
+            and [axes[i] for i in (1, 2, 3, 5, 6, 7)] == [0.0] * 6)
 
 
 def frames_of(name):
@@ -112,7 +119,8 @@ def test_inv2_absent_hand_has_no_pose_and_nothing_substituted(node):
     assert msgs.status.left.pose_present is True
     assert pose_tuple(msgs.poses['left']) == xr_pose_to_ros(frame.left.position,
                                                             frame.left.orientation)
-    assert list(msgs.joy.axes[4:8]) == [0.0, 0.0, 0.0, 0.0]
+    # No controller: the trigger value is missing (NaN, never 0.0 = released), the rest zeros.
+    assert math.isnan(msgs.joy.axes[4]) and list(msgs.joy.axes[5:8]) == [0.0, 0.0, 0.0]
     assert list(msgs.joy.buttons[5:10]) == [0, 0, 0, 0, 0]
 
 
@@ -123,7 +131,7 @@ def test_inv3_viewer_only_frame_publishes_no_pose(node):
     assert msgs.poses == {}
     assert msgs.status.viewer_present is True
     assert not msgs.status.left.pose_present and not msgs.status.right.pose_present
-    assert list(msgs.joy.axes) == [0.0] * 8 and list(msgs.joy.buttons) == [0] * 10
+    assert no_controller_axes(msgs.joy.axes) and list(msgs.joy.buttons) == [0] * 10
 
 
 def test_head_pose_shares_the_stamp_and_is_the_converted_viewer(node):
@@ -199,7 +207,8 @@ def test_hand_tracked_source_is_not_present(node):
     assert msgs.status.left.pose_present is True
     assert msgs.status.left.hand_tracked is False
     # Joy block of a tracked hand is zeros, like an absent hand.
-    assert list(msgs.joy.axes[4:]) == [0.0] * 4 and list(msgs.joy.buttons[5:]) == [0] * 5
+    assert math.isnan(msgs.joy.axes[4]) and list(msgs.joy.axes[5:]) == [0.0] * 3
+    assert list(msgs.joy.buttons[5:]) == [0] * 5
 
 
 def test_real_hands_clip_publishes_no_pose_and_flags_hand_tracked(node):
@@ -212,7 +221,7 @@ def test_real_hands_clip_publishes_no_pose_and_flags_hand_tracked(node):
         for side in ('left', 'right'):
             status = getattr(msgs.status, side)
             assert status.pose_present is False and status.hand_tracked is True
-        assert list(msgs.joy.buttons) == [0] * 10 and list(msgs.joy.axes) == [0.0] * 8
+        assert list(msgs.joy.buttons) == [0] * 10 and no_controller_axes(msgs.joy.axes)
 
 
 def test_real_controller_clip_publishes_the_right_pose(node):
