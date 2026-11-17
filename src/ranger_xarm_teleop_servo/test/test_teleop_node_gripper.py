@@ -613,6 +613,43 @@ def test_arm_side_conditions_do_not_freeze_the_gripper(harness):
     assert h.commands_between(6.7, 6.8)[-1] == OPEN
 
 
+def test_a_reference_space_reset_does_not_freeze_the_gripper(harness):
+    h = harness()
+    # gripper_absent_release: the trigger is pressed at 1.5 s and the gripper closes until
+    # about 2.4 s. The room frame resets at 1.8 s, mid-ramp: the calibration was made under
+    # the old reset count, so the arm holds as not calibrated.
+    h.play('gripper_absent_release',
+           edit=lambda t, p: replace(p, reset_count=p.reset_count + 1) if t >= 1.8 else p)
+    window = [c for c in h.cycles if 1.83 <= c[0] < 2.9]
+    assert {c[3].hold_reason for c in window} == {TeleopState.HOLD_NOT_CALIBRATED}
+    assert all(c[2] for c in window)
+    assert all(c[3].gripper_hold == TeleopState.GRIPPER_HOLD_NONE for c in window)
+    closing = h.commands_between(1.83, 2.9)
+    assert closing == sorted(closing) and closing[0] < CLOSED and closing[-1] == CLOSED
+    # Released at 5.0 s, still not calibrated: it opens.
+    assert h.commands_between(6.0, 6.3)[-1] == OPEN
+
+
+def test_the_gripper_works_without_a_calibration(harness):
+    h = harness()
+
+    def never_calibrated(t, parsed):
+        # The calibrate button (A, xr-standard index 4) is never pressed; B arms at 0.7 s.
+        if parsed.right is None:
+            return parsed
+        buttons = parsed.right.buttons
+        return _right(parsed, buttons=buttons[:4] + (buttons[2],) + buttons[5:])
+    h.play('gripper_absent_release', edit=never_calibrated)
+    armed = [c for c in h.cycles if 1.2 <= c[0] < 2.9]
+    assert armed and all(c[3].armed for c in armed)
+    assert {c[3].hold_reason for c in armed} == {TeleopState.HOLD_NOT_CALIBRATED}
+    assert all(c[2] for c in armed)
+    assert all(c[3].gripper_hold in (TeleopState.GRIPPER_HOLD_NONE,
+                                     TeleopState.GRIPPER_HOLD_AWAIT_TRIGGER) for c in armed)
+    assert h.commands_between(2.6, 2.9)[-1] == CLOSED
+    assert h.commands_between(6.0, 6.3)[-1] == OPEN
+
+
 def test_a_release_during_an_absence_does_not_open_the_gripper(harness):
     h = harness()
     h.play('gripper_absent_release')

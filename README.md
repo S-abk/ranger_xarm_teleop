@@ -423,8 +423,9 @@ MoveIt Servo slows every joint while any self-collision pair its collision matri
 enabled is within `self_collision_proximity_threshold` (10 mm in `config/servo.yaml`), in
 every direction of motion. Pairs inside the gripper, or between a finger and the link the
 gripper is mounted on, keep their distance however the arm moves, but a closed gripper brings
-some within 10 mm: with the robot workspace's SRDF a finger is 7.8 mm from the gripper base
-when closed (14.5 mm open), and the arm then runs at about a fifth of the commanded speed.
+some within 10 mm: with the robot workspace's description a finger is 7.8 mm from the gripper
+base when closed (14.5 mm open), and while such pairs were enabled the arm ran at about a fifth
+of the commanded speed. The robot workspace's SRDF now disables them.
 
 Such pairs are derived from the description, with no link names (`rigid_pairs.py`): both
 links have collision geometry, are moved by the arm, have no joint of MoveIt Servo's group
@@ -434,8 +435,10 @@ same. They belong in the SRDF move_group reads: MoveIt Servo takes move_group's 
 matrix (it asks move_group for the planning scene when it starts), so an SRDF given to Servo
 alone has no effect. For move_group, disabling them changes nothing for arm plans; for the
 gripper's own motion it gives up the check of those pairs; with the robot workspace's
-description, sampled every 0.01 rad over the gripper's range, none comes closer than 7.8 mm. The mock and Gazebo stack tests that compare the
-tool speed with the gripper open and closed skip, naming the pairs, while any is left enabled.
+description, sampled every 0.01 rad over the gripper's range, none comes closer than 7.8 mm.
+The mock and Gazebo stack tests that compare the tool speed with the gripper open and closed,
+and the mock test that drives the closed gripper into the robot's body, skip, naming the
+pairs, while any is left enabled.
 
 ### Measuring a run
 
