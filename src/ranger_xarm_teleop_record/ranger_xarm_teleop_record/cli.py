@@ -295,9 +295,11 @@ def fit_main(argv=None) -> int:
         print(result['reason'])
         return 2
     for key, change in result['changes'].items():
+        held = result['worst_held_out'][key]
+        held = '-' if held is None else f'{held:.5g}'
         print(f'{key}: proposed {change["proposed"]:g} (current {change["current"]}, '
               f'{change["direction"]}; worst fit {result["worst_fit"][key]:.5g}, worst held '
-              f'out {result["worst_held_out"][key] if result["worst_held_out"][key] is None else round(result["worst_held_out"][key], 5)})')
+              f'out {held})')
     for key, why in result['not_fitted'].items():
         print(f'{key}: not fitted ({why}); keep the current value')
     if result['held_out_failures']:

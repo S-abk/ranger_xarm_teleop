@@ -90,7 +90,7 @@ def test_measured_sample_is_never_later_than_the_tick():
     assert np.all(held_stamp[ok] <= t[ok] + 1e-12)
     for k in np.flatnonzero(ok)[:200]:
         row = np.flatnonzero(np.isclose(st.fields['gripper_measured_stamp'], held_stamp[k],
-                                         rtol=0.0, atol=1e-9))
+                                        rtol=0.0, atol=1e-9))
         assert len(row)
         assert arrays['gripper_measured'][k] in st.fields['gripper_measured'][row]
     # And where the cycle's own sample was later than the tick, an earlier row is used.

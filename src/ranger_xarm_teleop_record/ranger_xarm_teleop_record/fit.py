@@ -83,12 +83,12 @@ def fit(episodes: Sequence[dict], current: Dict[str, float], fraction: float = F
     'worst_fit', 'worst_held_out', 'proposed', 'current', 'held_out_failures', ...}``.
     """
     n = len(episodes)
-    out = {'ok': False, 'reason': '', 'rule': {
-        'fraction': fraction, 'factor': factor, 'min_episodes': min_episodes,
-        'steps': {k: v[2] for k, v in FIT_KEYS.items()},
-        'text': f'worst on the first {fraction:g} of the eligible episodes in recording order '
-                f'x {factor:g}, rounded up to the step; the rest held out'},
-        'n_eligible': n, 'current': {k: current.get(k) for k in FIT_KEYS}}
+    rule = {'fraction': fraction, 'factor': factor, 'min_episodes': min_episodes,
+            'steps': {k: v[2] for k, v in FIT_KEYS.items()},
+            'text': (f'worst on the first {fraction:g} of the eligible episodes in recording '
+                     f'order x {factor:g}, rounded up to the step; the rest held out')}
+    out = {'ok': False, 'reason': '', 'rule': rule, 'n_eligible': n,
+           'current': {k: current.get(k) for k in FIT_KEYS}}
     if n < max(2, min_episodes):
         out['reason'] = (f'{n} eligible episode(s), at least {max(2, min_episodes)} needed: '
                          'no proposal')

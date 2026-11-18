@@ -25,9 +25,8 @@ import copy
 import os
 from typing import Dict, List, Optional
 
-import yaml
-
 from ranger_xarm_teleop_record.streams import OPTIONAL_FIELDS
+import yaml
 
 KINDS = ('teleop_state', 'pose', 'gripper_command', 'joint_command', 'joint_states', 'image',
          'camera_info', 'input_status', 'joy', 'episode_state', 'odometry', 'twist', 'owner',
@@ -180,10 +179,11 @@ def effective_checks(checks: dict, profile: dict, source: str) -> dict:
     Return the tolerances in force for ``profile``: ``checks`` with the profile's overrides.
 
     A deployment profile may override the fitted consistency tolerances (PROFILE_TOLERANCES)
-    in its ``checks`` block and mark some of them ``provisional`` (set by hand before enough data to fit them). ``source``
-    says which copy of the profile the overrides came from; it is reported with every check
-    under ``_tolerances``. An override of a key checks.yaml does not have is an error, so a
-    typing mistake cannot leave a tolerance silently at its default.
+    in its ``checks`` block and mark some of them ``provisional`` (set by hand before enough
+    data to fit them). ``source`` says which copy of the profile the overrides came from; it
+    is reported with every check under ``_tolerances``. An override of anything else is an
+    error, so neither a typing mistake nor a profile carried in a sidecar can change another
+    tolerance or switch a failure off.
     """
     out = copy.deepcopy({k: v for k, v in checks.items() if k != '_tolerances'})
     overrides = profile.get('checks') or {}

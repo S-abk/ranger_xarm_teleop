@@ -33,7 +33,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from ranger_xarm_teleop_record import metadata
-from ranger_xarm_teleop_record.profile import PROFILE_TOLERANCES, period
+from ranger_xarm_teleop_record.profile import period, PROFILE_TOLERANCES
 from ranger_xarm_teleop_record.streams import Episode
 
 # Replicated from ranger_xarm_teleop_interfaces/msg/TeleopState.msg and GripperCommand.msg.

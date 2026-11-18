@@ -142,10 +142,10 @@ FIELD_INFO: Dict[str, Tuple[str, str, str]] = {
     'tool_pose_measured': ('m, xyzw', 'base', 'forward kinematics of the measured joints; '
                            'NaN where not valid. Held on the measured row (see '
                            'measured_row_age); TeleopState carries no stamp of its own joint '
-                           'state, which is not newer than the gripper sample\'s'),
+                           "state, which is not newer than the gripper sample's"),
     'tool_pose_measured_valid': ('', '', 'the measured tool pose was valid'),
     'tool_pose_measured_bounded': ('', '', 'the held row has a gripper sample stamp, which '
-                                   'bounds the tool pose\'s joint state (not later than the '
+                                   "bounds the tool pose's joint state (not later than the "
                                    'tick); where False the tool pose may come from a joint '
                                    'state up to one joint-state period after its cycle stamp'),
     'gripper_measured': ('rad', '', 'measured gripper opening; NaN where not valid'),
@@ -159,7 +159,7 @@ FIELD_INFO: Dict[str, Tuple[str, str, str]] = {
     'armed': ('', '', 'teleop armed'),
     'translation_scale': ('', '', 'operator translation scale'),
     'input_age': ('s', '', 'age of the newest operator input frame in the held cycle, on the '
-                  'teleop node\'s monotonic clock; NaN where it had no input frame'),
+                  "teleop node's monotonic clock; NaN where it had no input frame"),
     'state_age': ('s', '', 'tick time minus the state stamp'),
     'tick_valid': ('', '', 'every required observation is fresh (state, joint states, '
                    'required images); action fields do not matter here'),
@@ -198,8 +198,10 @@ def _rows(ep: Episode, name: str) -> Optional[Stream]:
 def _ticks(ep: Episode, state: Stream, rate_hz: Optional[float], checks: dict,
            tick_stream: Optional[str]) -> Tuple[np.ndarray, dict, Optional[np.ndarray]]:
     """
-    Return ``(t, ticks, rows)``: the tick times, their description for export.json and, for
-    ``tick_stream``, the row of that stream at each tick (each row exactly once).
+    Return the tick times, their description for export.json and the tick stream's rows.
+
+    The rows are those of ``tick_stream`` at each tick (each row exactly once); None for a
+    fixed grid.
     """
     t0 = float(np.min(state.stamp))
     t1 = float(np.max(state.stamp))
@@ -228,7 +230,7 @@ def _ticks(ep: Episode, state: Stream, rate_hz: Optional[float], checks: dict,
         'mode': 'stream', 'stream': tick_stream,
         'rate_hz': spec.get('rate_hz'),
         'rule': f'one tick per frame of {tick_stream}, at its stamp, in stamp order; rate_hz '
-                'is that stream\'s nominal rate, the spacing varies with the frames',
+                "is that stream's nominal rate, the spacing varies with the frames",
         'dt_min_s': float(dt.min()) if len(dt) else None,
         'dt_max_s': float(dt.max()) if len(dt) else None,
         'ticks_before_first_state': int(np.sum(t < t0)),

@@ -221,8 +221,9 @@ def test_the_tools_use_the_current_package_profile_for_old_episodes():
 
 def episodes(values):
     """Return fit inputs with the given rotation p99 values (other metrics fixed)."""
-    return [{'id': f'e{i:02d}', 'metrics': {'arm_rms_m': 0.001, 'arm_p99_m': 0.003,
-                                           'arm_rot_p99_deg': v, 'gripper_abs_rad': 0.04}}
+    return [{'id': f'e{i:02d}',
+             'metrics': {'arm_rms_m': 0.001, 'arm_p99_m': 0.003, 'arm_rot_p99_deg': v,
+                         'gripper_abs_rad': 0.04}}
             for i, v in enumerate(values)]
 
 
