@@ -653,3 +653,61 @@ false means hold: no new target; `action_valid` is false there, and `gripper_act
 false in cycles where teleop held no gripper command. `data.npz` + `export.json` + lossless PNG
 images (32-bit depth as `.npy`): numpy and PIL only, nothing tied to a training framework.
 
+
+## Operator feedback (vibration and the headset panel)
+
+The operator, in the headset, knows the system's state without a screen.
+
+**What runs.** The operator feedback node (`ranger_xarm_teleop_bridge feedback_node`, node
+`operator_feedback`) starts with the stack (`feedback:=true`, the default of
+`teleop_core.launch.py`), before arming. It only observes `/teleop/state` (every message) and
+`/teleop/episode/state`, and publishes:
+
+| Topic | Type | What |
+|---|---|---|
+| `/teleop/haptic` | `Haptic` | one vibration request per episode event (left controller) |
+| `/teleop/operator/status` | `OperatorStatus` | the panel's content, 5 Hz: plain words for the hold, the limit and the last refusal, the last fault and the most severe recent limit latched, how fresh each source is |
+
+Both are recorded (optional streams of the profiles): what the operator felt and saw. The
+bridge (`bridge.launch.py feedback:=true`, the default) subscribes to these two topics only and
+sends them to the page over its relay connection (`teleop_haptic`, `teleop_status`). It never
+waits for a send while reading headset frames, drops what is older than its maximum age
+instead of sending it late, and queues nothing while the link is down. With `feedback:=false`
+nothing is subscribed or sent. If the feedback node stops, teleop goes on and the panel shows
+NO DATA.
+
+**Vibration** (left controller; distinct by count and length; the two you must not miss are
+long and strong):
+
+| Event | Pattern |
+|---|---|
+| mark (left trigger) | one tick, 40 ms |
+| start | one buzz, 200 ms |
+| stop | two short, 120 ms each |
+| keep | one long, 500 ms |
+| discard | three quick, 80 ms each |
+| refused | two long and strong, 350 ms each |
+| stopped by itself | an alarm: five short and strong, a pause, five again (2.4 s) |
+
+An event is vibrated once (by the episode node's event counter): a repeated state message, a
+reconnect or a lost message neither doubles nor invents one. A request older than 0.75 s
+anywhere on the way is dropped, never played late.
+
+**Panel.** A small panel about 10 cm above the left controller, turned to face you (or
+head-locked at the lower left: `panel_anchor: head` in the parameter file below). It shows the recording state with the
+episode and elapsed time, kept and discarded counts, armed, clutch, calibration, the
+translation scale and active limit, the gripper, the hold or latched fault in plain words, and
+the last refusal or self-stop. The left thumbstick click hides and shows it (remembered by the
+page). It has no controls. When its newest status is older than 1 s it shows NO DATA instead.
+
+**Tuning.** Patterns, priorities, rates and the panel's place and size are parameters in
+`ranger_xarm_teleop_bridge/config/operator_feedback.yaml` (`feedback_params_file:=` on both
+launches). The page shows its version (`client feedback-N`) in its log, next to the status pill
+and in the panel corner: after an update, reload the page fully in the headset browser.
+
+**Cost on the headset.** Record the same motion with the panel hidden, shown, and with
+`feedback:=false`, then compare the link statistics of the sidecars:
+
+```bash
+tools/compare_link.py ~/teleop_data/<session> --group hidden=1-3 --group shown=4-6 --group off=7-9
+```
