@@ -361,7 +361,7 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
     arrays['armed'] = held('armed', False).astype(bool)
     arrays['translation_scale'] = held('translation_scale', np.nan).astype(float)
     input_age = held('input_age', np.nan).astype(float)
-    input_age[~(input_age >= 0.0)] = np.nan          # TeleopState sends -1 with no input frame
+    input_age[input_age == -1.0] = np.nan            # TeleopState's sentinel: no input frame
     arrays['input_age'] = input_age
 
     base_name = None
