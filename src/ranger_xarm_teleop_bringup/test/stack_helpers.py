@@ -566,7 +566,8 @@ MOCK_STACK_NODES = {
     **{re.escape(name): 1 for name in (
         '/arm_mux', '/arm_mux_client', '/arm_mux_observer', '/controller_manager',
         '/gripper_relay', '/joint_state_broadcaster', '/move_group', '/move_group/moveit',
-        '/moveit_simple_controller_manager', '/robot_state_publisher', '/servo_node',
+        '/moveit_simple_controller_manager', '/operator_feedback', '/robot_state_publisher',
+        '/servo_node',
         '/servo_node/moveit', '/teleop_arm_controller', '/teleop_gripper_controller',
         '/teleop_servo', '/teleop_servo_watcher', '/xarm6_traj_controller',
         '/xarm_gripper_traj_controller', '/xarm_mock_components_genericsystem',

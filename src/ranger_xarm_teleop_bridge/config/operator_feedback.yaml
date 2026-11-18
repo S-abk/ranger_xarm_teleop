@@ -1,0 +1,47 @@
+# Operator feedback: what the operator feels (vibration patterns) and where the panel sits.
+# Tune by feel in a live session; restart the stack (patterns) or the bridge (panel) to apply.
+#
+# Patterns: flat [intensity 0..1, on_ms, off_ms, ...] per episode event, on the left controller.
+# Distinct by count and length. An all-zero intensity silences an event. Priority: a pattern
+# replaces a playing one of lower or equal priority; the two the operator must not miss
+# (REFUSED, AUTO_STOP) outrank the others. Maximum 16 pulses, 5 s.
+operator_feedback:
+  ros__parameters:
+    hand: left
+    haptic_max_age_s: 0.75        # later than this anywhere on the way: dropped, never played late
+    status_rate_hz: 5.0
+    teleop_stale_s: 0.5           # a section shows "no data" when its source is older
+    episode_stale_s: 1.0
+    fault_latch_s: 10.0           # a fault hold stays on the panel this long after it ends
+    limit_hold_s: 1.0             # the most severe limit stays this long after it clears
+    haptic:
+      MARK: [0.5, 40.0, 0.0]                                   # tick
+      START: [0.8, 200.0, 0.0]                                 # one buzz
+      STOP: [0.8, 120.0, 120.0, 0.8, 120.0, 0.0]                   # two short
+      KEEP: [0.7, 500.0, 0.0]                                  # one long
+      DISCARD: [0.8, 80.0, 100.0, 0.8, 80.0, 100.0, 0.8, 80.0, 0.0]    # three quick
+      REFUSED: [1.0, 350.0, 200.0, 1.0, 350.0, 0.0]                # two long, strong
+      AUTO_STOP: [1.0, 120.0, 80.0, 1.0, 120.0, 80.0, 1.0, 120.0, 80.0, 1.0, 120.0, 80.0, 1.0, 120.0, 400.0,
+                  1.0, 120.0, 80.0, 1.0, 120.0, 80.0, 1.0, 120.0, 80.0, 1.0, 120.0, 80.0, 1.0, 120.0, 0.0]  # alarm, twice
+    haptic_priority:
+      MARK: 1
+      START: 2
+      STOP: 2
+      KEEP: 2
+      DISCARD: 2
+      REFUSED: 3
+      AUTO_STOP: 3
+
+# The panel: information only, hidden and shown with the left thumbstick click.
+# anchor left_controller: offset from the left grip in a frame facing the head (x right, y up,
+# z toward the head), metres. anchor head: offset in the head frame (x right, y up, -z ahead).
+teleop_input_bridge:
+  ros__parameters:
+    panel_anchor: left_controller
+    panel_offset: [0.0, 0.10, 0.0]
+    panel_width_m: 0.16
+    panel_visible_default: true
+    status_stale_s: 1.0           # the panel shows NO DATA when the newest status is older
+    status_max_age_s: 0.4         # a status older than this is not sent
+    haptic_queue: 8
+    send_buffer_limit_bytes: 16384
