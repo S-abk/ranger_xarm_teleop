@@ -66,6 +66,8 @@ RELAY_TYPES = {
     # terminal, so this is the only clean way to end it — killing the
     # process would lose the episode in progress.
     "record_control",
+    # Robot -> headset operator feedback: vibration patterns, status panel (web/feedback.js).
+    "teleop_haptic", "teleop_status",
 }
 
 
