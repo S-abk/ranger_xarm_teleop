@@ -632,7 +632,9 @@ the recorded target, and the measured opening the gripper command, within a fitt
 tolerance, over the cycles where teleop commanded (damped or limited cycles are reported
 separately). An episode in which teleop never commanded the arm fails with one reason,
 `NO_ACTION: no teleop arm action in the episode`. An episode missing any sidecar key is
-refused.
+refused. Tolerances belong to the checker, not the recording. So every report records what
+judged it: the tolerance values in force and their source, and the checking code's commit,
+dirty state and a digest of its source (`checked_by`), so a verdict can be reproduced.
 
 **Refitting** (`episode_fit`). Proposes the consistency tolerances from kept episodes of one
 profile: in recording order, the worst value of the first 70 % times 1.5, rounded up (0.5 mm,

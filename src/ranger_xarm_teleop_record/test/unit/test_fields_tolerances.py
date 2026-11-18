@@ -15,10 +15,12 @@
 
 import copy
 import math
+import os
+import shutil
 
 import numpy as np
 import pytest
-from ranger_xarm_teleop_record import checker, cli, fit, profile
+from ranger_xarm_teleop_record import checker, cli, fit, profile, provenance
 from ranger_xarm_teleop_record.streams import FieldPresence
 import synth
 
@@ -269,3 +271,33 @@ def test_the_proposal_block_is_a_profile_checks_block():
     prof['provisional'] = {}
     checks = profile.effective_checks(CHECKS, prof, 'refit')
     assert checks['consistency']['arm_rot_p99_deg'] == 0.5
+
+
+# ------------------------------------------------------------------ reproducible verdicts
+
+def test_every_report_names_the_checking_code_and_the_values_in_force():
+    import subprocess
+    report = checker.check_episode(synth.build(), CHECKS)
+    by = report['checked_by']
+    here = os.path.dirname(os.path.abspath(__file__))
+    head = subprocess.run(['git', '-C', here, 'rev-parse', 'HEAD'], capture_output=True,
+                          text=True, check=False).stdout.strip()
+    assert by['commit'] == head and isinstance(by['dirty'], bool)
+    assert len(by['source_sha256']) == 64 and by['files'] > 10
+    values = report['tolerances']['values']
+    expected = profile.effective_checks(CHECKS, synth.build().profile, 'x')
+    assert values == {k: v for k, v in expected.items() if k != '_tolerances'}
+    assert values['consistency']['arm_rot_p99_deg'] == 1.5
+
+
+def test_the_source_digest_changes_with_the_checking_code(tmp_path, monkeypatch):
+    package = os.path.dirname(os.path.dirname(os.path.abspath(provenance.__file__)))
+    copy_root = tmp_path / 'pkg'
+    shutil.copytree(package, copy_root, ignore=shutil.ignore_patterns('test', '__pycache__'))
+    inner = copy_root / 'ranger_xarm_teleop_record'
+    monkeypatch.setattr(provenance, '_package_root', lambda: str(inner))
+    first = provenance.checking_code.__wrapped__()
+    assert first['commit'] is None                       # not in a git tree: said so
+    with open(inner / 'checker.py', 'a', encoding='utf-8') as handle:
+        handle.write('\n# changed\n')
+    assert provenance.checking_code.__wrapped__()['source_sha256'] != first['source_sha256']

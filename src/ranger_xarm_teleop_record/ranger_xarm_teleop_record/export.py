@@ -452,7 +452,8 @@ def _meta(ep: Episode, arrays: Dict[str, np.ndarray], rate: float, t0: float, t1
                        'per_tick': name not in constants and not name.endswith('_names')})
     checker = None
     if isinstance(verdict, dict):
-        checker = {k: verdict.get(k) for k in ('verdict', 'reasons', 'flags', 'usable')}
+        checker = {k: verdict.get(k) for k in ('verdict', 'reasons', 'flags', 'usable',
+                                               'tolerances', 'checked_by')}
     elif verdict is not None:
         checker = {'verdict': str(verdict)}
     meta = {

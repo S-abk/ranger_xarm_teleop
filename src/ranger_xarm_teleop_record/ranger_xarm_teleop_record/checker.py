@@ -23,7 +23,9 @@ Report keys: ``verdict`` (PASS, FAIL, REFUSED), ``reasons``, ``flags`` (INV-4 no
 ``{flag, reason, time}``), ``usable``, ``streams`` (one entry per recorded profile stream),
 ``link``, ``rtf``, ``base``, ``limits``, ``consistency``, ``missing_metadata``, ``window``,
 ``fields`` (optional fields absent per stream, see streams.py) and ``tolerances`` (which
-profile's overrides were applied over checks.yaml, and which values are provisional).
+profile's overrides were applied over checks.yaml, which values are provisional, and every
+value in force) and ``checked_by`` (the commit, dirty state and a source digest of the
+checking code), so a verdict can be reproduced.
 
 Tolerances: when ``checks`` has not been through ``profile.effective_checks`` the overrides of
 the episode's own recorded profile apply. The command-line tools apply those of the package's
@@ -44,6 +46,7 @@ import numpy as np
 from ranger_xarm_teleop_record import consistency
 from ranger_xarm_teleop_record import metadata
 from ranger_xarm_teleop_record.profile import effective_checks, period, recorded
+from ranger_xarm_teleop_record.provenance import checking_code
 from ranger_xarm_teleop_record.streams import Episode, OPTIONAL_FIELDS, Stream
 
 # Replicated from ranger_xarm_teleop_interfaces/msg/TeleopState.msg (HOLD_* and LIMIT_*).
@@ -642,7 +645,11 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     report: dict = {'verdict': 'FAIL', 'reasons': reasons, 'flags': flags, 'usable': False,
                     'streams': {}, 'link': {}, 'rtf': {}, 'base': {}, 'limits': {},
                     'consistency': {}, 'missing_metadata': list(absent), 'window': None,
-                    'fields': {}, 'tolerances': checks['_tolerances']}
+                    'fields': {},
+                    'tolerances': dict(checks['_tolerances'],
+                                       values={k: v for k, v in checks.items()
+                                               if k != '_tolerances'}),
+                    'checked_by': checking_code()}
     state = ep.get('state')
     if state is None or len(state) < 2:
         reasons.append('state: fewer than two rows, no action timeline')
