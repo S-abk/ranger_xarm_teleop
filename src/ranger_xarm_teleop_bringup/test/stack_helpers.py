@@ -68,9 +68,10 @@ def child_environment(offset: int) -> dict:
 
     The domain is ``offset`` places after the session's domain in the band 10-99, so that
     test modules, also run in parallel, do not see each other and never reach domains 0-9;
-    discovery stays on this machine; RViz, which the mock launch always starts, draws off
-    screen. A parallel worker (pytest-xdist) needs the session's domain to be set and in the
-    band: it fails rather than derive its domain from a default.
+    discovery stays on this machine; an RViz that a launch starts anyway draws off screen,
+    where it aborts (and so fails the test) rather than open a window. A parallel worker
+    (pytest-xdist) needs the session's domain to be set and in the band: it fails rather than
+    derive its domain from a default.
     """
     env = dict(os.environ)
     raw = env.get('ROS_DOMAIN_ID', '')
@@ -553,11 +554,11 @@ def tool_speed_profile(states, window=5):
 # ---- isolation of the stack tests ----
 
 #: Nodes of launched processes that exit while the stack keeps running, by the executable
-#: name the launch log gives the process (``[rviz2-6]: process has died``). RViz, which the
-#: robot workspace's MoveIt launch starts, aborts at once when it draws off screen, and its
-#: node can stay in the other processes' graphs until its lease ends (about 20 s); a
-#: spawner leaves once it has loaded its controller.
-EXITING_NODES = {'rviz2': (r'/rviz',), 'spawner': (r'/spawner_\w+',)}
+#: name the launch log gives the process (``[spawner-3]: process has finished``): a spawner
+#: leaves once it has loaded its controller. Any other exit fails. The mock stacks start
+#: without RViz (``rviz:=false``); one that started anyway would fail, by its exit (it
+#: aborts when it draws off screen) or by its node.
+EXITING_NODES = {'spawner': (r'/spawner_\w+',)}
 
 #: Every node of a mock stack (``teleop_mock.launch.py``) while it runs, as patterns, each
 #: matched by exactly this many nodes; names with a number change from run to run.

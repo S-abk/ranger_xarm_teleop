@@ -63,7 +63,8 @@ EXPECTED_RELEASES = (TeleopState.HOLD_CLUTCH_RELEASED, TeleopState.HOLD_INPUT_ST
 def stack(tmp_path_factory):
     logs = tmp_path_factory.mktemp('mock_dls')
     env = child_environment(offset=6)
-    launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_mock.launch.py'],
+    launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_mock.launch.py',
+                      'rviz:=false'],
                      env, str(logs / 'launch.log'))
     probe = Probe(env)
     try:

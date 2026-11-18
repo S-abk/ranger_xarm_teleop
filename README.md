@@ -166,7 +166,8 @@ joint-limit checks and feeds the teleop trajectory controller. Nothing here addr
 the launch files below start mock execution or attach to a running simulator.
 
 ```bash
-# mock execution (ros2_control mock components, move_group, RViz), system clock:
+# mock execution (ros2_control mock components, move_group, RViz), system clock
+# (rviz:=false starts it without RViz):
 ros2 launch ranger_xarm_teleop_bringup teleop_mock.launch.py
 # or a simulator that is already running, simulation time:
 ros2 launch ranger_xarm_gazebo sim.launch.py headless:=true          # terminal 1
