@@ -64,13 +64,15 @@ def haptic_payload(msg, run: int, ident: int) -> Dict[str, Any]:
     off_ms: Sequence[int] = list(msg.off_ms)
     if not len(intensity) == len(on_ms) == len(off_ms):
         raise ValueError('intensity, on_ms and off_ms differ in length')
-    pulses = [[min(1.0, max(0.0, float(i))), int(on), int(off)]
+    # Rounded: the message holds float32 (0.8 arrives as 0.800000011920929).
+    pulses = [[round(min(1.0, max(0.0, float(i))), 4), int(on), int(off)]
               for i, on, off in zip(intensity, on_ms, off_ms)]
     return {
         'type': HAPTIC_TYPE, 'v': PROTOCOL_VERSION, 'run': int(run), 'id': int(ident),
         'hand': str(msg.hand), 'source': str(msg.source), 'event': str(msg.event),
         'priority': int(msg.priority), 'pulses': pulses,
         'max_age_ms': 1000.0 * float(msg.max_age), 'missed': int(msg.missed),
+        'source_count': int(msg.source_count),
     }
 
 

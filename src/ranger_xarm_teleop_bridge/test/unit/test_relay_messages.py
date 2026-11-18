@@ -40,7 +40,11 @@ def test_haptic_message():
     assert msg['type'] == 'teleop_haptic' and msg['v'] == 1 and msg['run'] == 7
     assert msg['id'] == 3 and msg['event'] == 'REFUSED' and msg['hand'] == 'left'
     assert msg['pulses'] == [[1.0, 350, 200], [1.0, 350, 0]]
+    h = haptic('START')
+    h.intensity = [0.800000011920929]                  # as float32 arrives
+    assert rm.haptic_payload(h, 1, 1)['pulses'] == [[0.8, 200, 0]]
     assert msg['priority'] == 3 and msg['max_age_ms'] == 750.0 and msg['missed'] == 1
+    assert msg['source_count'] == 4
     assert msg['age_ms'] == 12.3
     assert msg['echo'] == {'session_id': 11, 'seq': 500, 't_client': 1234.5,
                            'held_ms': pytest.approx(2.0)}
