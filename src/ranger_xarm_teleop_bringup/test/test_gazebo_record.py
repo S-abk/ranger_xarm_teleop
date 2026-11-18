@@ -30,7 +30,8 @@ from ranger_xarm_teleop_record.bag_io import read_episode
 from ranger_xarm_teleop_record.checker import check_episode
 from ranger_xarm_teleop_record.export import build_export, write_export
 from ranger_xarm_teleop_record.profile import load_checks
-from stack_helpers import child_environment, kill_gz_partition, Process, READY
+from stack_helpers import (child_environment, cpu_seconds, kill_gz_partition, node_pids,
+                           Process, READY)
 from test_mock_record import (engaged_spans, EVENT_NAMES, fixture_file, RecordProbe,
                               replay_file, wait_for_settled_graph)
 
@@ -107,6 +108,12 @@ def test_presses_while_engaged_with_cameras_release_nothing(stack):
     probe.disarm()
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_MOVEIT, 60.0, 'MoveIt owner')
     path = fixture_file(str(logs), 'episode_marks_engaged')
+    # Reported, not asserted: CPU of the operator feedback node beside the episode node's
+    # (both read the 50 Hz teleop state), this test's own processes only.
+    mine = f'GZ_PARTITION={env["GZ_PARTITION"]}'
+    pids = {n: node_pids(n, environ=mine) for n in ('feedback_node', 'episode_node')}
+    pids = {n: v[0] for n, v in pids.items() if len(v) == 1}
+    cpu0, t0 = {n: cpu_seconds(p) for n, p in pids.items()}, time.monotonic()
     process = replay_file(env, path, str(logs / 'replay_marks.log'))
     graphs = []
     try:
@@ -118,6 +125,11 @@ def test_presses_while_engaged_with_cameras_release_nothing(stack):
         assert process.proc.returncode == 0, process.output()
     finally:
         process.stop()
+    cpu = {n: round(100.0 * (cpu_seconds(p) - cpu0[n]) / (time.monotonic() - t0), 1)
+           for n, p in pids.items()}
+    print(f'Gazebo CPU, % of one core during the episode fixture: {cpu}')
+    with open(os.path.join(str(logs), 'cpu.json'), 'w', encoding='utf-8') as handle:
+        json.dump(cpu, handle)
     time.sleep(3.0)
     with probe.lock:
         states = [(w, s) for w, s in probe.states if w >= engaged_at - 0.5]

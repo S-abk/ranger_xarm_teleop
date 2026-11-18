@@ -37,7 +37,7 @@ import pytest
 from ranger_xarm_teleop_bridge.episode_feedback import DEFAULT_PATTERNS, EVENT_NAMES
 from ranger_xarm_teleop_interfaces.msg import ArmOwner
 from ranger_xarm_teleop_record import metadata as md
-from stack_helpers import child_environment, Process, READY
+from stack_helpers import child_environment, cpu_seconds, node_pids, Process, READY
 from test_mock_record import fixture_file, RecordProbe, wait_for_settled_graph
 import websockets
 
@@ -112,29 +112,6 @@ def free_port():
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         return s.getsockname()[1]
-
-
-def pids_in_group(pgid, name):
-    out = []
-    for entry in os.listdir('/proc'):
-        if not entry.isdigit():
-            continue
-        try:
-            if os.getpgid(int(entry)) != pgid:
-                continue
-            with open(f'/proc/{entry}/cmdline', 'rb') as handle:
-                cmd = handle.read().replace(b'\0', b' ').decode(errors='replace')
-        except (OSError, ProcessLookupError):
-            continue
-        if name in cmd and 'ros2 ' not in cmd:
-            out.append(int(entry))
-    return out
-
-
-def cpu_seconds(pid):
-    with open(f'/proc/{pid}/stat', encoding='utf-8') as handle:
-        fields = handle.read().rsplit(')', 1)[1].split()
-    return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
 
 
 @pytest.fixture(scope='module')
@@ -254,7 +231,7 @@ def check_haptics(s, start, start_ms, end_ms, session_id):
 def test_disarm_fixture_gives_one_vibration_per_event(stack):
     sid = fixture_session(stack, 'episode_disarm')
     pgid = stack['launch'].proc.pid
-    pids = {n: pids_in_group(pgid, n) for n in ('feedback_node', 'episode_node')}
+    pids = {n: node_pids(n, pgid=pgid) for n in ('feedback_node', 'episode_node')}
     assert all(len(v) == 1 for v in pids.values()), pids
     stack['pids'] = {n: v[0] for n, v in pids.items()}
     start, start_ms, end_ms = replay(stack, 'episode_disarm')
