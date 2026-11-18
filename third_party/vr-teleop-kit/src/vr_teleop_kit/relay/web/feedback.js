@@ -15,7 +15,7 @@
 (function (root) {
   'use strict';
 
-  const FEEDBACK_VERSION = 'feedback-1';
+  const FEEDBACK_VERSION = 'feedback-2';
   const SEEN_MAX = 512;               // (run, id) pairs remembered for de-duplication
   const MAX_PULSES = 32;
   const MAX_PATTERN_MS = 10000;
@@ -84,11 +84,15 @@
       const pulses = layoutPulses(msg.pulses, nowMs);
       if (!pulses) return 'bad pulses';
       const priority = isNum(msg.priority) ? msg.priority : 0;
+      const source = typeof msg.source === 'string' ? msg.source : '';
       const cur = players[msg.hand];
-      if (cur && nowMs < cur.pulses[cur.pulses.length - 1].end && priority < cur.priority) {
+      // A newer request of the same source always replaces (the operator's latest press wins);
+      // another source's lower priority does not cut a playing pattern.
+      if (cur && nowMs < cur.pulses[cur.pulses.length - 1].end && priority < cur.priority
+          && source !== cur.source) {
         return 'lower priority';
       }
-      players[msg.hand] = { priority, pulses, next: 0 };
+      players[msg.hand] = { priority, source, pulses, next: 0 };
       return 'played';
     }
 
@@ -179,11 +183,15 @@
     const msg = st.msg;
     const since = Math.max(0, nowMs - st.receivedAt + st.ageAtReceipt) / 1000;  // s since built
     const ageOf = (a) => (isNum(a) ? Math.floor(a + since) : null);
+    // A section is shown only while its source (its age when the status was built, plus the
+    // status's own age) is within the staleness limit: no section is older than stale_ms.
+    const staleS = (isNum(msg.stale_ms) ? msg.stale_ms : DEFAULT_STALE_MS) / 1000;
+    const fresh = (a) => !isNum(a) || a + since <= staleS;
     const lines = [];
     const add = (text, tone) => lines.push({ text, tone });
     const addWrapped = (text, tone) => wrapText(text, WRAP_CHARS, 2).forEach((t) => add(t, tone));
 
-    const ep = msg.episode;
+    const ep = msg.episode && fresh(msg.episode_age_s) ? msg.episode : null;
     if (!ep) {
       add('Recording: no data', 'warn');
     } else {
@@ -202,7 +210,7 @@
       add('kept ' + ep.kept + '  discarded ' + ep.discarded, 'text');
     }
 
-    const t = msg.teleop;
+    const t = msg.teleop && fresh(msg.teleop_age_s) ? msg.teleop : null;
     if (!t) {
       add('Teleop: no data', 'warn');
     } else {
@@ -227,7 +235,7 @@
       if (showRef && (!showStop || refAge <= stopAge)) {
         addWrapped('Refused ' + refAge + ' s ago: ' + ep.refusal, 'bad');
       } else if (showStop) {
-        addWrapped('Stopped by itself: ' + (ep.last_event_text || 'no reason given'), 'bad');
+        addWrapped(ep.last_event_text || 'Stopped by itself: no reason given', 'bad');
       }
       if (ep.missed > 0) add('missed ' + ep.missed + ' events', 'warn');
     }

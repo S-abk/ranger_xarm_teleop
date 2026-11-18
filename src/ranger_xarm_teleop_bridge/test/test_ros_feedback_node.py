@@ -22,6 +22,7 @@ from ranger_xarm_teleop_bridge.feedback_node import FeedbackNode
 from ranger_xarm_teleop_interfaces.msg import EpisodeState, Haptic, OperatorStatus, TeleopState
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
 
 
@@ -126,6 +127,15 @@ def test_status_rate_content_and_staleness(rig):
     s = rig.statuses[-1][1]
     assert not s.teleop_valid and not s.armed and s.hold_text == ''
     assert not s.episode_valid and s.episode_index == 0
+
+
+def test_a_status_rate_below_two_per_second_is_refused():
+    rclpy.init()
+    try:
+        with pytest.raises(ValueError):
+            FeedbackNode(parameter_overrides=[Parameter('status_rate_hz', value=1.0)])
+    finally:
+        rclpy.shutdown()
 
 
 def test_publishers_have_the_contract_qos(rig):

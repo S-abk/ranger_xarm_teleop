@@ -62,16 +62,17 @@ def _seconds(t) -> float:
 class FeedbackNode(Node):
     """Publishes vibration requests and the operator status."""
 
-    def __init__(self) -> None:
-        super().__init__('operator_feedback')
+    def __init__(self, **node_kwargs) -> None:
+        super().__init__('operator_feedback', **node_kwargs)
         p = self.declare_parameter
         self.hand = str(p('hand', 'left').value)
         if self.hand not in ('left', 'right'):
             raise ValueError("hand must be 'left' or 'right'")
         self.max_age = float(p('haptic_max_age_s', 0.75).value)
         rate = float(p('status_rate_hz', 5.0).value)
-        if not 0.5 <= rate <= 30.0:
-            raise ValueError('status_rate_hz must be 0.5..30')
+        # At least two statuses per second: the page shows NO DATA after 1 s without one.
+        if not 2.0 <= rate <= 30.0:
+            raise ValueError('status_rate_hz must be 2..30')
         patterns: Dict[str, Pattern] = {}
         for event in EVENTS:
             default = DEFAULT_PATTERNS[event]

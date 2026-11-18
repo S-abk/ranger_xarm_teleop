@@ -83,6 +83,8 @@ OPERATOR_STATUS_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                                  durability=DurabilityPolicy.VOLATILE)
 
 LOG_THROTTLE_S = 2.0
+MIN_SEND_BUFFER = 1024
+MAX_SEND_BUFFER = 32768
 
 
 @dataclass
@@ -181,8 +183,15 @@ class BridgeNode(Node):
                                   float(param('panel_width_m').value),
                                   bool(param('panel_visible_default').value))
         self.status_stale_ms = 1000.0 * float(param('status_stale_s').value)
+        # Measured from the statuses' arrivals (what the page can expect), 200 ms until known.
         self.status_period_ms = 200.0
+        self._last_status_at: Optional[float] = None
         self.send_buffer_limit = int(param('send_buffer_limit_bytes').value)
+        # Below the connection's own write limit (websockets: 64 KiB), above which a send, and
+        # the protocol's own replies to the relay's pings, would wait for the link to drain.
+        if not MIN_SEND_BUFFER <= self.send_buffer_limit <= MAX_SEND_BUFFER:
+            raise ValueError(f'send_buffer_limit_bytes must be {MIN_SEND_BUFFER}..'
+                             f'{MAX_SEND_BUFFER}')
         self.outbox = Outbox(haptic_max=int(param('haptic_queue').value),
                              status_max_age_s=float(param('status_max_age_s').value))
         self.create_subscription(Haptic, HAPTIC_TOPIC, self._on_haptic, HAPTIC_QOS)
@@ -211,6 +220,11 @@ class BridgeNode(Node):
     def _on_status(self, msg: OperatorStatus) -> None:
         try:
             self._status_seq += 1
+            now = time.monotonic()
+            if self._last_status_at is not None:
+                period = 1000.0 * (now - self._last_status_at)
+                self.status_period_ms = min(2000.0, max(20.0, period))
+            self._last_status_at = now
             payload = status_payload(msg, self.run_id, self._status_seq, self.panel,
                                      self.status_stale_ms, self.status_period_ms)
             self.outbox.set_status(payload, time.time() - msg.wall_time)

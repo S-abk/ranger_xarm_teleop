@@ -321,6 +321,14 @@ def test_after_a_reconnect_nothing_old_is_sent_and_nothing_is_doubled(ros):
         rig.close()
 
 
+@pytest.mark.parametrize('limit', [512, 65536])
+def test_a_send_buffer_limit_at_or_above_the_connection_write_limit_is_refused(ros, limit):
+    with pytest.raises(ValueError):
+        BridgeNode(node_name='bridge_bad_limit', parameter_overrides=[
+            Parameter('feedback_enabled', value=True),
+            Parameter('send_buffer_limit_bytes', value=limit)])
+
+
 def subscriptions(node):
     return {topic for topic, _ in node.get_subscriber_names_and_types_by_node(
         node.get_name(), node.get_namespace())}

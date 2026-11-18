@@ -159,11 +159,11 @@ test('player: intensity is clamped to 0..1', () => {
   assert.strictEqual(h.tick(NOW)[0].intensity, 1);
 });
 
-test('player: priority replaces when higher or equal, drops when lower', () => {
+test('player: priority replaces when higher or equal, drops another source when lower', () => {
   const h = FB.createHaptics();
   h.offer(haptic({ id: 1, priority: 5, pulses: [[0.5, 200, 0]] }), NOW, SESSION, true);
-  assert.strictEqual(h.offer(haptic({ id: 2, priority: 1 }, NOW + 10), NOW + 10, SESSION, true),
-    'lower priority');
+  assert.strictEqual(h.offer(haptic({ id: 2, priority: 1, source: 'limit' }, NOW + 10), NOW + 10,
+    SESSION, true), 'lower priority');
   assert.strictEqual(h.offer(haptic({ id: 3, priority: 5, pulses: [[0.9, 50, 0]] }, NOW + 20),
     NOW + 20, SESSION, true), 'played');
   assert.deepStrictEqual(h.tick(NOW + 30), [{ hand: 'right', intensity: 0.9, duration: 40 }]);
@@ -171,6 +171,17 @@ test('player: priority replaces when higher or equal, drops when lower', () => {
     NOW + 40, SESSION, true), 'played');
   // After the pattern ended a lower priority is accepted again.
   assert.strictEqual(h.offer(haptic({ id: 5, priority: 0 }, NOW + 5000), NOW + 5000, SESSION, true), 'played');
+});
+
+test('player: a newer request of the same source replaces a playing one of higher priority', () => {
+  // An alarm (AUTO_STOP) is playing; the operator's Y (KEEP) right after it is still felt.
+  const h = FB.createHaptics();
+  h.offer(haptic({ id: 1, priority: 3, event: 'AUTO_STOP', pulses: [[1.0, 2000, 0]] }), NOW,
+    SESSION, true);
+  h.tick(NOW);
+  assert.strictEqual(h.offer(haptic({ id: 2, priority: 2, event: 'KEEP', pulses: [[0.7, 500, 0]] },
+    NOW + 300), NOW + 300, SESSION, true), 'played');
+  assert.deepStrictEqual(h.tick(NOW + 310), [{ hand: 'right', intensity: 0.7, duration: 490 }]);
 });
 
 test('player: hands are independent', () => {
@@ -351,12 +362,15 @@ test('lines: refusal for 30 s, with a growing age', () => {
   assert.ok(!texts(FB.panelLines(unknown, NOW)).some((t) => t.includes('Refused')));
 });
 
-test('lines: an automatic stop is shown with its text', () => {
+test('lines: an automatic stop is shown with its text, whole', () => {
   const st = accepted({ episode: episode({
-    state: 'REVIEW', last_event: 'AUTO_STOP', last_event_text: 'disk full',
-    last_event_age_s: 2,
+    state: 'REVIEW', last_event: 'AUTO_STOP',
+    last_event_text: 'Episode 12 stopped by itself: teleop state lost', last_event_age_s: 2,
   }) });
-  assert.ok(texts(FB.panelLines(st, NOW)).includes('Stopped by itself: disk full'));
+  const shown = texts(FB.panelLines(st, NOW));
+  const i = shown.indexOf('Episode 12 stopped by itself:');
+  assert.ok(i >= 0, shown);
+  assert.strictEqual(shown[i] + ' ' + shown[i + 1], 'Episode 12 stopped by itself: teleop state lost');
   const keep = accepted({ episode: episode({
     last_event: 'KEEP', last_event_text: 'kept', last_event_age_s: 2 }) });
   assert.ok(!texts(FB.panelLines(keep, NOW)).some((t) => t.includes('Stopped')));
@@ -509,5 +523,15 @@ test('config: defaults, limits and bad values', () => {
 });
 
 test('version is exported', () => {
-  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-1');
+  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-2');
+});
+
+test('lines: a section older than the staleness limit shows no data, never its old state', () => {
+  // The feedback node built the status from a teleop state 0.9 s old; 0.2 s later it is 1.13 s.
+  const st = accepted({ teleop_age_s: 0.9, episode_age_s: 0.1, episode: episode({}) });
+  assert.ok(texts(FB.panelLines(st, NOW)).includes('ARMED  clutch off  calibrated'));
+  const later = texts(FB.panelLines(st, NOW + 200));
+  assert.ok(later.includes('Teleop: no data'), later);
+  assert.ok(!later.some((t) => t.startsWith('ARMED')), later);
+  assert.ok(!later.includes('Recording: no data'), later);
 });
