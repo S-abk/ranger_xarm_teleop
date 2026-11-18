@@ -31,7 +31,7 @@ import math
 import os
 import shutil
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 from ranger_xarm_teleop_interfaces.msg import EpisodeState, InputStatus, TeleopState
@@ -56,6 +56,7 @@ from .extrinsics import Frames
 from .linkstats import link_quality
 from .profile import load_checks, load_profile, recorded
 from .provenance import git_info, sha256_file, sha256_text
+from .streams import FieldPresence, OPTIONAL_FIELDS
 
 # Joy as the teleop node reads it (contract: best effort): a lost message is not a release.
 JOY_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST,
@@ -109,6 +110,18 @@ class StreamWatch:
         self.recent: List[float] = []          # header stamps, last RATE_WINDOW_S
         self.last_arrival: Optional[float] = None
         self.episode: Optional[List[float]] = None
+        # Only joint states are fed field by field (on_joint_states); another kind gets no
+        # presence, so a required field there cannot hold START refused forever.
+        keys = OPTIONAL_FIELDS['joint_states'] if spec.get('kind') == 'joint_states' else ()
+        self.presence = FieldPresence(keys) if keys else None       # since start-up
+        self.episode_presence: Optional[FieldPresence] = None        # in the episode
+
+    def fields(self, values: Dict[str, Sequence[float]]) -> None:
+        """Note which optional fields of one message have a finite value."""
+        if self.presence is not None:
+            self.presence.add(values)
+            if self.episode_presence is not None:
+                self.episode_presence.add(values)
 
     def add(self, stamp: float, arrival: float) -> None:
         """Note one message."""
@@ -126,6 +139,10 @@ class StreamWatch:
             return f'{self.name}: no message on {self.spec["topic"]}'
         if now - self.last_arrival > 1.0:
             return f'{self.name}: silent for {now - self.last_arrival:.1f} s'
+        for key in self.spec.get('required_fields') or []:
+            if self.presence is not None and not self.presence.last.get(key, False):
+                return (f'{self.name}: required field {key} has no finite value in the '
+                        'newest message')
         rate = self.spec.get('rate_hz')
         if rate is None or len(self.recent) < 2:
             return None if rate is None else f'{self.name}: too few messages to judge the rate'
@@ -248,7 +265,7 @@ class EpisodeNode(Node):
             self.create_subscription(TeleopState, spec['topic'], self.on_state, RELIABLE_QOS)
         elif kind == 'joint_states':
             self.create_subscription(JointState, spec['topic'],
-                                     lambda m, n=name: self._note(n, m.header.stamp),
+                                     lambda m, n=name: self.on_joint_states(n, m),
                                      qos_profile_sensor_data)
         elif kind == 'camera_info':
             self.create_subscription(CameraInfo, spec['topic'],
@@ -263,6 +280,12 @@ class EpisodeNode(Node):
 
     def _note(self, name: str, stamp) -> None:
         self.watch[name].add(_secs(stamp), time.monotonic())
+
+    def on_joint_states(self, name: str, msg: JointState) -> None:
+        """Count a joint state and note which of its fields carry values."""
+        self._note(name, msg.header.stamp)
+        self.watch[name].fields({'position': msg.position, 'velocity': msg.velocity,
+                                 'effort': msg.effort})
 
     def on_info(self, name: str, msg: CameraInfo) -> None:
         """Count a camera_info (one per image) and keep the latest intrinsics."""
@@ -496,6 +519,8 @@ class EpisodeNode(Node):
         self.episode['episode']['start']['acknowledged'] = self._now()
         for w in self.watch.values():
             w.episode = [] if w.spec.get('count') else None
+            w.episode_presence = (FieldPresence(w.presence.keys) if w.presence is not None
+                                  else None)
         self._last_pair = 0.0
         self._pair()
         self.control.done(True)
@@ -572,6 +597,13 @@ class EpisodeNode(Node):
                             'count': int(np.count_nonzero((stamps >= a) & (stamps <= b)))}
             w.episode = None
         ep['counts'] = counts
+        fields = {}
+        for name, w in self.watch.items():          # optional fields absent (information)
+            if w.episode_presence is not None:
+                fields[name] = dict(w.episode_presence.report(),
+                                    required_fields=list(w.spec.get('required_fields') or []))
+                w.episode_presence = None
+        ep['fields'] = fields
         log = self.ep_log
         st = log['status']
         ep['link'] = link_quality(

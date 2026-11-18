@@ -33,7 +33,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from ranger_xarm_teleop_record import metadata
-from ranger_xarm_teleop_record.profile import period
+from ranger_xarm_teleop_record.profile import period, PROFILE_TOLERANCES
 from ranger_xarm_teleop_record.streams import Episode
 
 # Replicated from ranger_xarm_teleop_interfaces/msg/TeleopState.msg and GripperCommand.msg.
@@ -367,6 +367,11 @@ def _gripper(ep: Episode, tol: dict) -> dict:
     return out
 
 
+# The tolerances of checks.yaml's consistency section that judge an episode (the lag range
+# and the identifiability thresholds are physical plausibility, not fitted per deployment).
+TOLERANCE_KEYS = PROFILE_TOLERANCES['consistency']
+
+
 # --------------------------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------------------------
@@ -392,4 +397,10 @@ def check(ep: Episode, checks: dict) -> dict:
         verdict = 'PASS'
     else:
         verdict = 'NOT_JUDGED'
-    return {'verdict': verdict, 'reasons': reasons, 'arm': arm, 'gripper': gripper}
+    provisional = (checks.get('_tolerances') or {}).get('provisional') or {}
+    limits = {key: tol.get(key) for key in TOLERANCE_KEYS}
+    return {'verdict': verdict, 'reasons': reasons, 'arm': arm, 'gripper': gripper,
+            'limits': limits,
+            'provisional': sorted(k.partition('.')[2] for k in provisional
+                                  if k.startswith('consistency.')
+                                  and k.partition('.')[2] in TOLERANCE_KEYS)}

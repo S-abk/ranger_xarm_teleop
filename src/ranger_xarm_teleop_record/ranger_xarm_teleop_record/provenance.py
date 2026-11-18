@@ -18,6 +18,7 @@ Only names, commits and hashes are recorded, never an absolute path, a host or a
 so a session can be moved to another machine without carrying where it was made.
 """
 
+import functools
 import hashlib
 import os
 import subprocess
@@ -64,3 +65,35 @@ def git_info(path: Optional[str]) -> dict:
     changed = [line[3:] for line in (status or '').splitlines() if line.strip()]
     return {'name': os.path.basename(root), 'commit': commit,
             'dirty': None if status is None else bool(changed), 'changed': changed[:50]}
+
+
+def _package_root() -> str:
+    """Return this package's directory (the source tree when installed with symlinks)."""
+    return os.path.dirname(os.path.realpath(__file__))
+
+
+@functools.lru_cache(maxsize=1)
+def checking_code() -> dict:
+    """
+    Return what identifies the code that checks and exports: its git commit and a digest.
+
+    ``commit``, ``dirty`` and ``changed`` come from the git tree holding this package (None
+    when it is installed outside one). ``source_sha256`` covers every module of this package
+    and its packaged profiles and tolerance file, so a verdict from uncommitted code can still
+    be matched to the code that gave it. Computed once per process.
+    """
+    here = _package_root()
+    files = []
+    for folder in (here, os.path.join(os.path.dirname(here), 'profiles'),
+                   os.path.join(os.path.dirname(here), 'config')):
+        if os.path.isdir(folder):
+            files += [os.path.join(folder, f) for f in sorted(os.listdir(folder))
+                      if f.endswith(('.py', '.yaml'))]
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(os.path.relpath(path, os.path.dirname(here)).encode('utf-8'))
+        digest.update(sha256_file(path).encode('ascii'))
+    info = git_info(here)
+    return {'package': 'ranger_xarm_teleop_record', 'repo': info['name'],
+            'commit': info['commit'], 'dirty': info['dirty'], 'changed': info['changed'],
+            'source_sha256': digest.hexdigest(), 'files': len(files)}

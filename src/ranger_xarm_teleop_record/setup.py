@@ -44,6 +44,7 @@ setup(
             'episode_check = ranger_xarm_teleop_record.cli:check_main',
             'episode_export = ranger_xarm_teleop_record.cli:export_main',
             'episode_purge = ranger_xarm_teleop_record.cli:purge_main',
+            'episode_fit = ranger_xarm_teleop_record.cli:fit_main',
             'record_commission = ranger_xarm_teleop_record.commission:main',
         ],
     },
