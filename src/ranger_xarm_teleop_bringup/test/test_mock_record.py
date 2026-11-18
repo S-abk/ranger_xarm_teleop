@@ -33,7 +33,8 @@ from ranger_xarm_teleop_record.checker import check_episode
 from ranger_xarm_teleop_record.export import build_export, write_export
 from ranger_xarm_teleop_record.profile import load_checks
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from stack_helpers import child_environment, Process, READY, SERVO_FIXTURES
+from stack_helpers import (assert_alone_on_domain, child_environment, Process, READY,
+                           SERVO_FIXTURES)
 from test_mock_gripper import GripperProbe
 
 SESSION = 'test_session'
@@ -271,3 +272,8 @@ def test_disarm_stops_the_episode_and_a_start_while_disarmed_is_refused(stack):
     assert 'DISARMED' in {f['flag'] for f in e['flags']}
     refused = [m for m in probe.episode_since(start) if m.last_event == EpisodeState.EVENT_REFUSED]
     assert any('not armed' in m.detail for m in refused), {m.detail for m in refused}
+
+
+def test_no_other_stack_or_test_shares_this_domain(stack):
+    """Isolation, also when stack test modules run in parallel: one copy of every node."""
+    assert_alone_on_domain(stack[0])

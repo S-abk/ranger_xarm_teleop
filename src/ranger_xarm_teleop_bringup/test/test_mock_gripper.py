@@ -31,9 +31,9 @@ import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, TeleopState
 from rclpy.action import ActionClient
 from sensor_msgs.msg import JointState
-from stack_helpers import (BODY_OBSTACLE, BODY_OBSTACLE_LINK, child_environment,
-                           enabled_rigid_pairs, INTO_BODY_START, Probe, Process, READY, replay,
-                           replay_with_clean_input, tool_speed_profile)
+from stack_helpers import (assert_alone_on_domain, BODY_OBSTACLE, BODY_OBSTACLE_LINK,
+                           child_environment, enabled_rigid_pairs, INTO_BODY_START, Probe, Process,
+                           READY, replay, replay_with_clean_input, tool_speed_profile)
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
@@ -418,3 +418,8 @@ def test_servo_still_stops_the_arm_before_a_collision_with_the_gripper_closed(st
     probe.disarm()
     probe.move_gripper(0.0)
     probe.move_to(READY)
+
+
+def test_no_other_stack_or_test_shares_this_domain(stack):
+    """Isolation, also when stack test modules run in parallel: one copy of every node."""
+    assert_alone_on_domain(stack[0])

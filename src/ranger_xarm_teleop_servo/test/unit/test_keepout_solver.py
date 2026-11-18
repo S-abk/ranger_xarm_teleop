@@ -68,12 +68,23 @@ def _drive(arm, model, extra, q, target, cycles, delay=0, params=PARAMS):
     return history, np.array(commands), solutions
 
 
-def _floor_kept(model, extra, history):
-    """Return the largest amount (m) any pair fell below min(its clearance, margin)."""
+def _pair_minima(model, extra, history):
+    """Return every pair's clearance at every posture of ``history`` (one row per posture)."""
+    return np.array([model.pair_minima(q, extra) for q in history])
+
+
+def _floor_kept(model, extra, history, minima=None):
+    """
+    Return the largest amount (m) any pair fell below min(its clearance, margin).
+
+    ``minima``: ``_pair_minima`` of the same history, when the caller needs it too (the
+    exhaustive minima are the expensive part).
+    """
+    if minima is None:
+        minima = _pair_minima(model, extra, history)
     worst = 0.0
-    floor = np.minimum(model.pair_minima(history[0], extra), model.margin)
-    for q in history[1:]:
-        now = model.pair_minima(q, extra)
+    floor = np.minimum(minima[0], model.margin)
+    for now in minima[1:]:
         worst = max(worst, float(np.max(floor - now)))
         floor = np.maximum(floor, np.minimum(now, model.margin))
     return worst
@@ -132,9 +143,9 @@ def test_inv1_no_pair_falls_below_the_margin_for_random_motions(robot, delay):
         target = _turned(_moved(sv.tool_pose(arm, q), *rng.normal(0.0, 0.25, 3)),
                          rng.normal(0.0, 0.8, 3))
         history, _, solutions = _drive(arm, model, extra, q, target, 120, delay=delay)
-        assert _floor_kept(model, extra, history) <= 1e-9
+        minima = _pair_minima(model, extra, history)
+        assert _floor_kept(model, extra, history, minima) <= 1e-9
         bound_runs += any(s.keepout_bound for s in solutions)
-        minima = np.array([model.pair_minima(h, extra) for h in history])
         assert np.isfinite(minima).all()
         fastest = max(fastest, float(np.max(minima[:-1] - minima[1:])))
     assert bound_runs >= 4 and fastest > 0.002

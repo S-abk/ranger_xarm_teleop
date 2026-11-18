@@ -29,8 +29,8 @@ from moveit_msgs.srv import GetStateValidity
 import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
-from stack_helpers import (ARM_JOINTS, child_environment, Probe, Process, READY,
-                           replay_with_clean_input, SERVO_FIXTURES)
+from stack_helpers import (ARM_JOINTS, assert_alone_on_domain, child_environment, Probe, Process,
+                           READY, replay_with_clean_input, SERVO_FIXTURES)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -337,3 +337,8 @@ def test_retreat_refuses_when_the_arm_was_moved_since(stack):
     assert code == 5 and 'has moved since' in output, output
     assert probe.joint_positions() == pytest.approx(before, abs=1e-4)
     assert math.isfinite(before[0])
+
+
+def test_no_other_stack_or_test_shares_this_domain(stack):
+    """Isolation, also when stack test modules run in parallel: one copy of every node."""
+    assert_alone_on_domain(stack[0])

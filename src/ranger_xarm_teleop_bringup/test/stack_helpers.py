@@ -56,18 +56,30 @@ SERVO_FIXTURES = os.path.join(os.path.dirname(os.path.dirname(HERE)), 'ranger_xa
                               'test', 'fixtures')
 
 
+def band_domain(base: int, offset: int) -> int:
+    """Return the domain ``offset`` places after ``base`` in the band 10-99 (never 0-9)."""
+    return 10 + (base - 10 + offset) % 90
+
+
 def child_environment(offset: int) -> dict:
     """
     Return an environment for child processes and this test's own ROS context.
 
-    The domain is the session's domain plus ``offset`` so parallel test packages do not
-    see each other; discovery stays on this machine; RViz, which the mock launch always
-    starts, draws off screen.
+    The domain is ``offset`` places after the session's domain in the band 10-99, so that
+    test modules, also run in parallel, do not see each other and never reach domains 0-9;
+    discovery stays on this machine; RViz, which the mock launch always starts, draws off
+    screen. A parallel worker (pytest-xdist) needs the session's domain to be set and in the
+    band: it fails rather than derive its domain from a default.
     """
     env = dict(os.environ)
-    base = int(env.get('ROS_DOMAIN_ID', '0'))
-    env['ROS_DOMAIN_ID'] = str((base + offset) % 100)
+    raw = env.get('ROS_DOMAIN_ID', '')
+    if 'PYTEST_XDIST_WORKER' in env and not (raw.isdigit() and 10 <= int(raw) <= 99):
+        raise AssertionError('parallel stack tests need ROS_DOMAIN_ID set to the domain of this '
+                             f'checkout, 10-99 (got {raw!r})')
+    base = int(raw) if raw.isdigit() else 0
+    env['ROS_DOMAIN_ID'] = str(band_domain(base, offset))
     env['ROS_AUTOMATIC_DISCOVERY_RANGE'] = 'LOCALHOST'
+    env.pop('ROS_STATIC_PEERS', None)
     env['QT_QPA_PLATFORM'] = 'offscreen'
     return env
 
@@ -535,3 +547,28 @@ def tool_speed_profile(states, window=5):
               for i in range(window, len(engaged)) if stamps[i] > stamps[i - window]]
     displacement = max((math.dist(p, points[0]) for p in points), default=0.0)
     return max(speeds, default=0.0), displacement, [int(s.servo_status) for s in engaged]
+
+
+# ---- isolation of the stack tests ----
+
+def graph_nodes(probe, settle=2.0):
+    """
+    Return the fully qualified names of every node on the probe's ROS domain, sorted.
+
+    Waits ``settle`` seconds first so that discovery has caught up with every participant.
+    """
+    time.sleep(settle)
+    return sorted(('' if ns == '/' else ns) + '/' + name
+                  for name, ns in probe.node.get_node_names_and_namespaces())
+
+
+def assert_alone_on_domain(probe):
+    """
+    Assert that no other stack or test shares this test's ROS domain.
+
+    Another stack on the same domain would bring a second copy of every node, and another
+    stack test a second probe: each name must appear once, the probe's among them.
+    """
+    seen = graph_nodes(probe)
+    assert seen.count('/' + probe.node.get_name()) == 1, seen
+    assert len(seen) == len(set(seen)), sorted({n for n in seen if seen.count(n) > 1})
