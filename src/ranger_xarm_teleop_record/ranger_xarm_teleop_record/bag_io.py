@@ -20,6 +20,7 @@ the recorder's receive time, in the recorder's order. Image pixels are not held 
 cost one pass).
 """
 
+import math
 import os
 from typing import Dict, List
 
@@ -54,6 +55,20 @@ KIND_FIELDS = {
 }
 
 
+# Message definitions recorded before a field was appended to the end of a message: the type
+# hash the bag stored for the topic, the bytes that stand for the missing trailing fields, and
+# those fields (read as NaN: not recorded). Only these exact hashes are accepted; any other
+# definition that does not match the installed one is refused.
+LEGACY = {
+    'ranger_xarm_teleop_interfaces/msg/TeleopState': {
+        # Before measured_tool_pose_stamp (builtin_interfaces/Time, 8 bytes, 4-aligned at the
+        # end of the old message).
+        'RIHS01_362d040e8f527f2257cfe2363217cb2d0268490374e587d0f44664650025149f':
+            (b'\0' * 8, ('measured_tool_pose_stamp',)),
+    },
+}
+
+
 def _secs(stamp) -> float:
     return stamp.sec + stamp.nanosec * 1e-9
 
@@ -85,6 +100,7 @@ class _Rows:
         self.fields: Dict[str, list] = {}
         self.labels: Dict[str, list] = {}
         self.joint_names: List[str] = []
+        self.missing: set = set()          # fields the recorded definition did not have
 
     def put(self, key, value):
         self.fields.setdefault(key, []).append(value)
@@ -116,6 +132,9 @@ def _add(rows: _Rows, msg, recv: float) -> None:
     if kind == 'teleop_state':
         rows.put('measured_tool_pose', _pose(msg.measured_tool_pose))
         rows.put('gripper_measured_stamp', _secs(msg.gripper_measured_stamp))
+        rows.put('measured_tool_pose_stamp',
+                 math.nan if 'measured_tool_pose_stamp' in rows.missing
+                 else _secs(msg.measured_tool_pose_stamp))
     elif kind == 'pose':
         rows.put('pose', _pose(msg.pose))
     elif kind == 'joint_command':
@@ -191,8 +210,9 @@ def read_episode(session_dir: str, sidecar_path: str) -> Episode:
     by_topic = {s['topic']: (n, s) for n, s in (profile.get('streams') or {}).items()
                 if s.get('record', True)}
     reader = _reader(bag)
-    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
-    classes, rows = {}, {}
+    metas = {t.name: t for t in reader.get_all_topics_and_types()}
+    types = {name: t.type for name, t in metas.items()}
+    classes, rows, pads = {}, {}, {}
     images = {}
     while reader.has_next():
         topic, data, recv_ns = reader.read_next()
@@ -202,7 +222,18 @@ def read_episode(session_dir: str, sidecar_path: str) -> Episode:
         if topic not in classes:
             classes[topic] = get_message(types[topic])
             rows[name] = _Rows(name, spec)
-        msg = deserialize_message(data, classes[topic])
+            legacy = LEGACY.get(types[topic], {}).get(
+                getattr(metas[topic], 'type_description_hash', ''))
+            if legacy is not None:
+                pads[topic] = legacy[0]
+                rows[name].missing = set(legacy[1])
+        try:
+            msg = deserialize_message(data + pads.get(topic, b''), classes[topic])
+        except Exception as err:            # rclpy raises its own RMW error type here
+            raise ValueError(
+                f'{topic}: recorded as {types[topic]} with definition '
+                f'{getattr(metas[topic], "type_description_hash", "?")}, which the installed '
+                f'definition cannot read ({err})') from err
         _add(rows[name], msg, recv_ns * 1e-9)
     streams = {}
     for name, r in rows.items():

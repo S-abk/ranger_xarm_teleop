@@ -445,6 +445,7 @@ class TeleopNode(Node):
         # single assignment, safe across the threads).
         self.joint_state_arrival: Optional[float] = None
         self.joint_state = None             # (arrival, stamp ns, {name: position})
+        self.measured_stamp_ns = 0          # stamp of the joint state measured() last used
         self.servo_output = None            # (arrival, {name: position}) of the last point
         self.watcher = Node(f'{node_name}_watcher',
                             parameter_overrides=[self.get_parameter('use_sim_time')])
@@ -887,6 +888,7 @@ class TeleopNode(Node):
         The tool pose is the forward kinematics of the newest joint state, not a lookup
         in the transform tree (which is published at a lower rate).
         """
+        self.measured_stamp_ns = 0
         latest = self.joint_state
         if latest is None or self.arm is None:
             return None, None, math.inf
@@ -913,6 +915,7 @@ class TeleopNode(Node):
                 throttle_duration_sec=2.0)
             return None, None, math.inf
         age = max(self.mono() - arrival, stamp_age)
+        self.measured_stamp_ns = stamp_ns   # TeleopState.measured_tool_pose_stamp
         return q, pose_from_matrix(dls.tool_pose(self.arm, q)), age
 
     def servo_reference(self, now: float) -> Optional[np.ndarray]:
@@ -1093,6 +1096,7 @@ class TeleopNode(Node):
         owner = self.current_owner(now)
         marks.append(('robot description', self.mono()))
         joints, tool, tool_age = self.measured()
+        tool_stamp_ns = self.measured_stamp_ns if tool is not None else 0
         ready = (self.robot_description_checked and self.tool_to_tip is not None
                  and self.wrist_known)
         solver_ready, following = self.solver_checks(now, tool)
@@ -1159,7 +1163,7 @@ class TeleopNode(Node):
         marks.append(('servo calls', self.mono()))
         self.manage_ownership(now, owner)
         marks.append(('mux calls', self.mono()))
-        self.state_pub.publish(self.build_state(output, owner, tool, stamp))
+        self.state_pub.publish(self.build_state(output, owner, tool, stamp, tool_stamp_ns))
         marks.append(('publish state', self.mono()))
         steps = [(b[1] - a[1], b[0]) for a, b in zip(marks, marks[1:])]
         self._cycle_took = marks[-1][1] - now
@@ -1447,8 +1451,9 @@ class TeleopNode(Node):
          t.transform.rotation.w) = q_from_yaw(calibration.heading)
         self.tf_static_pub.publish(TFMessage(transforms=[t]))
 
-    def build_state(self, output, owner: int, tool: Optional[Pose], stamp) -> TeleopState:
-        """Return the TeleopState of this cycle."""
+    def build_state(self, output, owner: int, tool: Optional[Pose], stamp,
+                    tool_stamp_ns: int = 0) -> TeleopState:
+        """Return the TeleopState of this cycle (``tool_stamp_ns``: the tool pose's stamp)."""
         msg = TeleopState()
         msg.header.stamp = stamp
         msg.header.frame_id = self.base_frame
@@ -1493,6 +1498,8 @@ class TeleopNode(Node):
         msg.measured_tool_pose_valid = tool is not None
         if tool is not None:
             fill_pose(msg.measured_tool_pose, tool)
+            msg.measured_tool_pose_stamp.sec = int(tool_stamp_ns // 1_000_000_000)
+            msg.measured_tool_pose_stamp.nanosec = int(tool_stamp_ns % 1_000_000_000)
         msg.keepout_margin = self.keepout_margin
         clearance, pair = self.idle_clearance()
         msg.keepout_clearance = float(clearance)

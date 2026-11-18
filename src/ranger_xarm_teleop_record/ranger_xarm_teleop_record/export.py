@@ -24,13 +24,13 @@ later than the tick, and the age of that sample is exported with it. Nothing is 
 no later sample is used, no age is negative, and a gap in a source stream shows as growing
 age and an invalid tick.
 
-The measured fields of TeleopState (tool pose, gripper opening) come from a joint state whose
-stamp can be later than the state's own cycle stamp (the teleop node reads the newest joint
-state when it publishes). They are held on the newest state row whose cycle stamp and
-measured-gripper stamp are both not later than the tick, which may be an earlier row than the
-one the other state fields come from. The tool pose has no stamp of its own; it is bounded by
-the gripper sample's stamp where the row has one (``tool_pose_measured_bounded``), and may be
-up to one joint-state period newer than its cycle where it has not.
+The measured fields of TeleopState (tool pose, gripper opening) come from joint states whose
+stamps can be later than the state's own cycle stamp (the teleop node reads the newest joint
+state). Each is held on the newest state row whose cycle stamp and the stamp of its own
+sample (``measured_tool_pose_stamp``, ``gripper_measured_stamp``) are both not later than the
+tick, which may be an earlier row than the one the other state fields come from. Recordings
+made before TeleopState carried ``measured_tool_pose_stamp`` bound the tool pose by the
+gripper sample's stamp instead, and ``export.json`` says so (``tool_pose_stamp``).
 
 Output of ``write_export``: ``data.npz`` (arrays, first dimension T), ``export.json`` (what the
 arrays mean, the hold rule, the episode identity, the checker verdict) and ``images/<stream>/
@@ -140,19 +140,14 @@ FIELD_INFO: Dict[str, Tuple[str, str, str]] = {
     'joint_effort': ('N m or N', '', 'measured joint efforts'),
     'joint_state_age': ('s', '', 'tick time minus the joint state stamp'),
     'tool_pose_measured': ('m, xyzw', 'base', 'forward kinematics of the measured joints; '
-                           'NaN where not valid. Held on the measured row (see '
-                           'measured_row_age); TeleopState carries no stamp of its own joint '
-                           "state, which is not newer than the gripper sample's"),
+                           'NaN where not valid; the newest whose joint state is not later '
+                           'than the tick'),
+    'tool_pose_measured_age': ('s', '', 'tick time minus the stamp of the joint state the '
+                               'tool pose came from (see tool_pose_stamp in export.json)'),
     'tool_pose_measured_valid': ('', '', 'the measured tool pose was valid'),
-    'tool_pose_measured_bounded': ('', '', 'the held row has a gripper sample stamp, which '
-                                   "bounds the tool pose's joint state (not later than the "
-                                   'tick); where False the tool pose may come from a joint '
-                                   'state up to one joint-state period after its cycle stamp'),
     'gripper_measured': ('rad', '', 'measured gripper opening; NaN where not valid'),
     'gripper_measured_valid': ('', '', 'the measured opening was valid'),
     'gripper_measured_age': ('s', '', 'tick time minus the stamp of the measured opening'),
-    'measured_row_age': ('s', '', 'tick time minus the later of the cycle stamp and the '
-                         'gripper sample stamp of the row the measured fields come from'),
     'damped': ('', '', 'the solver was damped in the held cycle'),
     'active_limit': ('', '', 'TeleopState.LIMIT_* of the held cycle'),
     'hold_reason': ('', '', 'TeleopState.HOLD_* of the held cycle'),
@@ -193,6 +188,33 @@ def _rows(ep: Episode, name: str) -> Optional[Stream]:
     """Return the stream when it has rows."""
     st = ep.get(name)
     return st if st is not None and len(st) > 0 else None
+
+
+LEGACY_TOOL_STAMP = (
+    'recorded before TeleopState carried measured_tool_pose_stamp: the tool pose is bounded '
+    "by the gripper sample's stamp, which relies on the teleop node reading the joint state "
+    'for the pose before the one for the gripper sample; NaN age where there was none')
+
+
+def _tool_pose_stamps(state: Stream, g_sample: np.ndarray) -> Tuple[np.ndarray, str]:
+    """
+    Return the stamp of each row's tool pose sample (NaN: unknown) and how it was obtained.
+
+    Recordings with TeleopState.measured_tool_pose_stamp use it. Older ones (the field NaN,
+    see bag_io.LEGACY) fall back to the gripper sample's stamp, and say so.
+    """
+    recorded = state.fields.get('measured_tool_pose_stamp')
+    if recorded is None:
+        recorded = np.full(len(state), np.nan)
+    recorded = np.asarray(recorded, dtype=float)
+    legacy = ~np.isfinite(recorded)
+    stamp = np.where(recorded > 0.0, recorded, np.nan)
+    stamp = np.where(legacy, g_sample, stamp)
+    if legacy.all():
+        return stamp, LEGACY_TOOL_STAMP
+    if legacy.any():
+        return stamp, 'mixed: ' + LEGACY_TOOL_STAMP
+    return stamp, 'TeleopState.measured_tool_pose_stamp (the joint state it came from)'
 
 
 def _ticks(ep: Episode, state: Stream, rate_hz: Optional[float], checks: dict,
@@ -329,31 +351,33 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
         constants['joint_names'] = list(joints.joint_names)
         arrays['joint_names'] = np.array(joints.joint_names, dtype=str)
 
-    # Measured fields: the newest row whose cycle stamp and gripper sample stamp are both not
-    # later than the tick (the sample can be newer than the cycle; see the module docstring).
-    all_g_stamp = np.asarray(state.fields['gripper_measured_stamp'], dtype=float)
-    all_g_ok = (np.asarray(state.fields['gripper_measured_valid']).astype(bool)
-                & (all_g_stamp > 0.0))
-    measured_key = np.where(all_g_ok, np.maximum(state.stamp, all_g_stamp), state.stamp)
-    mi = hold_index(measured_key, t)
-    arrays['measured_row_age'] = _age(measured_key, mi, t)
-    pose_ok = held('measured_tool_pose_valid', False, mi).astype(bool)
-    pose = held('measured_tool_pose', np.nan, mi).astype(float)
-    pose[~pose_ok] = np.nan
-    arrays['tool_pose_measured'] = pose
-    arrays['tool_pose_measured_valid'] = pose_ok
-    # The tool pose has no stamp of its own: it is bounded by the gripper sample's stamp only
-    # where the held row has one (see FIELD_INFO).
-    arrays['tool_pose_measured_bounded'] = (mi >= 0) & all_g_ok[np.maximum(mi, 0)]
-    g_ok = held('gripper_measured_valid', False, mi).astype(bool) & (mi >= 0)
-    g_ok &= all_g_ok[np.maximum(mi, 0)]
-    g_value = held('gripper_measured', np.nan, mi).astype(float)
+    # Measured fields: each is held on the newest row whose cycle stamp and the stamp of its
+    # own sample are both not later than the tick (a sample can be newer than its cycle).
+    cycle = np.asarray(state.stamp, dtype=float)
+    g_stamp = np.asarray(state.fields['gripper_measured_stamp'], dtype=float)
+    g_valid = (np.asarray(state.fields['gripper_measured_valid']).astype(bool)
+               & (g_stamp > 0.0))
+    g_sample = np.where(g_valid, g_stamp, np.nan)
+    gi = hold_index(np.where(g_valid, np.maximum(cycle, g_stamp), cycle), t)
+    g_ok = (gi >= 0) & g_valid[np.maximum(gi, 0)]
+    g_value = held('gripper_measured', np.nan, gi).astype(float)
     g_value[~g_ok] = np.nan
     arrays['gripper_measured'] = g_value
     arrays['gripper_measured_valid'] = g_ok
-    g_age = _age(np.where(all_g_ok, all_g_stamp, np.nan), mi, t)   # stamps of valid samples
+    g_age = _age(g_sample, gi, t)
     g_age[~g_ok] = np.nan
     arrays['gripper_measured_age'] = g_age
+
+    tool_bound, tool_source = _tool_pose_stamps(state, g_sample)
+    ti = hold_index(np.where(np.isfinite(tool_bound), np.maximum(cycle, tool_bound), cycle), t)
+    pose_ok = held('measured_tool_pose_valid', False, ti).astype(bool)
+    pose = held('measured_tool_pose', np.nan, ti).astype(float)
+    pose[~pose_ok] = np.nan
+    arrays['tool_pose_measured'] = pose
+    arrays['tool_pose_measured_valid'] = pose_ok
+    tool_age = _age(tool_bound, ti, t)
+    tool_age[~pose_ok] = np.nan
+    arrays['tool_pose_measured_age'] = tool_age
 
     arrays['damped'] = held('damped', False).astype(bool)
     arrays['active_limit'] = held('active_limit', -1).astype(np.int64)
@@ -426,6 +450,7 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
             absent_fields[name] = st.absent_fields()
     meta = _meta(ep, arrays, rate, t0, t1, constants, images, base_name, verdict, pairs)
     meta['ticks'] = jsonable(ticks)
+    meta['tool_pose_stamp'] = tool_source
     meta['fields_absent'] = absent_fields
     meta['state_window'] = {'t_first': t0, 't_last': t1}
     return arrays, meta

@@ -39,7 +39,9 @@ Field names per stream kind (``kind`` is the profile's ``kind`` of the stream)
 ``gripper_request``, ``gripper_reference_source``, ``calibration_session_id``,
 ``calibration_reset_count``, ``input_seq``; float ``calibration_heading``, ``input_age``,
 ``damping``, ``lead_translation``, ``lead_rotation``, ``translation_scale``,
-``gripper_command``, ``gripper_measured``, ``gripper_measured_stamp``;
+``gripper_command``, ``gripper_measured``, ``gripper_measured_stamp``,
+``measured_tool_pose_stamp`` (the stamp of the joint state the tool pose came from; 0 while
+the pose is not valid; NaN in recordings made before TeleopState carried it);
 pose ``measured_tool_pose``.
 ``pose`` (PoseStamped): pose ``pose``.
 ``gripper_command`` (GripperCommand): float ``position``; int ``request``,

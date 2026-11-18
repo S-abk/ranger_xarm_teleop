@@ -251,6 +251,12 @@ def test_ten_scripted_episodes_pass_the_checker_and_export(stack):
     for name, value in arrays.items():
         if name.endswith('_age'):
             assert not np.any(value[np.isfinite(value)] < 0.0), name
+    # Recorded now: the tool pose carries the stamp of its own joint state.
+    assert meta['tool_pose_stamp'].startswith('TeleopState.measured_tool_pose_stamp')
+    valid = arrays['tool_pose_measured_valid']
+    assert valid.any() and np.isfinite(arrays['tool_pose_measured_age'][valid]).all()
+    stamps = ep.streams['state'].fields['measured_tool_pose_stamp']
+    assert np.all(stamps[ep.streams['state'].fields['measured_tool_pose_valid']] > 0.0)
     text = open(os.path.join(out, 'export.json'), encoding='utf-8').read()
     assert os.path.expanduser('~') not in text and session not in text
 

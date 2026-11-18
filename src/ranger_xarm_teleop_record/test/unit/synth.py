@@ -122,7 +122,7 @@ def _state_fields(n):
              'gripper_active', 'gripper_measured_valid']
     floats = ['calibration_heading', 'input_age', 'damping', 'lead_translation',
               'lead_rotation', 'translation_scale', 'gripper_command', 'gripper_measured',
-              'gripper_measured_stamp']
+              'gripper_measured_stamp', 'measured_tool_pose_stamp']
     fields = {k: np.zeros(n, dtype=np.int64) for k in ints}
     fields.update({k: np.zeros(n, dtype=bool) for k in bools})
     fields.update({k: np.zeros(n) for k in floats})
@@ -239,6 +239,7 @@ def build(rtf=1.0, duration=12.0, profile_name='gazebo', limited_share=0.0, seed
     jrow = np.searchsorted(tj, ts + 1e-9, side='right') - 1
     state['gripper_measured'] = position[jrow, 6]
     state['gripper_measured_stamp'] = tj[jrow]
+    state['measured_tool_pose_stamp'] = tj[jrow]          # the same joint state
     state['gripper_command'] = np.array([gripper_fn(x) for x in ts])
     state['gripper_request'] = np.where(active & (u < 5.0), 2, np.where(active, 1, 0))
     state['gripper_reference_source'] = np.where(u < 1.5, 3, np.where(active, 2, 2))

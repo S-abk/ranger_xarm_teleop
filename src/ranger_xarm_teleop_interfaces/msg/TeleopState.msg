@@ -149,3 +149,7 @@ uint8 gripper_reference_source
 bool gripper_measured_valid
 float64 gripper_measured
 builtin_interfaces/Time gripper_measured_stamp
+# G-12: the stamp of the /joint_states message measured_tool_pose was computed from (zero
+# while measured_tool_pose_valid is false). Last in the message so that recordings made
+# before it was added stay readable (their messages end where this field begins).
+builtin_interfaces/Time measured_tool_pose_stamp
