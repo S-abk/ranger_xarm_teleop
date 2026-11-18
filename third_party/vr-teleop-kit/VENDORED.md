@@ -132,7 +132,7 @@ Reason for each change:
 +  let fbAccepted = false;        // a status was accepted on this page load
 +  let fbStored = null;           // '1' | '0' | null: the operator's choice of visibility
 +  try { fbStored = localStorage.getItem(FB_VISIBLE_KEY); } catch (e) { append(`feedback: localStorage read failed: ${e.message}`); }
-+  let fbSession = 0, fbLines = null, fbLinesAt = -1e9, fbCanvas = null, fbLogAt = -1e9;
++  let fbSession = 0, fbLines = null, fbCanvas = null, fbLogAt = -1e9;
 +  // At most one log line per 5 s, so a bad 5 Hz stream cannot flood the page log.
 +  const fbLog = (msg) => {
 +    const now = performance.now();
@@ -218,7 +218,7 @@ Reason for each change:
 +      if (!FB.resolveVisible(fbStored, fbCfg.visibleDefault)) return;
 +      const vpose = frame.getViewerPose(xrRefSpace);
 +      if (!vpose) return;
-+      if (now - fbLinesAt >= 100) { fbLines = FB.panelLines(fbStatus.state, now); fbLinesAt = now; }
++      fbLines = FB.panelLines(fbStatus.state, now);   // cheap; every frame, so old state never outlives its staleness
 +      if (!videoGL) _initVideoGL();
 +      if (!videoGL.fbTex) {
 +        videoGL.fbTex = gl.createTexture(); videoGL.fbKey = null;
