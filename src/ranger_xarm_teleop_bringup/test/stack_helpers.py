@@ -15,6 +15,7 @@
 
 import math
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -551,6 +552,65 @@ def tool_speed_profile(states, window=5):
 
 # ---- isolation of the stack tests ----
 
+#: Nodes of launched processes that exit while the stack keeps running, by the executable
+#: name the launch log gives the process (``[rviz2-6]: process has died``). RViz, which the
+#: robot workspace's MoveIt launch starts, aborts at once when it draws off screen, and its
+#: node can stay in the other processes' graphs until its lease ends (about 20 s); a
+#: spawner leaves once it has loaded its controller.
+EXITING_NODES = {'rviz2': (r'/rviz',), 'spawner': (r'/spawner_\w+',)}
+
+#: Every node of a mock stack (``teleop_mock.launch.py``) while it runs, as patterns, each
+#: matched by exactly this many nodes; names with a number change from run to run.
+MOCK_STACK_NODES = {
+    **{re.escape(name): 1 for name in (
+        '/arm_mux', '/arm_mux_client', '/arm_mux_observer', '/controller_manager',
+        '/gripper_relay', '/joint_state_broadcaster', '/move_group', '/move_group/moveit',
+        '/moveit_simple_controller_manager', '/robot_state_publisher', '/servo_node',
+        '/servo_node/moveit', '/teleop_arm_controller', '/teleop_gripper_controller',
+        '/teleop_servo', '/teleop_servo_watcher', '/xarm6_traj_controller',
+        '/xarm_gripper_traj_controller', '/xarm_mock_components_genericsystem',
+        '/xarm_xarmgrippersystem')},
+    r'/move_group_private_\d+': 1, r'/servo_node_private_\d+': 1, r'/moveit_\d+': 2,
+    r'/transform_listener_impl_[0-9a-f]+': 2,
+}
+#: The same with ``record:=true``: the recorder and the episode node as well.
+MOCK_RECORD_NODES = {**MOCK_STACK_NODES, '/episode_node': 1, '/teleop_episode_recorder': 1}
+
+_PROCESS_EVENT = re.compile(r'^\[(?:INFO|ERROR)\] \[(.+)-\d+\]: process (started|has died|has '
+                            r'finished)', re.MULTILINE)
+
+
+def full_name(name, namespace):
+    """Return a node's fully qualified name."""
+    return ('' if namespace == '/' else namespace) + '/' + name
+
+
+def launched_processes(launch):
+    """Return the executables the launch has started and those of them that have exited."""
+    started, exited = set(), set()
+    for executable, event in _PROCESS_EVENT.findall(launch.output()):
+        (started if event == 'started' else exited).add(executable)
+    return started, exited
+
+
+def exited_node_patterns(launch):
+    """
+    Return the compiled patterns of the nodes whose launched process has exited.
+
+    Fails when a process has exited whose nodes are not known (``EXITING_NODES``): a stack
+    process that dies is not something to ignore.
+    """
+    _, exited = launched_processes(launch)
+    unknown = sorted(exited - set(EXITING_NODES))
+    assert not unknown, f'launched processes have exited: {unknown}'
+    return tuple(re.compile(p + r'\Z') for e in sorted(exited) for p in EXITING_NODES[e])
+
+
+def ignoring(names, patterns):
+    """Return the names that match none of the patterns."""
+    return [n for n in names if not any(p.match(n) for p in patterns)]
+
+
 def graph_nodes(probe, settle=2.0):
     """
     Return the fully qualified names of every node on the probe's ROS domain, sorted.
@@ -558,17 +618,29 @@ def graph_nodes(probe, settle=2.0):
     Waits ``settle`` seconds first so that discovery has caught up with every participant.
     """
     time.sleep(settle)
-    return sorted(('' if ns == '/' else ns) + '/' + name
-                  for name, ns in probe.node.get_node_names_and_namespaces())
+    return sorted(full_name(name, ns) for name, ns in probe.node.get_node_names_and_namespaces())
 
 
-def assert_alone_on_domain(probe):
+def assert_stack_nodes(probe, launch, expected, settle=2.0):
     """
-    Assert that no other stack or test shares this test's ROS domain.
+    Assert that the probe's ROS domain holds this stack, this probe and nothing else.
 
-    Another stack on the same domain would bring a second copy of every node, and another
-    stack test a second probe: each name must appear once, the probe's among them.
+    Each pattern of ``expected`` must be matched by exactly its count of nodes and the probe
+    by one, and no node may be left over: a second stack, another test or any unrelated node
+    fails. Nodes of launched processes that have exited are left out (``EXITING_NODES``);
+    those of such a process still running are allowed.
     """
-    seen = graph_nodes(probe)
-    assert seen.count('/' + probe.node.get_name()) == 1, seen
-    assert len(seen) == len(set(seen)), sorted({n for n in seen if seen.count(n) > 1})
+    seen = graph_nodes(probe, settle)
+    started, exited = launched_processes(launch)
+    left = ignoring(seen, exited_node_patterns(launch))
+    running = tuple(re.compile(p + r'\Z') for e in sorted(started - exited)
+                    for p in EXITING_NODES.get(e, ()))
+    wrong = []
+    for pattern, count in {**expected, re.escape('/' + probe.node.get_name()): 1}.items():
+        match = re.compile(pattern + r'\Z')
+        hits = [n for n in left if match.match(n)]
+        if len(hits) != count:
+            wrong.append((pattern, count, hits))
+        left = [n for n in left if n not in hits]
+    left = ignoring(left, running)
+    assert not wrong and not left, f'nodes not of this stack: {left}; counts wrong: {wrong}'

@@ -36,9 +36,9 @@ from ranger_xarm_teleop_servo.rotations import (pose_from_matrix, q_between, v_n
                                                 v_sub)
 import rclpy
 
-from stack_helpers import (assert_alone_on_domain, BODY_OBSTACLE, BODY_OBSTACLE_LINK,
-                           child_environment, INTO_BODY_START, Probe, Process, READY, replay,
-                           replay_with_clean_input, SHOULDER_START)
+from stack_helpers import (assert_stack_nodes, BODY_OBSTACLE, BODY_OBSTACLE_LINK,
+                           child_environment, INTO_BODY_START, MOCK_STACK_NODES, Probe, Process,
+                           READY, replay, replay_with_clean_input, SHOULDER_START)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -517,5 +517,5 @@ def test_log_has_no_errors(stack):
 
 
 def test_no_other_stack_or_test_shares_this_domain(stack):
-    """Isolation, also when stack test modules run in parallel: one copy of every node."""
-    assert_alone_on_domain(stack[0])
+    """Isolation: the domain holds this stack's nodes and the probe, nothing else."""
+    assert_stack_nodes(stack[0], stack[3], MOCK_STACK_NODES)

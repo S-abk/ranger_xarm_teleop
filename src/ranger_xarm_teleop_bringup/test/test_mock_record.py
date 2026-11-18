@@ -33,8 +33,9 @@ from ranger_xarm_teleop_record.checker import check_episode
 from ranger_xarm_teleop_record.export import build_export, write_export
 from ranger_xarm_teleop_record.profile import load_checks
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from stack_helpers import (assert_alone_on_domain, child_environment, Process, READY,
-                           SERVO_FIXTURES)
+from stack_helpers import (assert_stack_nodes, child_environment, exited_node_patterns,
+                           full_name, ignoring, launched_processes, MOCK_RECORD_NODES, Process,
+                           READY, SERVO_FIXTURES)
 from test_mock_gripper import GripperProbe
 
 SESSION = 'test_session'
@@ -63,14 +64,28 @@ class RecordProbe(GripperProbe):
         with self.lock:
             return self.episode_states[-1][1] if self.episode_states else None
 
-    def graph(self):
-        """Return the nodes and every topic's publisher and subscriber counts."""
-        nodes = tuple(sorted(f'{ns}/{n}' for n, ns in
-                             self.node.get_node_names_and_namespaces()))
-        topics = tuple(sorted(
-            (t, self.node.count_publishers(t), self.node.count_subscribers(t))
-            for t, _ in self.node.get_topic_names_and_types()))
-        return nodes, topics
+    def graph(self, ignore=()):
+        """
+        Return the nodes and every topic's publisher and subscriber counts.
+
+        Nodes matching a pattern of ``ignore`` are left out, and so are their publishers and
+        subscribers (the nodes of launched processes that have exited, ``EXITING_NODES``), and
+        a topic none of the rest uses.
+        """
+        nodes = tuple(sorted(ignoring(
+            [full_name(n, ns) for n, ns in self.node.get_node_names_and_namespaces()], ignore)))
+        names = [t for t, _ in self.node.get_topic_names_and_types()]
+        if not ignore:
+            return nodes, tuple(sorted(
+                (t, self.node.count_publishers(t), self.node.count_subscribers(t))
+                for t in names))
+
+        def count(endpoints):
+            return len(ignoring([full_name(e.node_name, e.node_namespace) for e in endpoints],
+                                ignore))
+        topics = [(t, count(self.node.get_publishers_info_by_topic(t)),
+                   count(self.node.get_subscriptions_info_by_topic(t))) for t in names]
+        return nodes, tuple(sorted(row for row in topics if row[1] or row[2]))
 
 
 def fixture_file(directory, name):
@@ -111,7 +126,7 @@ def stack(tmp_path_factory):
                        and probe.state().measured_tool_pose_valid, 60.0, 'the teleop state')
         probe.wait_for(lambda: probe.episode_state() is not None, 60.0, 'the episode state')
         probe.move_to(READY)
-        wait_for_settled_graph(probe)
+        wait_for_settled_graph(probe, launch)
         yield probe, env, logs, os.path.join(str(data), SESSION), launch
     finally:
         probe.close()
@@ -119,12 +134,17 @@ def stack(tmp_path_factory):
         print(launch.output()[-6000:])
 
 
-def wait_for_settled_graph(probe, quiet=5.0, timeout=90.0):
-    """Wait until no node joins or leaves for ``quiet`` s (RViz, spawners start late)."""
+def wait_for_settled_graph(probe, launch=None, quiet=5.0, timeout=90.0):
+    """
+    Wait until no node joins or leaves for ``quiet`` s (RViz, spawners start late).
+
+    With ``launch``, nodes whose launched process has exited are left out: such a node can
+    stay in the graph until its lease ends, and leave later.
+    """
     end = time.monotonic() + timeout
     last, since = None, time.monotonic()
     while time.monotonic() < end:
-        nodes = probe.graph()[0]
+        nodes = probe.graph(exited_node_patterns(launch) if launch else ())[0]
         if nodes != last:
             last, since = nodes, time.monotonic()
         elif time.monotonic() - since >= quiet:
@@ -163,9 +183,14 @@ def engaged_spans(states):
 
 def test_episode_presses_while_engaged_release_nothing_and_change_no_participant(stack):
     """INV-1: start, stop, keep, discard and mark during one engagement."""
-    probe, env, logs, session, _ = stack
+    probe, env, logs, session, launch = stack
     probe.disarm()
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_MOVEIT, 30.0, 'MoveIt owner')
+    # Nodes of launched processes that exited before the episodes (RViz off screen) may still
+    # leave the graph when their lease ends; a process that exits during them is a change,
+    # even one whose node lingers in the graph (checked from the launch log below).
+    exited = exited_node_patterns(launch)
+    exited_before = launched_processes(launch)[1]
     path = fixture_file(str(logs), 'episode_marks_engaged')
     process = replay_file(env, path, str(logs / 'replay_marks.log'))
     graphs = []
@@ -174,10 +199,12 @@ def test_episode_presses_while_engaged_release_nothing_and_change_no_participant
                        40.0, 'the clutch to engage')
         engaged_at = time.monotonic()
         while process.wait(0.3) is None:
-            graphs.append((time.monotonic(), probe.graph()))
+            graphs.append((time.monotonic(), probe.graph(exited)))
         assert process.proc.returncode == 0, process.output()
     finally:
         process.stop()
+    exited_during = sorted(launched_processes(launch)[1] - exited_before)
+    assert not exited_during, f'launched processes exited during the episodes: {exited_during}'
     time.sleep(1.5)
     with probe.lock:
         states = [(w, s) for w, s in probe.states if w >= engaged_at - 0.5]
@@ -275,5 +302,5 @@ def test_disarm_stops_the_episode_and_a_start_while_disarmed_is_refused(stack):
 
 
 def test_no_other_stack_or_test_shares_this_domain(stack):
-    """Isolation, also when stack test modules run in parallel: one copy of every node."""
-    assert_alone_on_domain(stack[0])
+    """Isolation: the domain holds this stack's nodes and the probe, nothing else."""
+    assert_stack_nodes(stack[0], stack[4], MOCK_RECORD_NODES)
