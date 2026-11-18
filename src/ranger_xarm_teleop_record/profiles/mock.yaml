@@ -1,0 +1,55 @@
+# Deployment profile: mock execution (ros2_control mock hardware), no cameras. SIMULATION ONLY.
+# Everything that differs between set-ups lives here (contract, Deployments); the profile is
+# copied into every session.json and every episode sidecar. Checker tolerances are relative to
+# the nominal rates given here (config/checks.yaml).
+name: mock
+simulation: true
+use_sim_time: false             # everything on the host clock
+data_dir: ~/teleop_data         # the human's data; never inside a git checkout
+low_rtf: null                   # no simulator clock
+frames:
+  base: xarm_link_base
+  tool: xarm_link_tcp           # default; the tool_frame parameter in force is recorded too
+recorder:
+  node: teleop_episode_recorder
+  namespace: ""
+  storage: mcap
+  storage_preset: zstd_fast     # MCAP chunk compression, lossless
+  max_cache_size_mb: 512
+disk:
+  min_free_gb_to_start: 20
+  min_free_gb_to_continue: 10
+# Streams. kind: see streams.py. clock: robot = the host's ROS clock (simulation time here),
+# host_wall = the host's system clock, none = no header. rate_hz: nominal, in the recording
+# clock (null: an event stream, no rate or gap check). gate: rate and gaps are judged only in
+# these spans (engaged = clutch engaged; gripper_active). required: START is refused while it
+# is missing or below its rate (ungated streams only), and the checker fails without it.
+# count: the episode node counts publications in the episode, compared with the recording.
+streams:
+  state:            {topic: /teleop/state, kind: teleop_state, type: ranger_xarm_teleop_interfaces/msg/TeleopState, required: true, rate_hz: 50, clock: robot, count: true}
+  target:           {topic: /teleop/target_pose, kind: pose, type: geometry_msgs/msg/PoseStamped, required: true, rate_hz: 50, clock: robot, gate: engaged, count: true}
+  gripper_command:  {topic: /teleop/gripper/command, kind: gripper_command, type: ranger_xarm_teleop_interfaces/msg/GripperCommand, required: false, rate_hz: 50, clock: robot, gate: gripper_active, count: true}
+  joint_command:    {topic: /servo_node/delta_joint_cmds, kind: joint_command, type: control_msgs/msg/JointJog, required: true, rate_hz: 50, clock: robot, gate: engaged, count: true}
+  joint_states:     {topic: /joint_states, kind: joint_states, type: sensor_msgs/msg/JointState, required: true, rate_hz: 150, clock: robot, count: true}
+  gripper_held:     {topic: /teleop/gripper/held, kind: other, type: control_msgs/msg/JointTrajectoryControllerState, required: false, rate_hz: null, clock: robot}
+  owner:            {topic: /teleop/mux/owner, kind: owner, type: ranger_xarm_teleop_interfaces/msg/ArmOwner, required: false, rate_hz: null, clock: robot}
+  input_right:      {topic: /teleop/input/right/pose, kind: pose, type: geometry_msgs/msg/PoseStamped, required: false, rate_hz: null, clock: robot}
+  input_left:       {topic: /teleop/input/left/pose, kind: pose, type: geometry_msgs/msg/PoseStamped, required: false, rate_hz: null, clock: robot}
+  input_head:       {topic: /teleop/input/head/pose, kind: pose, type: geometry_msgs/msg/PoseStamped, required: false, rate_hz: null, clock: robot}
+  joy:              {topic: /teleop/input/joy, kind: joy, type: sensor_msgs/msg/Joy, required: true, rate_hz: null, clock: robot}
+  status:           {topic: /teleop/input/status, kind: input_status, type: ranger_xarm_teleop_interfaces/msg/InputStatus, required: true, rate_hz: null, clock: robot, count: true}
+  camera_gantry:    {topic: /camera/gantry_d455/color/image_raw, kind: image, record: false, type: sensor_msgs/msg/Image, required: false, rate_hz: 30, clock: robot, camera: gantry_d455, info: camera_gantry_info, image: {width: 848, height: 480, encoding: rgb8}}
+  camera_gantry_info: {topic: /camera/gantry_d455/color/camera_info, kind: camera_info, record: false, type: sensor_msgs/msg/CameraInfo, required: false, rate_hz: 30, clock: robot, camera: gantry_d455, count: true}
+  camera_wrist:     {topic: /camera/wrist_d435/color/image_raw, kind: image, record: false, type: sensor_msgs/msg/Image, required: false, rate_hz: 30, clock: robot, camera: wrist_d435, info: camera_wrist_info, image: {width: 848, height: 480, encoding: rgb8}}
+  camera_wrist_info: {topic: /camera/wrist_d435/color/camera_info, kind: camera_info, record: false, type: sensor_msgs/msg/CameraInfo, required: false, rate_hz: 30, clock: robot, camera: wrist_d435, count: true}
+  depth_gantry:     {topic: /camera/gantry_d455/depth/image_rect_raw, kind: image, record: false, type: sensor_msgs/msg/Image, required: false, rate_hz: 30, clock: robot, camera: gantry_d455, image: {width: 848, height: 480, encoding: 32FC1}}
+  depth_wrist:      {topic: /camera/wrist_d435/depth/image_rect_raw, kind: image, record: false, type: sensor_msgs/msg/Image, required: false, rate_hz: 30, clock: robot, camera: wrist_d435, image: {width: 848, height: 480, encoding: 32FC1}}
+  tf:               {topic: /tf, kind: other, type: tf2_msgs/msg/TFMessage, required: false, rate_hz: null, clock: robot}
+  tf_static:        {topic: /tf_static, kind: other, type: tf2_msgs/msg/TFMessage, required: false, rate_hz: null, clock: robot}
+  robot_description: {topic: /robot_description, kind: other, type: std_msgs/msg/String, required: false, rate_hz: null, clock: none}
+  cmd_vel:          {topic: /cmd_vel, kind: twist, type: geometry_msgs/msg/Twist, required: false, rate_hz: null, clock: none, base: true}
+  odom:             {topic: /odom, kind: odometry, type: nav_msgs/msg/Odometry, required: false, rate_hz: null, clock: robot, base: true}
+  ground_truth_odom: {topic: /ground_truth/odom, kind: odometry, type: nav_msgs/msg/Odometry, required: false, rate_hz: null, clock: robot, base: true}
+  episode_state:    {topic: /teleop/episode/state, kind: episode_state, type: ranger_xarm_teleop_interfaces/msg/EpisodeState, required: true, rate_hz: 5, clock: robot}
+  parameter_events: {topic: /parameter_events, kind: other, type: rcl_interfaces/msg/ParameterEvent, required: false, rate_hz: null, clock: robot}
+  rosout:           {topic: /rosout, kind: other, type: rcl_interfaces/msg/Log, required: false, rate_hz: null, clock: robot}

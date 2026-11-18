@@ -1,0 +1,40 @@
+# Checker tolerances (generic defaults). Rates and periods are relative to the deployment
+# profile's nominal rates; a deploying project may pass its own file. Times are seconds in the
+# recording clock (simulation time in simulation), unless a key says wall.
+streams:
+  rate_min_fraction: 0.9        # measured rate >= this x nominal (inside the stream's gate spans)
+  gap_max_s: 0.1                # largest gap between consecutive stamps ...
+  gap_max_periods: 3.0          # ... or this many nominal periods, whichever is larger
+  offset_max_periods: 0.9       # |offset to the action stream| <= max(stream period, action period) x this
+                                # (fitted, non-image streams: worst of 7 Gazebo episodes 0.54 (camera_info);
+                                # x 1.5, rounded up)
+  offset_max_periods_image: 1.6 # image streams (fitted: worst of 7 Gazebo episodes 1.02, a rendered camera
+                                # image arrives up to one frame after its stamp; x 1.5, rounded up)
+  domain_max_s: 0.5             # |median(recv - stamp)| above this: the stamps are on another clock
+  min_gate_span_s: 0.5          # gate spans shorter than this are not rate-checked (gaps still are)
+  count_window_margin_s: 0.2    # companion counts compare messages stamped inside the episode window
+  window_slack_s: 0.5           # recorded data may start/end this far outside the sidecar's start/stop
+flags:
+  limit_bound_max_share: 0.25   # LIMIT_BOUND when active_limit != NONE for more than this share of engaged cycles
+  base_moved_m: 0.005           # BASE_MOVED when odometry travel exceeds this ...
+  base_moved_rad: 0.0175        # ... or this rotation, or any nonzero /cmd_vel
+  link_input_age_p99_s: 0.1     # LINK_DEGRADED above this p99 input age, or any reconnect or sequence gap
+  reconnect_gap_s: 1.0          # a status gap longer than this (wall) counts as a reconnect
+  fail_flags: [DATA_LOST, RECORDER_ERROR, TELEOP_STATE_LOST]   # these flags fail an episode
+consistency:
+  lag_grid_s: [-0.3, 0.3, 0.005]   # lag search grid: start, stop, step
+  lag_min_s: 0.04               # the measured motion must follow the command by at least ...
+  lag_max_s: 0.30               # ... and at most this
+  min_path_m: 0.02              # less target travel than this: the lag cannot be identified
+  # Fitted on 7 of 10 scripted Gazebo episodes (simulation time, the recording clock): worst
+  # value x 1.5, rounded up; the other 3 were judged with them. Mock execution is well inside.
+  arm_rms_m: 0.002              # worst 1.1 mm
+  arm_p99_m: 0.0055             # worst 3.5 mm
+  arm_rot_p99_deg: 0.8          # worst 0.52 deg
+  gripper_abs_rad: 0.065        # p99; worst 0.041 rad (ramp at 1 rad/s, 75-85 ms lag)
+  gripper_lag_min_s: 0.01       # the gripper's own lag range: its controller follows within a
+  gripper_lag_max_s: 0.30       # cycle or two (mock execution echoes the command one cycle late)
+  gripper_min_travel_rad: 0.1   # less command travel than this: the gripper lag is not fitted
+export:
+  rate_hz: 30.0
+  max_age_periods: 1.5          # a tick is invalid when a required field is older than this x its period

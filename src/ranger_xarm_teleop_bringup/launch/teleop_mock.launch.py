@@ -51,6 +51,13 @@ def generate_launch_description():
         DeclareLaunchArgument('teleop_params_file', default_value=''),
         DeclareLaunchArgument('tool_frame', default_value='xarm_link_tcp'),
         DeclareLaunchArgument('gripper_enabled', default_value='true'),
+        DeclareLaunchArgument(
+            'record', default_value='false',
+            description='Start the demonstration recorder and episode node (paused until X).'),
+        DeclareLaunchArgument('record_profile', default_value='mock'),
+        DeclareLaunchArgument('record_data_dir', default_value=''),
+        DeclareLaunchArgument('record_session', default_value=''),
+        DeclareLaunchArgument('record_extra', default_value=''),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(
             os.path.join(moveit_share, 'launch', 'fake_execution.launch.py'))),
         Node(package='controller_manager', executable='spawner', output='screen',
@@ -74,4 +81,17 @@ def generate_launch_description():
                 'gripper_enabled': LaunchConfiguration('gripper_enabled'),
                 'moveit_gripper_controller': MOCK_MOVEIT_GRIPPER_CONTROLLER,
             }.items()),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(
+                get_package_share_directory('ranger_xarm_teleop_record'), 'launch',
+                'record.launch.py')),
+            launch_arguments={
+                'profile': LaunchConfiguration('record_profile'),
+                'data_dir': LaunchConfiguration('record_data_dir'),
+                'session': LaunchConfiguration('record_session'),
+                'record_extra': LaunchConfiguration('record_extra'),
+                'limits_file': os.path.join(share, 'config', 'SIMULATION_ONLY_limits.yaml'),
+                'tool_frame': LaunchConfiguration('tool_frame'),
+            }.items(),
+            condition=IfCondition(LaunchConfiguration('record'))),
     ])
