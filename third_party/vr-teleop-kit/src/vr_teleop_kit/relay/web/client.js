@@ -1,4 +1,4 @@
-// Modified from oscardvs/vr-teleop-kit commit 80589ee for ranger_xarm_teleop. Changes: raw grip position (no wrist-pivot offset), emulated_position per pose, t_xr frame time, seq counter, reset_count, reset_event (how far a reference-space reset moved the frame, sent once on the next frame), session_id drawn per XR session, hand-tracking requested so hands are XRHand sources, profiles sent, only real controllers (thumbstick axes + controller profile) streamed as poses, frame sent even with no controller. See third_party/vr-teleop-kit/VENDORED.md.
+// Modified from oscardvs/vr-teleop-kit commit 80589ee for ranger_xarm_teleop. Changes: raw grip position (no wrist-pivot offset), emulated_position per pose, t_xr frame time, seq counter, reset_count, reset_event (how far a reference-space reset moved the frame, sent once on the next frame), session_id drawn per XR session, hand-tracking requested so hands are XRHand sources, profiles sent, only real controllers (thumbstick axes + controller profile) streamed as poses, frame sent even with no controller, operator feedback (teleop_haptic vibration, teleop_status panel; logic in feedback.js). See third_party/vr-teleop-kit/VENDORED.md.
 (() => {
   const $ = (id) => document.getElementById(id);
   // Live tick rate of get_action() in the teleop process. Populated from
@@ -328,6 +328,8 @@
     recvEl.textContent = recv;
     try {
       const data = JSON.parse(e.data);
+      // Operator feedback (feedback.js). Their echo is not a round trip: keep them out of the RTT readout.
+      if (data.type === "teleop_haptic" || data.type === "teleop_status") { onFeedbackMessage(data); return; }
       const t = data.echo && data.echo.t_client;
       if (typeof t === "number") {
         const rtt = performance.now() - t;
@@ -1367,6 +1369,150 @@
     gl.disable(gl.BLEND);
   };
 
+  // ---- Operator feedback (feedback.js; added by ranger_xarm_teleop) ----
+  // teleop_haptic: vibration patterns for the controllers. teleop_status: a small panel near the
+  // left controller. All decisions (age, de-duplication, priority, text) are in feedback.js;
+  // this is only the glue and the drawing. Nothing here changes the xr_frame stream, and until
+  // the first accepted teleop_status nothing is drawn.
+  const FB = window.TeleopFeedback || null;
+  const fbVersion = FB ? FB.FEEDBACK_VERSION : "feedback.js missing";
+  append(`client ${fbVersion}`);
+  if ($("client-version")) $("client-version").textContent = `client ${fbVersion}`;
+  const FB_VISIBLE_KEY = "vrteleop:feedback_panel_visible_v1";
+  const fbHaptics = FB && FB.createHaptics();
+  const fbStatus = FB && FB.createStatus();
+  const fbEdge = FB && FB.createEdge();
+  let fbCfg = FB && FB.panelConfig(null);
+  let fbAccepted = false;        // a status was accepted on this page load
+  let fbStored = null;           // '1' | '0' | null: the operator's choice of visibility
+  try { fbStored = localStorage.getItem(FB_VISIBLE_KEY); } catch (e) { append(`feedback: localStorage read failed: ${e.message}`); }
+  let fbSession = 0, fbLines = null, fbLinesAt = -1e9, fbCanvas = null, fbLogAt = -1e9;
+  // At most one log line per 5 s, so a bad 5 Hz stream cannot flood the page log.
+  const fbLog = (msg) => {
+    const now = performance.now();
+    if (now - fbLogAt < 5000) return;
+    fbLogAt = now; append(msg);
+  };
+
+  const onFeedbackMessage = (data) => {
+    if (!FB) return;
+    try {
+      const now = performance.now();
+      if (data.type === "teleop_haptic") {
+        fbHaptics.offer(data, now, xrSessionId, !!xrSession && !calibMode);
+      } else if (fbStatus.offer(data, now, xrSessionId) === "accepted") {
+        fbAccepted = true;
+        fbCfg = FB.panelConfig(data.panel);
+      }
+    } catch (e) { fbLog(`feedback message failed: ${e.message}`); }
+  };
+
+  const FB_TONES = { rec: "#ff3b3b", ok: "#5be37a", warn: "#ffc94d", bad: "#ff7a5c", dim: "#a0a8b8", text: "#f4f6fa" };
+  const _drawFeedbackCanvas = (res) => {
+    if (!fbCanvas) { fbCanvas = document.createElement("canvas"); fbCanvas.width = FB.PANEL_W; fbCanvas.height = FB.PANEL_H; }
+    const c = fbCanvas.getContext("2d");
+    c.clearRect(0, 0, FB.PANEL_W, FB.PANEL_H);
+    c.fillStyle = "#10131a";
+    c.beginPath();
+    if (c.roundRect) c.roundRect(0, 0, FB.PANEL_W, FB.PANEL_H, 24); else c.rect(0, 0, FB.PANEL_W, FB.PANEL_H);
+    c.fill();
+    c.lineWidth = 4; c.strokeStyle = res.stale ? FB_TONES.bad : "#2a2e38"; c.stroke();
+    c.textBaseline = "top"; c.textAlign = "left";
+    res.lines.forEach((l, i) => {
+      c.fillStyle = FB_TONES[l.tone] || FB_TONES.text;
+      if (l.big) { c.font = "bold 72px sans-serif"; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(l.text, FB.PANEL_W / 2, FB.PANEL_H / 2, 480); c.textAlign = "left"; c.textBaseline = "top"; }
+      else { c.font = "26px sans-serif"; c.fillText(l.text, 16, 8 + i * 29, 480); }  // 480: squeezed if wider
+    });
+    c.font = "14px sans-serif"; c.fillStyle = FB_TONES.dim; c.textAlign = "right";
+    c.fillText(fbVersion, FB.PANEL_W - 14, FB.PANEL_H - 20);
+  };
+
+  // Textured unit quad with the video quad's program and buffers (see _drawVideoQuad).
+  const _drawTexQuad = (VP, modelMat, tex) => {
+    const { prog, vbo, ibo, aPos, aTex, uMvp, uTex } = videoGL;
+    gl.useProgram(prog);
+    gl.uniformMatrix4fv(uMvp, false, mat4Mul(VP, modelMat));
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(aTex);
+    gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 16, 8);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(uTex, 0);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+  };
+
+  // Per XR frame, after the haptic loop: vibration, visibility toggle, panel. Never throws.
+  const onFeedbackFrame = (frame, layer, now) => {
+    try {
+      if (fbSession !== xrSessionId) { fbSession = xrSessionId; fbHaptics.clear(); fbEdge.update(null); }
+      let left = null;
+      for (const src of xrSession.inputSources) if (src.handedness === "left") left = src;
+      const plays = fbHaptics.tick(now);
+      if (plays.length && !calibMode) {
+        for (const src of xrSession.inputSources) {
+          const ha = src.gamepad && src.gamepad.hapticActuators;
+          if (!ha || !ha[0]) continue;
+          for (const p of plays) {
+            if (p.hand !== src.handedness) continue;
+            const r = ha[0].pulse(p.intensity, p.duration);
+            if (r && r.catch) r.catch((e) => fbLog(`feedback haptic failed: ${e.message}`));
+          }
+        }
+      }
+      const btn = left && left.gamepad && left.gamepad.buttons[FB.TOGGLE_BUTTON];
+      const pressedEdge = fbEdge.update(btn ? !!btn.pressed : null);
+      if (!fbAccepted || calibMode) return;
+      if (pressedEdge) {
+        fbStored = FB.resolveVisible(fbStored, fbCfg.visibleDefault) ? "0" : "1";
+        try { localStorage.setItem(FB_VISIBLE_KEY, fbStored); } catch (e) { fbLog(`feedback: localStorage write failed: ${e.message}`); }
+      }
+      if (!FB.resolveVisible(fbStored, fbCfg.visibleDefault)) return;
+      const vpose = frame.getViewerPose(xrRefSpace);
+      if (!vpose) return;
+      if (now - fbLinesAt >= 100) { fbLines = FB.panelLines(fbStatus.state, now); fbLinesAt = now; }
+      if (!videoGL) _initVideoGL();
+      if (!videoGL.fbTex) {
+        videoGL.fbTex = gl.createTexture(); videoGL.fbKey = null;
+        gl.bindTexture(gl.TEXTURE_2D, videoGL.fbTex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      }
+      if (videoGL.fbKey !== fbLines.key) {
+        _drawFeedbackCanvas(fbLines);
+        gl.bindTexture(gl.TEXTURE_2D, videoGL.fbTex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, fbCanvas);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        videoGL.fbKey = fbLines.key;
+      }
+      let grip = null;
+      if (left && left.gripSpace && !left.hand) {
+        const gp = frame.getPose(left.gripSpace, xrRefSpace);
+        if (gp) grip = xyz(gp.transform.position);
+      }
+      const head = { position: xyz(vpose.transform.position), orientation: xyzw(vpose.transform.orientation) };
+      const model = FB.panelModel(fbCfg, head, grip);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // the texture is premultiplied
+      gl.disable(gl.DEPTH_TEST);
+      for (const view of vpose.views) {
+        const vpRect = layer.getViewport(view);
+        gl.viewport(vpRect.x, vpRect.y, vpRect.width, vpRect.height);
+        _drawTexQuad(mat4Mul(view.projectionMatrix, view.transform.inverse.matrix), model, videoGL.fbTex);
+      }
+      gl.disable(gl.BLEND);
+    } catch (e) {
+      gl.disable(gl.BLEND);
+      fbLog(`feedback frame failed: ${e.message}`);
+    }
+  };
+
   function onXRFrame(_time, frame) {
     if (!xrSession) return;
     xrSession.requestAnimationFrame(onXRFrame);
@@ -1493,6 +1639,9 @@
         }
       }
     }
+
+    // Operator feedback: vibration, panel toggle and panel (see onFeedbackFrame).
+    if (FB) onFeedbackFrame(frame, layer, performance.now());
 
     // ---- Calibration trigger / capture lifecycle (in-VR) ----
     if (calibMode) {
