@@ -1640,9 +1640,6 @@
       }
     }
 
-    // Operator feedback: vibration, panel toggle and panel (see onFeedbackFrame).
-    if (FB) onFeedbackFrame(frame, layer, performance.now());
-
     // ---- Calibration trigger / capture lifecycle (in-VR) ----
     if (calibMode) {
       // Quest controller buttons[1] is "grip" (analog 0..1 .value).
@@ -1692,5 +1689,10 @@
     const xrFrame = { type: "xr_frame", t_client: performance.now(), t_xr: _time, seq: xrSeq++, reset_count: xrResetCount, session_id: xrSessionId, controllers, viewer };
     if (xrResetPending) { xrFrame.reset_event = xrResetPending; xrResetPending = null; }
     wsSend(xrFrame);
+
+    // Operator feedback: vibration, panel toggle and panel (see onFeedbackFrame). After the
+    // frame is sent, so drawing the panel never delays the input stream. Not in the wrist
+    // calibration mode (returned above).
+    if (FB) onFeedbackFrame(frame, layer, performance.now());
   }
 })();

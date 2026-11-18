@@ -141,7 +141,7 @@ def panel_config(anchor: str, offset: Sequence[float], width_m: float,
     offset = [float(v) for v in offset]
     if len(offset) != 3 or not all(math.isfinite(v) and abs(v) <= 2.0 for v in offset):
         raise ValueError('panel_offset must be three finite numbers within 2 m')
-    if not 0.03 <= float(width_m) <= 1.0:
-        raise ValueError('panel_width_m must be 0.03..1.0')
+    if not 0.05 <= float(width_m) <= 0.6:          # the page's own range (feedback.js)
+        raise ValueError('panel_width_m must be 0.05..0.6')
     return {'anchor': anchor, 'offset': offset, 'width_m': float(width_m),
             'visible_default': bool(visible_default)}

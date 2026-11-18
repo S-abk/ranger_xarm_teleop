@@ -45,7 +45,7 @@ Reason for each change:
 7. Viewer `emulated_position`: flag an emulated headset position.
 8. Unconditional `xr_frame` send with `t_xr`, `seq`, `reset_count`, `session_id`: frames go out even with no controller, so a missing controller is visible as absence. The bridge rejects frames without these fields as "client not patched".
    A reference-space reset adds `reset_event: {count, transform}` to the next frame only (`transform` is `{position, orientation}` in WebXR axes, or null when the headset does not report it); frames without a pending reset do not carry the key.
-9. Operator feedback: a block before `onXRFrame`, one branch in `ws.onmessage` and one call in `onXRFrame`. The page receives `teleop_haptic` (vibration patterns) and `teleop_status` (a small panel near the left controller) from the robot side. The decisions (age against the sender's echo of this page's `xr_frame`, de-duplication, priority, text, placement) are in `feedback.js`; `client.js` passes messages in, calls the player each XR frame, toggles the panel with the left thumbstick click (kept in `localStorage`), draws it as one textured quad per eye (own 2D canvas, redrawn only when its text changes) and shows the feedback version in the page log, next to the status pill and in the panel corner. The two message types skip the RTT readout (their echo is not a round trip). Until the first accepted `teleop_status` nothing is drawn, and `xr_frame` is unchanged. The header comment (reason 1) names this.
+9. Operator feedback: a block before `onXRFrame`, one branch in `ws.onmessage` and one call at the end of `onXRFrame`, after the `xr_frame` is sent, so drawing the panel never delays the input stream (not in the wrist-calibration mode). The page receives `teleop_haptic` (vibration patterns) and `teleop_status` (a small panel near the left controller) from the robot side. The decisions (age against the sender's echo of this page's `xr_frame`, de-duplication, priority, text, placement) are in `feedback.js`; `client.js` passes messages in, calls the player each XR frame, toggles the panel with the left thumbstick click (kept in `localStorage`), draws it as one textured quad per eye (own 2D canvas, redrawn only when its text changes) and shows the feedback version in the page log, next to the status pill and in the panel corner. The two message types skip the RTT readout (their echo is not a round trip). Until the first accepted `teleop_status` nothing is drawn, and `xr_frame` is unchanged. The header comment (reason 1) names this.
 
 ```diff
 @@ -1,3 +1,4 @@
@@ -302,17 +302,7 @@ Reason for each change:
        };
      }
  
-@@ -1461,6 +1640,9 @@
-       }
-     }
- 
-+    // Operator feedback: vibration, panel toggle and panel (see onFeedbackFrame).
-+    if (FB) onFeedbackFrame(frame, layer, performance.now());
-+
-     // ---- Calibration trigger / capture lifecycle (in-VR) ----
-     if (calibMode) {
-       // Quest controller buttons[1] is "grip" (analog 0..1 .value).
-@@ -1503,11 +1685,12 @@
+@@ -1503,11 +1682,17 @@
        viewer = {
          position: xyz(vt.position),
          orientation: xyzw(vt.orientation),
@@ -326,6 +316,11 @@ Reason for each change:
 +    const xrFrame = { type: "xr_frame", t_client: performance.now(), t_xr: _time, seq: xrSeq++, reset_count: xrResetCount, session_id: xrSessionId, controllers, viewer };
 +    if (xrResetPending) { xrFrame.reset_event = xrResetPending; xrResetPending = null; }
 +    wsSend(xrFrame);
++
++    // Operator feedback: vibration, panel toggle and panel (see onFeedbackFrame). After the
++    // frame is sent, so drawing the panel never delays the input stream. Not in the wrist
++    // calibration mode (returned above).
++    if (FB) onFeedbackFrame(frame, layer, performance.now());
    }
  })();
 ```
