@@ -38,6 +38,11 @@ def live_like():
     stamp[ahead] = js.stamp[after[ahead]]
     assert np.any(stamp > st.stamp)
     st.fields['gripper_measured_stamp'] = stamp
+    # The tool pose's joint state is ahead of the cycle in other rows than the gripper's.
+    tool = st.fields['measured_tool_pose_stamp'].copy()
+    tool_ahead = np.arange(len(st)) % 4 == 1
+    tool[tool_ahead] = js.stamp[after[tool_ahead]]
+    st.fields['measured_tool_pose_stamp'] = tool
     st.fields['gripper_measured'] = np.where(ahead, js.fields['position'][after, 6],
                                              st.fields['gripper_measured'])
     st.fields['input_age'][5] = -1.0
@@ -71,7 +76,7 @@ def test_no_age_in_any_field_is_negative(tick_stream):
     ep = jittered_camera(live_like(), 'camera_wrist')
     arrays, _ = export.build_export(ep, CHECKS, tick_stream=tick_stream)
     found = ages(arrays)
-    assert {'state_age', 'gripper_measured_age', 'measured_row_age', 'input_age',
+    assert {'state_age', 'gripper_measured_age', 'tool_pose_measured_age', 'input_age',
             'joint_state_age', 'action_pose_age', 'image_camera_wrist_age'} <= set(found)
     for name, value in found.items():
         finite = value[np.isfinite(value)]
@@ -94,7 +99,16 @@ def test_measured_sample_is_never_later_than_the_tick():
         assert len(row)
         assert arrays['gripper_measured'][k] in st.fields['gripper_measured'][row]
     # And where the cycle's own sample was later than the tick, an earlier row is used.
-    assert np.any(arrays['measured_row_age'] > arrays['state_age'] + 1e-9)
+    assert np.any(arrays['gripper_measured_age'] > arrays['state_age'] + 1e-9)
+    # The same for the tool pose, on its own recorded stamp.
+    tool_ok = arrays['tool_pose_measured_valid']
+    tool_stamp = t - arrays['tool_pose_measured_age']
+    assert np.all(tool_stamp[tool_ok] <= t[tool_ok] + 1e-12)
+    for k in np.flatnonzero(tool_ok)[:200]:
+        row = np.flatnonzero(np.isclose(st.fields['measured_tool_pose_stamp'], tool_stamp[k],
+                                        rtol=0.0, atol=1e-9))
+        assert any(np.array_equal(arrays['tool_pose_measured'][k],
+                                  st.fields['measured_tool_pose'][r]) for r in row)
 
 
 def test_a_sample_one_ms_after_the_tick_is_never_held():
@@ -191,14 +205,33 @@ def test_a_sample_after_its_tick_raises_rather_than_being_clamped():
         export._age(np.array([0.001]), np.array([0]), np.array([0.0]))
 
 
-def test_the_tool_pose_is_bounded_only_where_a_gripper_sample_stamps_the_row():
+def test_the_tool_pose_is_held_on_its_own_recorded_stamp():
     ep = live_like()
     st = ep.streams['state']
+    arrays, meta = export.build_export(ep, CHECKS)
+    assert meta['tool_pose_stamp'].startswith('TeleopState.measured_tool_pose_stamp')
+    t = arrays['t']
+    ok = arrays['tool_pose_measured_valid']
+    assert ok.sum() > 300 and np.all(arrays['tool_pose_measured_age'][ok] >= 0.0)
+    # Every exported age is measured from a recorded tool stamp (not a gripper stamp).
+    held = t[ok] - arrays['tool_pose_measured_age'][ok]
+    recorded = st.fields['measured_tool_pose_stamp']
+    assert all(np.any(np.abs(recorded - h) < 1e-9) for h in held)
+    assert np.any(recorded != st.fields['gripper_measured_stamp'])
+
+
+def test_a_recording_without_the_tool_stamp_falls_back_and_says_so():
+    ep = live_like()
+    st = ep.streams['state']
+    st.fields['measured_tool_pose_stamp'] = np.full(len(st), np.nan)     # read by bag_io.LEGACY
     st.fields['gripper_measured_valid'][100:200] = False
     arrays, meta = export.build_export(ep, CHECKS)
-    bounded = arrays['tool_pose_measured_bounded']
-    assert bounded.any() and not bounded.all()
-    u = arrays['t'] - np.min(st.stamp)
-    inside = (u > 100 / 50.0 + 0.05) & (u < 199 / 50.0)
-    assert not bounded[inside].any()
-    assert 'tool_pose_measured_bounded' in {f['name'] for f in meta['fields']}
+    assert 'recorded before TeleopState carried' in meta['tool_pose_stamp']
+    age = arrays['tool_pose_measured_age']
+    ok = arrays['tool_pose_measured_valid']
+    assert np.all(age[np.isfinite(age)] >= 0.0)
+    # Bounded by the gripper sample where there is one; unknown (NaN) where there is none.
+    assert np.isfinite(age[ok]).sum() > 0 and np.isnan(age[ok]).sum() > 0
+    del st.fields['measured_tool_pose_stamp']                            # no field at all
+    _, meta = export.build_export(ep, CHECKS)
+    assert 'recorded before TeleopState carried' in meta['tool_pose_stamp']
