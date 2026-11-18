@@ -621,7 +621,7 @@ def graph_nodes(probe, settle=2.0):
     return sorted(full_name(name, ns) for name, ns in probe.node.get_node_names_and_namespaces())
 
 
-def assert_stack_nodes(probe, launch, expected):
+def assert_stack_nodes(probe, launch, expected, settle=2.0):
     """
     Assert that the probe's ROS domain holds this stack, this probe and nothing else.
 
@@ -630,7 +630,7 @@ def assert_stack_nodes(probe, launch, expected):
     fails. Nodes of launched processes that have exited are left out (``EXITING_NODES``);
     those of such a process still running are allowed.
     """
-    seen = graph_nodes(probe)
+    seen = graph_nodes(probe, settle)
     started, exited = launched_processes(launch)
     left = ignoring(seen, exited_node_patterns(launch))
     running = tuple(re.compile(p + r'\Z') for e in sorted(started - exited)
