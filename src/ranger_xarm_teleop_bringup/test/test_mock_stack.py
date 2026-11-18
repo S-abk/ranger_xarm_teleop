@@ -39,7 +39,8 @@ ELSEWHERE = [0.3, -0.4, -0.9, 0.2, 1.1, -0.3]
 def stack(tmp_path_factory):
     logs = tmp_path_factory.mktemp('mock_stack')
     env = child_environment(offset=1)
-    launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_mock.launch.py'],
+    launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_mock.launch.py',
+                      'rviz:=false'],
                      env, str(logs / 'launch.log'))
     probe = Probe(env)
     try:

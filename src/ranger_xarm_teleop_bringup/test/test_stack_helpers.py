@@ -17,24 +17,26 @@ import pytest
 from stack_helpers import (assert_stack_nodes, exited_node_patterns, ignoring,
                            launched_processes, MOCK_RECORD_NODES, MOCK_STACK_NODES)
 
-# Lines as a mock stack's launch prints them (abridged from a real log).
+# Lines as a mock stack's launch prints them (abridged from a real log; ``rviz:=false``).
 STARTED = """[INFO] [launch]: Default logging verbosity is set to INFO
 [INFO] [robot_state_publisher-1]: process started with pid [3184664]
 [INFO] [ros2_control_node-2]: process started with pid [3184665]
 [INFO] [spawner-3]: process started with pid [3184666]
 [INFO] [move_group-5]: process started with pid [3184672]
-[INFO] [rviz2-6]: process started with pid [3184673]
 [INFO] [servo_node-9]: process started with pid [3184680]
 [INFO] [arm_mux_node-10]: process started with pid [3184682]
 [INFO] [teleop_node-11]: process started with pid [3184683]
 [INFO] [gripper_relay_node-13]: process started with pid [3184689]
-[rviz2-6] [ERROR] [1795010055.962286643] [rviz2]: rviz::RenderSystem: error creating render window
 """
-RVIZ_DIED = ('[ERROR] [rviz2-6]: process has died [pid 3184673, exit code -6, cmd '
-             '/opt/ros/jazzy/lib/rviz2/rviz2 -d planning.rviz].\n')
 SPAWNER_DONE = '[INFO] [spawner-3]: process has finished cleanly [pid 3184666]\n'
 RELAY_DIED = ('[ERROR] [gripper_relay_node-13]: process has died [pid 3184689, exit code -2, '
               'cmd gripper_relay_node].\n')
+# RViz started after all (the argument not reaching the MoveIt launch), then aborting off screen.
+RVIZ_STARTED = ('[INFO] [rviz2-6]: process started with pid [3184673]\n'
+                '[rviz2-6] [ERROR] [1795010055.962286643] [rviz2]: rviz::RenderSystem: error '
+                'creating render window\n')
+RVIZ_DIED = ('[ERROR] [rviz2-6]: process has died [pid 3184673, exit code -6, cmd '
+             '/opt/ros/jazzy/lib/rviz2/rviz2 -d planning.rviz].\n')
 
 # The nodes of a running mock stack (a live listing; the numbered names change per run).
 LIVE = ['/arm_mux', '/arm_mux_client', '/arm_mux_observer', '/controller_manager',
@@ -85,36 +87,45 @@ def check(names, log, expected=MOCK_STACK_NODES):
 
 def test_started_and_exited_processes_are_read_from_the_launch_log():
     assert launched_processes(_Launch(STARTED)) == (
-        {'robot_state_publisher', 'ros2_control_node', 'spawner', 'move_group', 'rviz2',
-         'servo_node', 'arm_mux_node', 'teleop_node', 'gripper_relay_node'}, set())
-    started, exited = launched_processes(_Launch(STARTED + RVIZ_DIED + SPAWNER_DONE))
+        {'robot_state_publisher', 'ros2_control_node', 'spawner', 'move_group', 'servo_node',
+         'arm_mux_node', 'teleop_node', 'gripper_relay_node'}, set())
+    started, exited = launched_processes(_Launch(STARTED + SPAWNER_DONE + RVIZ_STARTED
+                                                 + RVIZ_DIED))
     assert exited == {'rviz2', 'spawner'} and exited < started
 
 
-def test_only_nodes_of_known_exiting_processes_are_left_out_and_any_other_exit_fails():
-    patterns = exited_node_patterns(_Launch(STARTED + RVIZ_DIED + SPAWNER_DONE))
-    assert ignoring(['/rviz', '/rviz2', '/spawner_xarm6_traj_controller', '/move_group'],
-                    patterns) == ['/rviz2', '/move_group']
+def test_only_nodes_of_finished_spawners_are_left_out_and_any_other_exit_fails():
+    patterns = exited_node_patterns(_Launch(STARTED + SPAWNER_DONE))
+    assert ignoring(['/spawner_xarm6_traj_controller', '/spawner', '/move_group'],
+                    patterns) == ['/spawner', '/move_group']
     assert exited_node_patterns(_Launch(STARTED)) == ()
     with pytest.raises(AssertionError, match='gripper_relay_node'):
-        exited_node_patterns(_Launch(STARTED + RVIZ_DIED + RELAY_DIED))
+        exited_node_patterns(_Launch(STARTED + SPAWNER_DONE + RELAY_DIED))
+    with pytest.raises(AssertionError, match='rviz2'):
+        exited_node_patterns(_Launch(STARTED + SPAWNER_DONE + RVIZ_STARTED + RVIZ_DIED))
 
 
-def test_the_live_stack_matches_its_expected_nodes_with_or_without_the_dead_rviz():
-    check(LIVE, STARTED + RVIZ_DIED)
-    check(LIVE + ['/rviz'], STARTED + RVIZ_DIED)          # its entry lingering until the lease
-    check(LIVE + ['/rviz'], STARTED)                      # RViz still running: allowed
+def test_the_live_stack_matches_its_expected_nodes_with_or_without_a_spawner():
+    check(LIVE, STARTED + SPAWNER_DONE)
+    check(LIVE + ['/spawner_xarm_gripper_traj_controller'], STARTED)      # still loading
+    check(LIVE + ['/spawner_xarm_gripper_traj_controller'], STARTED + SPAWNER_DONE)  # lingering
     check(LIVE + ['/episode_node', '/teleop_episode_recorder'], STARTED, MOCK_RECORD_NODES)
 
 
-@pytest.mark.parametrize('names, message', [
-    (LIVE + ['/unrelated_tool_node'], "nodes not of this stack: ['/unrelated_tool_node']"),
-    (LIVE + ['/teleop_test_probe'], 'teleop_test_probe'),               # a second probe
-    (LIVE + ['/arm_mux'], 'arm_mux'),                                    # a second stack
-    ([n for n in LIVE if n != '/teleop_servo'], 'teleop_servo'),        # a missing node
-    (LIVE + ['/moveit_123'], 'moveit_'),                                 # one numbered too many
-    (LIVE + ['/episode_node'], 'episode_node'),                          # not in this stack
+@pytest.mark.parametrize('names, log, message', [
+    pytest.param(LIVE + ['/unrelated_tool_node'], '',
+                 "nodes not of this stack: ['/unrelated_tool_node']", id='unrelated_node'),
+    pytest.param(LIVE + ['/teleop_test_probe'], '', 'teleop_test_probe', id='second_probe'),
+    pytest.param(LIVE + ['/arm_mux'], '', 'arm_mux', id='second_stack'),
+    pytest.param([n for n in LIVE if n != '/teleop_servo'], '', 'teleop_servo',
+                 id='missing_node'),
+    pytest.param(LIVE + ['/moveit_123'], '', 'moveit_', id='numbered_node_too_many'),
+    pytest.param(LIVE + ['/episode_node'], '', 'episode_node', id='record_node'),
+    pytest.param(LIVE + ['/rviz'], RVIZ_STARTED, "nodes not of this stack: ['/rviz']",
+                 id='rviz_running'),
+    pytest.param(LIVE + ['/rviz'], RVIZ_STARTED + RVIZ_DIED,
+                 "launched processes have exited: ['rviz2']", id='rviz_exited'),
 ])
-def test_anything_but_this_stack_and_its_probe_fails(names, message):
+def test_anything_but_this_stack_and_its_probe_fails(names, log, message):
     with pytest.raises(AssertionError, match=message.replace('[', r'\[').replace(']', r'\]')):
-        check(names, STARTED + RVIZ_DIED)
+        check(names, STARTED + SPAWNER_DONE + log)

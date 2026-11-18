@@ -15,8 +15,9 @@
 Teleop against mock execution: no simulator, no hardware.
 
 Starts ``ranger_xarm_moveit_config fake_execution.launch.py`` (ros2_control with mock
-components, move_group, RViz) and the teleop core with the simulation-only limit values
-and ``motion_enabled`` true. Every node runs on the system clock.
+components, move_group, and RViz unless ``rviz`` is false) and the teleop core with the
+simulation-only limit values and ``motion_enabled`` true. Every node runs on the system
+clock.
 
 Gripper teleop is on (``gripper_enabled`` true). The robot workspace's mock execution has
 no gripper controller, so this file also starts a stand-in for MoveIt's
@@ -58,8 +59,12 @@ def generate_launch_description():
         DeclareLaunchArgument('record_data_dir', default_value=''),
         DeclareLaunchArgument('record_session', default_value=''),
         DeclareLaunchArgument('record_extra', default_value=''),
-        IncludeLaunchDescription(PythonLaunchDescriptionSource(
-            os.path.join(moveit_share, 'launch', 'fake_execution.launch.py'))),
+        DeclareLaunchArgument('rviz', default_value='true',
+                              description='Start RViz with the planning view.'),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(moveit_share, 'launch', 'fake_execution.launch.py')),
+            launch_arguments={'use_rviz': LaunchConfiguration('rviz')}.items()),
         Node(package='controller_manager', executable='spawner', output='screen',
              arguments=[MOCK_MOVEIT_GRIPPER_CONTROLLER, '--param-file',
                         os.path.join(share, 'config', 'mock_moveit_gripper_controller.yaml'),

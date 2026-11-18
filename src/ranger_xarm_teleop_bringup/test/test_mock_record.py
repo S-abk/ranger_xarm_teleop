@@ -116,7 +116,7 @@ def stack(tmp_path_factory):
     md.write_labels(str(data), 'test-task', 'test-operator')
     env = child_environment(offset=11)
     launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_mock.launch.py',
-                      'record:=true', f'record_data_dir:={data}',
+                      'rviz:=false', 'record:=true', f'record_data_dir:={data}',
                       f'record_session:={SESSION}'], env, str(logs / 'launch.log'))
     probe = RecordProbe(env)
     try:
@@ -136,7 +136,7 @@ def stack(tmp_path_factory):
 
 def wait_for_settled_graph(probe, launch=None, quiet=5.0, timeout=90.0):
     """
-    Wait until no node joins or leaves for ``quiet`` s (RViz, spawners start late).
+    Wait until no node joins or leaves for ``quiet`` s (spawners start late).
 
     With ``launch``, nodes whose launched process has exited are left out: such a node can
     stay in the graph until its lease ends, and leave later.
@@ -186,9 +186,9 @@ def test_episode_presses_while_engaged_release_nothing_and_change_no_participant
     probe, env, logs, session, launch = stack
     probe.disarm()
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_MOVEIT, 30.0, 'MoveIt owner')
-    # Nodes of launched processes that exited before the episodes (RViz off screen) may still
-    # leave the graph when their lease ends; a process that exits during them is a change,
-    # even one whose node lingers in the graph (checked from the launch log below).
+    # Nodes of launched processes that exited before the episodes (spawners) may still leave
+    # the graph; a process that exits during them is a change, even one whose node lingers in
+    # the graph (checked from the launch log below).
     exited = exited_node_patterns(launch)
     exited_before = launched_processes(launch)[1]
     path = fixture_file(str(logs), 'episode_marks_engaged')

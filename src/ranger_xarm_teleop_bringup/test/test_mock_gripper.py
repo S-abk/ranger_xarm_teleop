@@ -127,7 +127,8 @@ def point(position, seconds=0.1):
 def stack(tmp_path_factory):
     logs = tmp_path_factory.mktemp('mock_gripper')
     env = child_environment(offset=9)
-    launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_mock.launch.py'],
+    launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_mock.launch.py',
+                      'rviz:=false'],
                      env, str(logs / 'launch.log'))
     probe = GripperProbe(env)
     try:

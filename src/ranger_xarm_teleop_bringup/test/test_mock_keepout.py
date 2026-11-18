@@ -46,7 +46,8 @@ SERVO_HALT_CODES = (ServoStatus.DECELERATE_FOR_COLLISION, ServoStatus.HALT_FOR_C
 def stack(tmp_path_factory):
     logs = tmp_path_factory.mktemp('mock_keepout')
     env = child_environment(offset=7)
-    launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_mock.launch.py'],
+    launch = Process(['ros2', 'launch', 'ranger_xarm_teleop_bringup', 'teleop_mock.launch.py',
+                      'rviz:=false'],
                      env, str(logs / 'launch.log'))
     probe = Probe(env)
     try:
