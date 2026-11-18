@@ -167,12 +167,20 @@ def load_checks(path: Optional[str] = None) -> dict:
     return load_yaml(path or os.path.join(package_dir(), 'config', 'checks.yaml'))
 
 
+# What a profile may override: the fitted consistency tolerances only. Everything else
+# (fail flags, gaps, offsets, the lag range) stays the tolerance file's, so a profile carried
+# in a sidecar cannot switch a failure off.
+PROFILE_TOLERANCES = {
+    'consistency': ('arm_rms_m', 'arm_p99_m', 'arm_rot_p99_deg', 'gripper_abs_rad'),
+}
+
+
 def effective_checks(checks: dict, profile: dict, source: str) -> dict:
     """
     Return the tolerances in force for ``profile``: ``checks`` with the profile's overrides.
 
-    A deployment profile may override any tolerance of checks.yaml in its ``checks`` block and
-    mark some of them ``provisional`` (set by hand before enough data to fit them). ``source``
+    A deployment profile may override the fitted consistency tolerances (PROFILE_TOLERANCES)
+    in its ``checks`` block and mark some of them ``provisional`` (set by hand before enough data to fit them). ``source``
     says which copy of the profile the overrides came from; it is reported with every check
     under ``_tolerances``. An override of a key checks.yaml does not have is an error, so a
     typing mistake cannot leave a tolerance silently at its default.
@@ -180,13 +188,17 @@ def effective_checks(checks: dict, profile: dict, source: str) -> dict:
     out = copy.deepcopy({k: v for k, v in checks.items() if k != '_tolerances'})
     overrides = profile.get('checks') or {}
     for section, values in overrides.items():
-        if not isinstance(out.get(section), dict):
-            raise ProfileError(f'profile {profile.get("name")}: checks.{section} is not a '
-                               'section of the tolerance file')
+        if section not in PROFILE_TOLERANCES or not isinstance(out.get(section), dict):
+            raise ProfileError(f'profile {profile.get("name")}: checks.{section} cannot be '
+                               f'set by a profile (only {sorted(PROFILE_TOLERANCES)})')
         for key, value in values.items():
-            if key not in out[section]:
+            if key not in PROFILE_TOLERANCES[section] or key not in out[section]:
                 raise ProfileError(f'profile {profile.get("name")}: checks.{section}.{key} '
-                                   'is not a tolerance of the tolerance file')
+                                   'cannot be set by a profile (only '
+                                   f'{list(PROFILE_TOLERANCES[section])})')
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+                raise ProfileError(f'profile {profile.get("name")}: checks.{section}.{key} '
+                                   'must be a positive number')
             out[section][key] = value
     out['_tolerances'] = {'profile': profile.get('name'), 'source': source,
                           'overrides': copy.deepcopy(overrides),

@@ -177,6 +177,25 @@ def test_an_override_of_an_unknown_tolerance_is_an_error():
         profile.effective_checks(CHECKS, prof, 'test')
 
 
+@pytest.mark.parametrize('override', [
+    {'flags': {'fail_flags': []}},                     # would stop DATA_LOST from failing
+    {'streams': {'gap_max_s': 10.0}},
+    {'consistency': {'lag_max_s': 5.0}},
+    {'consistency': {'arm_rot_p99_deg': 0}},
+    {'consistency': {'arm_rot_p99_deg': 'loose'}},
+])
+def test_a_profile_cannot_switch_off_a_failure(override):
+    prof = copy.deepcopy(profile.load_profile('gazebo'))
+    prof['checks'], prof['provisional'] = override, {}
+    with pytest.raises(profile.ProfileError):
+        profile.effective_checks(CHECKS, prof, 'test')
+    # The checker refuses to run on such a recorded profile rather than apply it.
+    ep = synth.build()
+    ep.profile = prof
+    with pytest.raises(profile.ProfileError):
+        checker.check_episode(ep, CHECKS)
+
+
 def test_provisional_names_a_tolerance_the_profile_sets():
     raw = profile.load_yaml(profile.resolve('gazebo'))
     raw['provisional'] = {'consistency.arm_rms_m': 'not set here'}

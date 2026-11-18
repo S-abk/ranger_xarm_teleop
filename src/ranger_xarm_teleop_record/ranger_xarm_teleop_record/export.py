@@ -28,7 +28,9 @@ The measured fields of TeleopState (tool pose, gripper opening) come from a join
 stamp can be later than the state's own cycle stamp (the teleop node reads the newest joint
 state when it publishes). They are held on the newest state row whose cycle stamp and
 measured-gripper stamp are both not later than the tick, which may be an earlier row than the
-one the other state fields come from.
+one the other state fields come from. The tool pose has no stamp of its own; it is bounded by
+the gripper sample's stamp where the row has one (``tool_pose_measured_bounded``), and may be
+up to one joint-state period newer than its cycle where it has not.
 
 Output of ``write_export``: ``data.npz`` (arrays, first dimension T), ``export.json`` (what the
 arrays mean, the hold rule, the episode identity, the checker verdict) and ``images/<stream>/
@@ -88,12 +90,16 @@ def _age(stamp: np.ndarray, idx: np.ndarray, t: np.ndarray) -> np.ndarray:
     Return ``t - stamp[idx]``, NaN where nothing is held yet.
 
     ``hold_index`` admits a stamp up to TIME_EPS after the tick (float rounding of the tick
-    grid); such an age is clamped to 0. A stamp later than that is never held, so the clamp
-    cannot hide a sample from after the tick.
+    grid); such an age is clamped to 0. A sample stamped later than that would be a causality
+    error in this module: it raises instead of being clamped or exported.
     """
     out = np.full(len(t), np.nan)
     ok = idx >= 0
-    out[ok] = np.maximum(t[ok] - np.asarray(stamp, dtype=float)[idx[ok]], 0.0)
+    age = t[ok] - np.asarray(stamp, dtype=float)[idx[ok]]
+    if np.any(age < -TIME_EPS):
+        raise ValueError(f'a held sample is stamped {-float(age.min()) * 1e3:.3f} ms after '
+                         'its tick')
+    out[ok] = np.maximum(age, 0.0)
     return out
 
 
@@ -138,6 +144,10 @@ FIELD_INFO: Dict[str, Tuple[str, str, str]] = {
                            'measured_row_age); TeleopState carries no stamp of its own joint '
                            'state, which is not newer than the gripper sample\'s'),
     'tool_pose_measured_valid': ('', '', 'the measured tool pose was valid'),
+    'tool_pose_measured_bounded': ('', '', 'the held row has a gripper sample stamp, which '
+                                   'bounds the tool pose\'s joint state (not later than the '
+                                   'tick); where False the tool pose may come from a joint '
+                                   'state up to one joint-state period after its cycle stamp'),
     'gripper_measured': ('rad', '', 'measured gripper opening; NaN where not valid'),
     'gripper_measured_valid': ('', '', 'the measured opening was valid'),
     'gripper_measured_age': ('s', '', 'tick time minus the stamp of the measured opening'),
@@ -209,6 +219,8 @@ def _ticks(ep: Episode, state: Stream, rate_hz: Optional[float], checks: dict,
     if rate_hz:
         raise ValueError('a tick stream gives the ticks; a rate cannot be given with it')
     finite = np.flatnonzero(np.isfinite(st.stamp))
+    if not len(finite):
+        raise ValueError(f'{tick_stream}: no frame has a finite stamp')
     rows = finite[np.argsort(st.stamp[finite], kind='stable')]
     t = np.asarray(st.stamp[rows], dtype=float)
     dt = np.diff(t)
@@ -328,13 +340,16 @@ def build_export(ep: Episode, checks: dict, rate_hz: Optional[float] = None,
     pose[~pose_ok] = np.nan
     arrays['tool_pose_measured'] = pose
     arrays['tool_pose_measured_valid'] = pose_ok
+    # The tool pose has no stamp of its own: it is bounded by the gripper sample's stamp only
+    # where the held row has one (see FIELD_INFO).
+    arrays['tool_pose_measured_bounded'] = (mi >= 0) & all_g_ok[np.maximum(mi, 0)]
     g_ok = held('gripper_measured_valid', False, mi).astype(bool) & (mi >= 0)
     g_ok &= all_g_ok[np.maximum(mi, 0)]
     g_value = held('gripper_measured', np.nan, mi).astype(float)
     g_value[~g_ok] = np.nan
     arrays['gripper_measured'] = g_value
     arrays['gripper_measured_valid'] = g_ok
-    g_age = _age(all_g_stamp, mi, t)
+    g_age = _age(np.where(all_g_ok, all_g_stamp, np.nan), mi, t)   # stamps of valid samples
     g_age[~g_ok] = np.nan
     arrays['gripper_measured_age'] = g_age
 

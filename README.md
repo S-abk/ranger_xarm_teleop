@@ -552,13 +552,16 @@ is copied into every session and episode; the checker's tolerances (`config/chec
 relative to it. A deployment passes its own profile with `record_profile:=<path>`. A profile
 may also:
 
-- override tolerances of `config/checks.yaml` in a `checks` block, and mark some of them
-  `provisional` (set by hand before there was data to fit them). The `gazebo` profile sets the
+- override the fitted consistency tolerances of `config/checks.yaml` (arm RMS, p99 and
+  rotation, gripper) in a `checks` block, and mark some of them `provisional` (set by hand
+  before there was data to fit them). Nothing else can be overridden by a profile, so a
+  profile cannot switch a failure off. The `gazebo` profile sets the
   arm rotation limit to 1.5 deg this way. The checking tools apply the package's current
   profile of the episode's profile name, so a changed tolerance also judges older episodes;
   every check report names the source and lists the provisional values.
 - list `required_fields` of a stream: optional fields (joint `position`, `velocity`,
-  `effort`; odometry `pose`, `twist`) whose absence fails an episode and refuses START. An
+  `effort`; odometry `pose`, `twist`) whose absence fails an episode (and, for a required
+  joint-state stream, refuses START while the newest message lacks the field). An
   absent field (no finite value in the episode) is otherwise only reported, in the sidecar and
   the check report. Gazebo and mock execution publish joint effort as NaN (their joints declare
   no effort state interface), so neither profile requires it.

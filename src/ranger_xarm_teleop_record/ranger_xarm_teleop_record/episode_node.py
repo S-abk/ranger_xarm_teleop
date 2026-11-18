@@ -110,7 +110,9 @@ class StreamWatch:
         self.recent: List[float] = []          # header stamps, last RATE_WINDOW_S
         self.last_arrival: Optional[float] = None
         self.episode: Optional[List[float]] = None
-        keys = OPTIONAL_FIELDS.get(spec.get('kind'), ())
+        # Only joint states are fed field by field (on_joint_states); another kind gets no
+        # presence, so a required field there cannot hold START refused forever.
+        keys = OPTIONAL_FIELDS['joint_states'] if spec.get('kind') == 'joint_states' else ()
         self.presence = FieldPresence(keys) if keys else None       # since start-up
         self.episode_presence: Optional[FieldPresence] = None        # in the episode
 

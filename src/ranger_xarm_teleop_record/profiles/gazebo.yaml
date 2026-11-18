@@ -19,7 +19,8 @@ recorder:
 disk:
   min_free_gb_to_start: 20
   min_free_gb_to_continue: 10
-# Tolerances of config/checks.yaml this deployment sets differently (section: {key: value}).
+# Fitted consistency tolerances of config/checks.yaml this deployment sets differently (only
+# consistency arm_rms_m, arm_p99_m, arm_rot_p99_deg, gripper_abs_rad may be set here).
 # The checking tools apply the package's current copy of this block, also to episodes recorded
 # before it changed; each check report names the source and lists the provisional values.
 checks:

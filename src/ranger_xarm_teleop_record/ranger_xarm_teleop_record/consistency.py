@@ -33,7 +33,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from ranger_xarm_teleop_record import metadata
-from ranger_xarm_teleop_record.profile import period
+from ranger_xarm_teleop_record.profile import PROFILE_TOLERANCES, period
 from ranger_xarm_teleop_record.streams import Episode
 
 # Replicated from ranger_xarm_teleop_interfaces/msg/TeleopState.msg and GripperCommand.msg.
@@ -369,7 +369,7 @@ def _gripper(ep: Episode, tol: dict) -> dict:
 
 # The tolerances of checks.yaml's consistency section that judge an episode (the lag range
 # and the identifiability thresholds are physical plausibility, not fitted per deployment).
-TOLERANCE_KEYS = ('arm_rms_m', 'arm_p99_m', 'arm_rot_p99_deg', 'gripper_abs_rad')
+TOLERANCE_KEYS = PROFILE_TOLERANCES['consistency']
 
 
 # --------------------------------------------------------------------------------------------

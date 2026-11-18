@@ -176,3 +176,29 @@ def test_absent_fields_are_named_in_the_export():
     arrays, meta = export.build_export(ep, CHECKS)
     assert meta['fields_absent'] == {'joint_states': ['effort']}
     assert np.isnan(arrays['joint_effort']).all()
+
+
+def test_a_sample_after_its_tick_raises_rather_than_being_clamped():
+    # The live condition with the old hold (measured fields from the state row of the tick):
+    # the gripper sample can be newer than the tick, and the age guard must catch it.
+    ep = live_like()
+    st = ep.streams['state']
+    t = np.min(st.stamp) + np.arange(300) / 30.0
+    si = export.hold_index(st.stamp, t)
+    with pytest.raises(ValueError, match='after its tick'):
+        export._age(st.fields['gripper_measured_stamp'], si, t)
+    with pytest.raises(ValueError):
+        export._age(np.array([0.001]), np.array([0]), np.array([0.0]))
+
+
+def test_the_tool_pose_is_bounded_only_where_a_gripper_sample_stamps_the_row():
+    ep = live_like()
+    st = ep.streams['state']
+    st.fields['gripper_measured_valid'][100:200] = False
+    arrays, meta = export.build_export(ep, CHECKS)
+    bounded = arrays['tool_pose_measured_bounded']
+    assert bounded.any() and not bounded.all()
+    u = arrays['t'] - np.min(st.stamp)
+    inside = (u > 100 / 50.0 + 0.05) & (u < 199 / 50.0)
+    assert not bounded[inside].any()
+    assert 'tool_pose_measured_bounded' in {f['name'] for f in meta['fields']}
