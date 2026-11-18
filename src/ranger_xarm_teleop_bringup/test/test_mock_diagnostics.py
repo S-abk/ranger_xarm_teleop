@@ -30,8 +30,8 @@ from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 
-from stack_helpers import (assert_alone_on_domain, child_environment, Probe, Process, READY,
-                           replay)
+from stack_helpers import (assert_stack_nodes, child_environment, MOCK_STACK_NODES, Probe, Process,
+                           READY, replay)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -235,5 +235,5 @@ def test_one_command_recovers_from_the_halt_to_the_ready_posture(stack):
 
 
 def test_no_other_stack_or_test_shares_this_domain(stack):
-    """Isolation, also when stack test modules run in parallel: one copy of every node."""
-    assert_alone_on_domain(stack[0])
+    """Isolation: the domain holds this stack's nodes and the probe, nothing else."""
+    assert_stack_nodes(stack[0], stack[3], MOCK_STACK_NODES)

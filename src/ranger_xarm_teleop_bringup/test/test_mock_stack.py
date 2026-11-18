@@ -27,9 +27,9 @@ from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 
-from stack_helpers import (assert_alone_on_domain, BODY_OBSTACLE, BODY_OBSTACLE_LINK,
-                           child_environment, INTO_BODY_START, Probe, Process, READY, replay,
-                           replay_with_clean_input)
+from stack_helpers import (assert_stack_nodes, BODY_OBSTACLE, BODY_OBSTACLE_LINK,
+                           child_environment, INTO_BODY_START, MOCK_STACK_NODES, Probe, Process,
+                           READY, replay, replay_with_clean_input)
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
 ELSEWHERE = [0.3, -0.4, -0.9, 0.2, 1.1, -0.3]
@@ -326,5 +326,5 @@ def test_log_has_no_gate_or_mux_errors(stack):
 
 
 def test_no_other_stack_or_test_shares_this_domain(stack):
-    """Isolation, also when stack test modules run in parallel: one copy of every node."""
-    assert_alone_on_domain(stack[0])
+    """Isolation: the domain holds this stack's nodes and the probe, nothing else."""
+    assert_stack_nodes(stack[0], stack[3], MOCK_STACK_NODES)
