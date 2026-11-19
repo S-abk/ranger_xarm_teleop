@@ -607,6 +607,7 @@ INPUT_PLAYER = os.path.join(HERE, 'input_player.py')
 INPUT_NODE = '/teleop_test_input'       # the player's node (input_player.NODE_NAME)
 TELEOP_NODE = 'teleop_servo'            # the node that takes the input
 LEAD_IN_SESSION = 1                     # the lead-in's XR session id: no fixture uses it
+QUIET_TIMEOUT_S = 2.0                   # a finished recording's input must have stopped by then
 _PLAYERS = {}                           # ROS domain -> InputPlayer of the stack on it
 
 
@@ -617,6 +618,7 @@ class Replay:
         self.player, self.ident, self.path, self.log_path = player, ident, path, log_path
         self.started = time.monotonic()
         self.proc = self                # ``replay.proc.returncode``, ``.poll()``: as a process
+        self._quiet = False             # the teleop node has seen this recording's input stop
         if log_path is not None:
             register_log(str(log_path))
 
@@ -655,12 +657,38 @@ class Replay:
     def poll(self):
         return self.returncode
 
-    def wait(self, timeout):
-        """Return the exit code, or None when still playing after ``timeout``."""
-        end = time.monotonic() + timeout
-        while self.returncode is None and time.monotonic() < end:
-            time.sleep(0.02)
+    def _ended(self):
+        """
+        Return the exit code once the recording has ended for the stack too, else None.
+
+        A recording sent to its last record has ended, for a test, when the teleop node sees
+        its input stop (``TeleopState.input_age`` beyond the gate's timeout). A replay process
+        took longer than that to exit, and tests read the stack's state right after waiting
+        for it. Fails if the node still reports fresh input ``QUIET_TIMEOUT_S`` later.
+        """
         code = self.returncode
+        if code != 0 or self._quiet:
+            return code
+        done = self._done()
+        probe = self.player.probe
+        state = probe.state() if probe is not None else None
+        if (done.get('loop') or state is None
+                or not 0.0 <= state.input_age <= INPUT_TIMEOUT_S):
+            self._quiet = True
+            return code
+        assert time.time() - done.get('t', time.time()) < QUIET_TIMEOUT_S, (
+            f'{self.path} was sent to its end over {QUIET_TIMEOUT_S} s ago and the teleop node '
+            f'still reports fresh input (age {state.input_age * 1000.0:.0f} ms, seq '
+            f'{state.input_seq}): something else is sending input')
+        return None
+
+    def wait(self, timeout):
+        """Return the exit code, or None when not ended (``_ended``) after ``timeout``."""
+        end = time.monotonic() + timeout
+        code = self._ended()
+        while code is None and time.monotonic() < end:
+            time.sleep(0.02)
+            code = self._ended()
         if code is not None:
             self._write_log()
         return code
@@ -695,6 +723,7 @@ class InputPlayer:
             stdout=subprocess.PIPE, stderr=self.log, text=True, start_new_session=True)
         self.lock = threading.Lock()
         self.events = []
+        self.probe = None               # the stack's probe (start_input): what the node sees
         self.acknowledged = False
         self.matched = {}               # the "matched" report (topic -> counts)
         self.lead_in_passes = None
@@ -823,6 +852,7 @@ def start_input(probe, env, logs, match_timeout=60.0, acknowledge_timeout=30.0):
     probe.wait_for_streams()
     probe.prime_clients()
     player = InputPlayer(env, os.path.join(str(logs), 'input_player.log'))
+    player.probe = probe
     _PLAYERS[env['ROS_DOMAIN_ID']] = player
     player.wait_event('up', 60.0)
     player.send(cmd='match', consumer=TELEOP_NODE, timeout=match_timeout)

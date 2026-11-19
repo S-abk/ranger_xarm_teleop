@@ -209,6 +209,36 @@ def test_a_replay_is_refused_without_an_acknowledged_input_player(monkeypatch):
         replay(env, 'arm_only', None)
 
 
+# ---- a recording has ended when the teleop node sees its input stop ----
+
+def test_a_finished_recording_has_ended_once_the_node_reports_its_input_stopped():
+    state = _state(input_age=0.03, input_seq=269)
+    events = [{'event': 'done', 'id': 1, 'records': 270, 'passes': 1, 'stopped': False,
+               'failed': False, 'loop': False, 't': stack_helpers.time.time()}]
+    player = SimpleNamespace(events_of=lambda ident: events, running=lambda: True,
+                             probe=SimpleNamespace(state=lambda: state))
+    ended = stack_helpers.Replay(player, 1, 'arm_only.jsonl', None)
+    assert ended.returncode == 0                            # every record was sent ...
+    assert ended.wait(0.05) is None                         # ... but the node still has input
+    state.input_age = 0.12                                  # beyond the gate's 0.1 s
+    assert ended.wait(0.05) == 0
+    state.input_age = 0.03                                  # (the next recording's input)
+    assert ended.wait(0.05) == 0                            # ended stays ended
+    # Input that never stops after a recording's end is somebody else's: say so, in time.
+    events[0]['t'] -= 3.0
+    stuck = stack_helpers.Replay(player, 1, 'arm_only.jsonl', None)
+    with pytest.raises(AssertionError, match='still reports fresh input'):
+        stuck.wait(0.05)
+    # A stopped recording, a failed one and a looped one do not wait for anything.
+    for change, code in (({'stopped': True}, 2), ({'failed': True}, 1), ({'loop': True}, 0)):
+        events[0] = {**events[0], 'stopped': False, 'failed': False, 'loop': False, **change}
+        assert stack_helpers.Replay(player, 1, 'x.jsonl', None).wait(0.05) == code
+    # Without a probe (the player on its own) the last record is the end.
+    player.probe = None
+    events[0] = {**events[0], 'stopped': False, 'failed': False, 'loop': False}
+    assert stack_helpers.Replay(player, 1, 'x.jsonl', None).wait(0.05) == 0
+
+
 # ---- the helpers that replay: what is repeated, and what never is ----
 
 class _Played:
