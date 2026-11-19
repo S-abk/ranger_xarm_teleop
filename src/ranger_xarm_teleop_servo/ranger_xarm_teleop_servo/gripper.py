@@ -34,7 +34,10 @@ command it was given. On becoming active again (arming, or the end of a freeze):
 * the command starts at the held reference: teleop's own last command when it has owned
   the gripper since (after a freeze), else the opening the controller holds (after an
   owner switch: what the previous owner last commanded), else, after
-  ``reference_timeout`` without one, the measured opening;
+  ``reference_timeout`` without one, the measured opening. A held reference counts only
+  when it was produced after teleop asked for the arm (``held_usable``): a value from
+  before the switch, however late it is delivered, is refused, and so is one whose stamp
+  the clock cannot place (the clock went back, as when a simulation restarts);
 * the trigger has no effect until it crosses a threshold (``AWAIT_TRIGGER``). A trigger
   held through the freeze does nothing until it is released (or pressed) again.
 
@@ -230,6 +233,32 @@ class GripperState:
     request: Request = Request.NONE         # NONE: waiting for a threshold crossing
     last_trigger: Optional[float] = None    # trigger of the previous active cycle
     waiting_since: Optional[float] = None   # since when a held reference is awaited
+
+
+def held_usable(stamp_ns: int, request_ns: Optional[int], now_ns: int,
+                future_tolerance_ns: int) -> Tuple[bool, str]:
+    """
+    Return ``(usable, why not)`` for a held reference stamped ``stamp_ns``.
+
+    All three times are the ROS clock of one host (ns): the reference's stamp (the
+    controller's state), the teleop node's time when it last asked for the arm
+    (``request_ns``, None when it has not asked) and its time now. The reference is usable
+    only when produced at or after that request and not ahead of now by more than
+    ``future_tolerance_ns``. A clock that went back after the request (a restarted
+    simulation) stamps new references before the request; references from before the jump
+    are ahead of now. Both are refused.
+    """
+    if request_ns is None:
+        return False, 'teleop has not asked for the arm'
+    if stamp_ns <= 0:
+        return False, 'not stamped'
+    if now_ns < request_ns:
+        return False, 'the clock went back since the ownership request'
+    if stamp_ns < request_ns:
+        return False, 'stamped before the ownership request'
+    if stamp_ns > now_ns + future_tolerance_ns:
+        return False, 'stamped ahead of this clock (the clock went back?)'
+    return True, ''
 
 
 @dataclass(frozen=True)

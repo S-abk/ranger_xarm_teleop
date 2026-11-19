@@ -431,7 +431,11 @@ carries a fixed tool in the gripper can never have it opened by teleop.
   teleop's own last command after an interruption, else what the controller holds after the
   owner switch (the previous owner's last command, reported by the gripper relay on
   `/teleop/gripper/held`), else, after `gripper_reference_timeout_s` (0.5 s) without one, the
-  measured opening. `gripper_reference_source` says which.
+  measured opening. `gripper_reference_source` says which. A held report counts only when its
+  stamp is not earlier than the moment teleop asked for the arm and not ahead of the teleop
+  node's clock: a report from before the switch, however late it is delivered, and any report
+  after the clock went back (a restarted simulation) are refused, with a warning in the log,
+  and the measured opening is used instead.
 - **Measured or assumed.** In Gazebo the opening is measured by the physics engine. In mock
   execution it is the command echoed back. On the hardware driver it is partly assumed: the
   gripper action proxy publishes the commanded target, so a grasp stalled on an object reads

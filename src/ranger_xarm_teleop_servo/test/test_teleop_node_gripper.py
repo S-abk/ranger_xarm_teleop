@@ -105,7 +105,8 @@ class GripperHarness(Harness):
         node = self.node
         owned = node.owner == ArmOwner.OWNER_TELEOP and node.owner_gripper
         if owned and self.relay:
-            node.gripper_held = (now, self.controller)      # the relay's report
+            node.gripper_held = (now, self.controller,       # the relay's report
+                                 node.get_clock().now().nanoseconds)
         if not self.joints_paused:
             stamp_ns = node.get_clock().now().nanoseconds - int(self.joint_stamp_lag * 1e9)
             node.joint_state = (now, stamp_ns, {**dict(zip(JOINTS, self.measured_q)),
@@ -295,11 +296,45 @@ def test_the_gripper_command_is_the_same_whether_the_clutch_is_used_or_not(harne
 def test_a_held_reference_from_before_the_owner_switch_is_not_used(harness):
     h = harness(held=0.3)
     h.relay = False
-    h.node.gripper_held = (0.0, 0.7)            # an old report, from before teleop owned it
+
+    def old_arrival(hh):
+        # Arrived before teleop owned the gripper (arrival 0.0); its stamp would pass the
+        # stamp rule, so only the arrival rule refuses it.
+        node = hh.node
+        if node.owner_request_ros_ns is not None:
+            node.gripper_held = (0.0, 0.7, node.get_clock().now().nanoseconds)
+
+    for i in range(300):
+        h.actions[round(0.01 * i + 0.005, 3)] = old_arrival
     h.play('arm_only')
     assert h.grips and all(g.reference_source == GripperCommand.SOURCE_MEASURED
                            for g in h.grips)
     assert h.grips[0].position == pytest.approx(0.3)
+
+
+def test_a_late_held_reference_stamped_before_the_ownership_request_is_refused(harness):
+    """
+    A value from before the switch, delivered after it (a stalled relay draining its queue).
+
+    It arrives after teleop owns the gripper, so the arrival check passes it; its stamp is
+    before the ownership request, so it is refused, and the gripper starts from the measured
+    opening after the reference timeout, never from the stale 0.7.
+    """
+    h = harness(held=0.3)
+    h.relay = False
+
+    def late(hh):
+        node = hh.node
+        if node.owner == ArmOwner.OWNER_TELEOP and node.owner_request_ros_ns is not None:
+            node.gripper_held = (hh.now, 0.7, node.owner_request_ros_ns - 1_000_000)
+
+    for i in range(300):
+        h.actions[round(0.01 * i + 0.005, 3)] = late
+    h.play('arm_only')
+    assert h.grips and all(g.reference_source == GripperCommand.SOURCE_MEASURED
+                           for g in h.grips)
+    assert h.grips[0].position == pytest.approx(0.3)
+    assert h.node.gripper_held_refused == 'stamped before the ownership request'
 
 
 # ---- INV-6 and approval addition 1 ----
@@ -776,10 +811,14 @@ def test_opening_into_the_margin_stops_there_and_resumes_when_the_arm_moves_away
             arrival=0.0, xr_time=0.0, session_id=1, seq=1, reset_count=0, controller=None,
             controller_present=True, controller_emulated=False, head=None, head_present=True,
             head_emulated=False, grip=False, calibrate=False, arm=False, trigger=1.0))
-        node.gripper_held = (0.0, 0.0)
+        node.owner_request_ros_ns = node.get_clock().now().nanoseconds   # teleop asked
+        # Arrived before teleop owned it (arrival 0.0); a stamp the stamp rule accepts, so only
+        # the arrival rule keeps it out.
+        node.gripper_held = (0.0, 0.0, node.owner_request_ros_ns)
         finger = [0.0]
         now = run_cycles(node, NEAR_MAST, finger, [1.0] * 3, 0.0, published)
-        node.gripper_held = (now, 0.0)          # the relay's report after the switch
+        node.gripper_held = (now, 0.0,          # the relay's report after the switch
+                             node.get_clock().now().nanoseconds)
         now = run_cycles(node, NEAR_MAST, finger, [1.0] * 2 + [0.0] * 40, now, published)
         clearance = node.gripper_clearance(np.array(NEAR_MAST))
         stopped = published[-1][0]
