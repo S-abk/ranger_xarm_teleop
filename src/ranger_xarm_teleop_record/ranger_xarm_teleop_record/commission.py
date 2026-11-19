@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Commissioning a machine for recording, without a simulator or robot.
+Commissioning a machine: recording (no simulator or robot), or the simulator (``--simulator``).
 
 Publishes synthetic images (and their camera_info) at the profile's size and rate for every
 image stream the profile records, records them with the profile's recorder settings for a
@@ -21,6 +21,12 @@ rate; and the free space in minutes. Image content ``noise`` does not compress (
 an upper bound for real cameras); ``flat`` compresses almost entirely (a lower bound).
 
 Run it on its own, not during a session: it starts its own publisher and recorder.
+
+``--simulator``: the machine check for teleoperation in simulation. With the simulator running
+as it will be used for a session (window, cameras), and before the teleop stack starts, it
+measures for a while how /joint_states arrive and how fast the ROS clock runs, and warns when
+the gaps leave little margin to the teleop gate's ``tool_pose_timeout_s`` (see sim_check.py).
+It refuses to run while a teleop node is up: it would join that session's graph.
 """
 
 import argparse
@@ -36,9 +42,12 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CameraInfo, Image
+from rosgraph_msgs.msg import Clock
+from sensor_msgs.msg import CameraInfo, Image, JointState
+import yaml
 
 from .profile import load_profile, recorded
+from .sim_check import assess, parameter_from
 
 BYTES = {'rgb8': 3, 'bgr8': 3, 'mono8': 1, '16UC1': 2, 'mono16': 2, '32FC1': 4}
 
@@ -124,7 +133,14 @@ def main(argv=None) -> int:
     """Run the commissioning measurement and print a JSON report."""
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--profile', default='gazebo')
-    ap.add_argument('--seconds', type=float, default=60.0)
+    ap.add_argument('--seconds', type=float, default=None,
+                    help='how long to measure (default 60 s; 30 s with --simulator)')
+    ap.add_argument('--simulator', action='store_true',
+                    help='check the running simulator instead (joint-state gaps, real-time '
+                         'factor); start the simulator first, the teleop stack after')
+    ap.add_argument('--limits', default=None,
+                    help='with --simulator: the limits file the session will use, for its '
+                         'tool_pose_timeout_s (default: the teleop node default)')
     ap.add_argument('--content', choices=('noise', 'flat'), default='noise')
     ap.add_argument('--dir', default=None, help='where the test bag goes (default: the '
                     "profile's data directory); it is deleted afterwards unless --keep")
@@ -134,6 +150,11 @@ def main(argv=None) -> int:
                          'best effort; large best-effort messages can be lost in transport)')
     ap.add_argument('--out', default=None, help='also write the report to this JSON file')
     args = ap.parse_args(argv)
+    if args.simulator:
+        return simulator_check(30.0 if args.seconds is None else args.seconds, args.limits,
+                               args.out)
+    if args.seconds is None:
+        args.seconds = 60.0
     profile = load_profile(args.profile)
     images = {n: s for n, s in recorded(profile).items() if s['kind'] == 'image'}
     infos = {n: s for n, s in profile['streams'].items() if s['kind'] == 'camera_info'}
@@ -244,3 +265,68 @@ def main(argv=None) -> int:
         with open(args.out, 'w', encoding='utf-8') as handle:
             handle.write(text + '\n')
     return 0
+
+
+TELEOP_STATE_TOPIC = '/teleop/state'
+
+
+def tool_pose_timeout(limits_path=None) -> float:
+    """tool_pose_timeout_s from a limits file (nested namespaces too), else the default."""
+    from ranger_xarm_teleop_servo.params import DEFAULTS
+    default = float(DEFAULTS['tool_pose_timeout_s'])
+    if not limits_path:
+        return default
+    with open(limits_path, encoding='utf-8') as handle:
+        return parameter_from(yaml.safe_load(handle), 'tool_pose_timeout_s', default)
+
+
+def simulator_check(seconds: float, limits_path=None, out=None) -> int:
+    """Measure /joint_states arrivals and /clock for ``seconds``; print the report."""
+    limit = tool_pose_timeout(limits_path)
+    rclpy.init()
+    node = Node('record_commission_sim_probe')
+    try:
+        end = time.monotonic() + 3.0
+        while time.monotonic() < end:                   # let discovery settle
+            rclpy.spin_once(node, timeout_sec=0.1)
+        if node.count_publishers(TELEOP_STATE_TOPIC) > 0:
+            print('refused: a teleop node is running (a session). Run this check with the '
+                  'simulator only, before the teleop stack.')
+            return 3
+        if node.count_publishers('/joint_states') == 0:
+            print('refused: nothing publishes /joint_states. Start the simulator (as you '
+                  'will use it: window, cameras) and its controllers first.')
+            return 2
+        arrivals, clock = [], []
+        node.create_subscription(JointState, '/joint_states',
+                                 lambda _m: arrivals.append(time.monotonic()), 10)
+        node.create_subscription(
+            Clock, '/clock',
+            lambda m: clock.append((m.clock.sec + 1e-9 * m.clock.nanosec, time.monotonic())),
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+        settle = time.monotonic() + 2.0
+        while time.monotonic() < settle:
+            rclpy.spin_once(node, timeout_sec=0.01)
+        arrivals.clear()
+        clock.clear()
+        t0 = time.monotonic()
+        while time.monotonic() < t0 + seconds:
+            rclpy.spin_once(node, timeout_sec=0.01)
+        report = assess(list(arrivals), list(clock), limit, time.monotonic() - t0)
+        if node.count_publishers(TELEOP_STATE_TOPIC) > 0:
+            print('refused: a teleop node started during the check, so it joined that '
+                  "session's graph. Run it again with the simulator only, before the teleop "
+                  'stack.')
+            return 3
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+    report['limits_file'] = limits_path
+    text = json.dumps(report, indent=1)
+    print(text)
+    print('OK: the simulator leaves margin to tool_pose_timeout_s' if report['ok'] else
+          'WARNING:\n- ' + '\n- '.join(report['warnings']))
+    if out:
+        with open(out, 'w', encoding='utf-8') as handle:
+            handle.write(text + '\n')
+    return 0 if report['ok'] else 4

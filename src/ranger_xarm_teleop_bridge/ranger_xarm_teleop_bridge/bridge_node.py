@@ -24,13 +24,22 @@ Per headset frame it publishes, all with the identical ``header.stamp`` (ROS tim
   /teleop/input/head/pose                            geometry_msgs/PoseStamped (viewer present)
   /teleop/input/joy                                  sensor_msgs/Joy
   /teleop/input/status                               ranger_xarm_teleop_interfaces/InputStatus
+
+With ``feedback_enabled`` it also forwards operator feedback to the headset over the same relay
+connection: it subscribes to /teleop/haptic and /teleop/operator/status (and nothing else) and
+sends ``teleop_haptic`` and ``teleop_status`` messages (``relay_messages``). The ROS callbacks
+only fill an ``Outbox``; a sender task beside the reader in the connection's event loop sends
+from it, so reading and publishing headset frames never waits for a send (INV-1). Old items are
+dropped, never sent late, and nothing queues while the link is down (INV-4). With feedback off,
+nothing is subscribed or sent (INV-7).
 """
 
 import asyncio
 from dataclasses import dataclass, field
+import random
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from geometry_msgs.msg import PoseStamped
 from ranger_xarm_teleop_bridge.axes import xr_pose_to_ros
@@ -38,7 +47,12 @@ from ranger_xarm_teleop_bridge.frame_parse import (Ignored, Malformed, parse_tex
                                                    ResetEvent)
 from ranger_xarm_teleop_bridge.joy_layout import build_joy_arrays
 from ranger_xarm_teleop_bridge.jsonl_io import RecordWriter
-from ranger_xarm_teleop_interfaces.msg import HandStatus, InputStatus
+from ranger_xarm_teleop_bridge.operator_status import SimSpeed
+from ranger_xarm_teleop_bridge.outbox import Outbox
+from ranger_xarm_teleop_bridge.relay_messages import (echo_of, encode, FrameInfo,
+                                                      haptic_payload, panel_config,
+                                                      status_payload)
+from ranger_xarm_teleop_interfaces.msg import HandStatus, Haptic, InputStatus, OperatorStatus
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -51,6 +65,8 @@ POSE_TOPICS = {hand: f'/teleop/input/{hand}/pose' for hand in HANDS}
 HEAD_POSE_TOPIC = '/teleop/input/head/pose'
 JOY_TOPIC = '/teleop/input/joy'
 STATUS_TOPIC = '/teleop/input/status'
+HAPTIC_TOPIC = '/teleop/haptic'
+OPERATOR_STATUS_TOPIC = '/teleop/operator/status'
 
 # Interface contract: poses and joy best effort, depth 1; status reliable, depth 10.
 POSE_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST,
@@ -60,7 +76,16 @@ JOY_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryP
 STATUS_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST,
                         depth=10, durability=DurabilityPolicy.VOLATILE)
 
+# Operator feedback in: as published by the operator feedback node.
+HAPTIC_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST,
+                        depth=10, durability=DurabilityPolicy.VOLATILE)
+OPERATOR_STATUS_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                                 history=HistoryPolicy.KEEP_LAST, depth=1,
+                                 durability=DurabilityPolicy.VOLATILE)
+
 LOG_THROTTLE_S = 2.0
+MIN_SEND_BUFFER = 1024
+MAX_SEND_BUFFER = 32768
 
 
 @dataclass
@@ -89,14 +114,25 @@ class BridgeNode(Node):
     """Publishes the input side of the interface contract from relay text messages."""
 
     def __init__(self, node_name: str = 'teleop_input_bridge',
-                 source_label: str = 'relay') -> None:
-        super().__init__(node_name)
+                 source_label: str = 'relay', **node_kwargs) -> None:
+        super().__init__(node_name, **node_kwargs)
         self.declare_parameter('relay_url', 'ws://127.0.0.1:8443/ws')
         self.declare_parameter('reconnect_interval_s', 1.0)
         self.declare_parameter('frame_id', 'quest_world')
         self.declare_parameter('record_path', '')
         self.declare_parameter('source', source_label)
         self.declare_parameter('stats_period_s', 5.0)
+        self.declare_parameter('feedback_enabled', False)
+        self.declare_parameter('panel_anchor', 'left_controller')
+        self.declare_parameter('panel_offset', [0.0, 0.10, 0.0])
+        self.declare_parameter('panel_width_m', 0.16)
+        self.declare_parameter('panel_visible_default', True)
+        self.declare_parameter('status_stale_s', 1.0)
+        self.declare_parameter('status_max_age_s', 0.4)
+        self.declare_parameter('haptic_queue', 8)
+        self.declare_parameter('send_buffer_limit_bytes', 16384)
+        self.declare_parameter('sim_slow_below', 0.6)
+        self.declare_parameter('sim_slow_clear', 0.7)
 
         self.frame_id = str(self.get_parameter('frame_id').value)
         self.source = str(self.get_parameter('source').value)
@@ -126,6 +162,97 @@ class BridgeNode(Node):
 
         period = float(self.get_parameter('stats_period_s').value)
         self._stats_timer = self.create_timer(period, self._log_stats) if period > 0 else None
+        self._setup_feedback()
+
+    # ---- operator feedback (only with feedback_enabled) ----
+
+    def _setup_feedback(self) -> None:
+        param = self.get_parameter
+        self.feedback_enabled = bool(param('feedback_enabled').value)
+        # Newest headset frame (session id, seq, t_client ms, monotonic arrival), for the echo.
+        self.last_frame: Optional[FrameInfo] = None
+        # Set by the relay connection: wakes its sender (thread-safe), or None when unconnected.
+        self.feedback_wake: Optional[Callable[[], None]] = None
+        self.feedback_sent = {'teleop_haptic': 0, 'teleop_status': 0}
+        self.feedback_errors = 0
+        self.feedback_stalls = 0
+        if not self.feedback_enabled:
+            return
+        self.run_id = random.SystemRandom().randrange(1, 2 ** 31)
+        self._haptic_id = 0
+        self._status_seq = 0
+        self.panel = panel_config(str(param('panel_anchor').value),
+                                  list(param('panel_offset').value),
+                                  float(param('panel_width_m').value),
+                                  bool(param('panel_visible_default').value))
+        self.status_stale_ms = 1000.0 * float(param('status_stale_s').value)
+        # Measured from the statuses' arrivals (what the page can expect), 200 ms until known.
+        self.status_period_ms = 200.0
+        self._last_status_at: Optional[float] = None
+        # The ROS clock against the wall clock, from the statuses' stamps: a slow simulator.
+        self.sim_speed = SimSpeed(slow_below=float(param('sim_slow_below').value),
+                                  clear_above=float(param('sim_slow_clear').value))
+        self.send_buffer_limit = int(param('send_buffer_limit_bytes').value)
+        # Below the connection's own write limit (websockets: 64 KiB), above which a send, and
+        # the protocol's own replies to the relay's pings, would wait for the link to drain.
+        if not MIN_SEND_BUFFER <= self.send_buffer_limit <= MAX_SEND_BUFFER:
+            raise ValueError(f'send_buffer_limit_bytes must be {MIN_SEND_BUFFER}..'
+                             f'{MAX_SEND_BUFFER}')
+        self.outbox = Outbox(haptic_max=int(param('haptic_queue').value),
+                             status_max_age_s=float(param('status_max_age_s').value))
+        self.create_subscription(Haptic, HAPTIC_TOPIC, self._on_haptic, HAPTIC_QOS)
+        self.create_subscription(OperatorStatus, OPERATOR_STATUS_TOPIC, self._on_status,
+                                 OPERATOR_STATUS_QOS)
+        self.get_logger().info(f'operator feedback on: forwarding {HAPTIC_TOPIC} and '
+                               f'{OPERATOR_STATUS_TOPIC} to the relay (run {self.run_id})')
+
+    def _wake(self) -> None:
+        wake = self.feedback_wake
+        if wake is not None:
+            try:
+                wake()
+            except RuntimeError:         # the connection's loop has just closed
+                pass
+
+    def _on_haptic(self, msg: Haptic) -> None:
+        try:
+            self._haptic_id += 1
+            payload = haptic_payload(msg, self.run_id, self._haptic_id)
+            self.outbox.put_haptic(payload, time.time() - msg.wall_time, float(msg.max_age))
+            self._wake()
+        except Exception as exc:  # noqa: B902 - feedback must never take the bridge down
+            self._feedback_error(f'haptic: {type(exc).__name__}: {exc}')
+
+    def _on_status(self, msg: OperatorStatus) -> None:
+        try:
+            self._status_seq += 1
+            now = time.monotonic()
+            if self._last_status_at is not None:
+                period = 1000.0 * (now - self._last_status_at)
+                self.status_period_ms = min(2000.0, max(20.0, period))
+            self._last_status_at = now
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            self.sim_speed.update(stamp, float(msg.wall_time))
+            payload = status_payload(msg, self.run_id, self._status_seq, self.panel,
+                                     self.status_stale_ms, self.status_period_ms,
+                                     self.sim_speed.text())
+            self.outbox.set_status(payload, time.time() - msg.wall_time)
+            self._wake()
+        except Exception as exc:  # noqa: B902 - feedback must never take the bridge down
+            self._feedback_error(f'status: {type(exc).__name__}: {exc}')
+
+    def _feedback_error(self, text: str) -> None:
+        self.feedback_errors += 1
+        self.get_logger().warning(f'operator feedback: {text}',
+                                  throttle_duration_sec=LOG_THROTTLE_S)
+
+    def feedback_texts(self) -> List[Tuple[str, str]]:
+        """Return (type, JSON text) to send now (called by the sender, in its event loop)."""
+        out = []
+        for payload, age in self.outbox.take():
+            out.append((payload['type'],
+                        encode(payload, age, echo_of(self.last_frame, time.monotonic()))))
+        return out
 
     # ---- the single entry point for live and replayed text ----
 
@@ -165,6 +292,9 @@ class BridgeNode(Node):
             self.last_session_id = result.session_id
             self.last_seq = result.seq
             self.last_reset_count = result.reset_count
+            if self.feedback_enabled:
+                self.last_frame = (result.session_id, result.seq, result.client_time_ms,
+                                   time.monotonic())
         except Exception as exc:  # noqa: B902 - a frame must never take the node down
             self._count_malformed(f'unexpected {type(exc).__name__}: {exc}')
 
@@ -279,10 +409,18 @@ class BridgeNode(Node):
         new_frames = self.frames - self._frames_at_last_stats
         self._frames_at_last_stats = self.frames
         rate = new_frames / period if period > 0 else 0.0
+        feedback = ''
+        if self.feedback_enabled:
+            box = self.outbox
+            feedback = (f' feedback: sent haptic={self.feedback_sent["teleop_haptic"]} '
+                        f'status={self.feedback_sent["teleop_status"]} dropped old '
+                        f'haptic={box.dropped_old_haptic} status={box.dropped_old_status} '
+                        f'overflow={box.dropped_overflow} stalls={self.feedback_stalls} '
+                        f'errors={self.feedback_errors}')
         self.get_logger().info(
             f'{self.source}: connected={self.connected} {rate:.1f} frames/s '
             f'frames={self.frames} malformed={self.malformed} ignored={self.ignored} '
-            f'last_seq={self.last_seq}')
+            f'last_seq={self.last_seq}' + feedback)
 
     def close(self) -> None:
         """Flush and close the recorder, if any."""
@@ -335,12 +473,16 @@ class WebSocketSource:
                     self.node.connected = True
                     attempt = 0
                     log.info(f'connected to relay {self.url}')
-                    async for message in ws:
-                        if self._stop.is_set():
-                            break
-                        if isinstance(message, bytes):
-                            message = message.decode('utf-8', errors='replace')
-                        self.node.handle_text(message, time.time())
+                    sender = self._start_sender(ws)
+                    try:
+                        async for message in ws:
+                            if self._stop.is_set():
+                                break
+                            if isinstance(message, bytes):
+                                message = message.decode('utf-8', errors='replace')
+                            self.node.handle_text(message, time.time())
+                    finally:
+                        self._stop_sender(sender)
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: B902 - connection errors: log, wait, retry
@@ -357,6 +499,56 @@ class WebSocketSource:
                 await asyncio.sleep(self.reconnect_interval)
             except asyncio.CancelledError:
                 break
+
+    # ---- operator feedback: a sender beside the reader, on the same connection ----
+
+    def _start_sender(self, ws) -> Optional[asyncio.Task]:
+        if not self.node.feedback_enabled:
+            return None
+        loop = asyncio.get_running_loop()
+        wake = asyncio.Event()
+        self.node.feedback_wake = lambda: loop.call_soon_threadsafe(wake.set)
+        wake.set()                                  # send whatever is still young enough
+        return asyncio.create_task(self._send_loop(ws, wake), name='feedback-sender')
+
+    def _stop_sender(self, sender: Optional[asyncio.Task]) -> None:
+        if sender is None:
+            return
+        self.node.feedback_wake = None
+        sender.cancel()
+
+    async def _send_loop(self, ws, wake: asyncio.Event) -> None:
+        """Send queued feedback whenever woken; skip while the link does not drain."""
+        node = self.node
+        while True:
+            await wake.wait()
+            wake.clear()
+            try:
+                if _write_buffer_size(ws) > node.send_buffer_limit:
+                    # The link is not draining: send nothing, let the items age out, retry.
+                    node.feedback_stalls += 1
+                    node.outbox.expire()
+                    await asyncio.sleep(0.05)
+                    wake.set()
+                    continue
+                for kind, text in node.feedback_texts():
+                    await ws.send(text)
+                    node.feedback_sent[kind] += 1
+            except asyncio.CancelledError:
+                raise
+            except websockets.exceptions.ConnectionClosed:
+                return
+            except Exception as exc:  # noqa: B902 - the reader must not be affected
+                node._feedback_error(f'send: {type(exc).__name__}: {exc}')
+
+
+def _write_buffer_size(ws) -> int:
+    """Bytes the connection has not yet handed to the network (0 if unknown)."""
+    transport = getattr(ws, 'transport', None)
+    try:
+        return int(transport.get_write_buffer_size()) if transport is not None else 0
+    except Exception:  # noqa: B902
+        return 0
 
 
 def main(args=None) -> None:

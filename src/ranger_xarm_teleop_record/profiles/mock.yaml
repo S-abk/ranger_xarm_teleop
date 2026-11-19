@@ -53,5 +53,7 @@ streams:
   odom:             {topic: /odom, kind: odometry, type: nav_msgs/msg/Odometry, required: false, rate_hz: null, clock: robot, base: true}
   ground_truth_odom: {topic: /ground_truth/odom, kind: odometry, type: nav_msgs/msg/Odometry, required: false, rate_hz: null, clock: robot, base: true}
   episode_state:    {topic: /teleop/episode/state, kind: episode_state, type: ranger_xarm_teleop_interfaces/msg/EpisodeState, required: true, rate_hz: 5, clock: robot}
+  haptic:           {topic: /teleop/haptic, kind: other, type: ranger_xarm_teleop_interfaces/msg/Haptic, required: false, rate_hz: null, clock: robot}
+  operator_status:  {topic: /teleop/operator/status, kind: other, type: ranger_xarm_teleop_interfaces/msg/OperatorStatus, required: false, rate_hz: null, clock: robot}
   parameter_events: {topic: /parameter_events, kind: other, type: rcl_interfaces/msg/ParameterEvent, required: false, rate_hz: null, clock: robot}
   rosout:           {topic: /rosout, kind: other, type: rcl_interfaces/msg/Log, required: false, rate_hz: null, clock: robot}

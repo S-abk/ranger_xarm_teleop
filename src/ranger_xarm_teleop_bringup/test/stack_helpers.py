@@ -566,7 +566,8 @@ MOCK_STACK_NODES = {
     **{re.escape(name): 1 for name in (
         '/arm_mux', '/arm_mux_client', '/arm_mux_observer', '/controller_manager',
         '/gripper_relay', '/joint_state_broadcaster', '/move_group', '/move_group/moveit',
-        '/moveit_simple_controller_manager', '/robot_state_publisher', '/servo_node',
+        '/moveit_simple_controller_manager', '/operator_feedback', '/robot_state_publisher',
+        '/servo_node',
         '/servo_node/moveit', '/teleop_arm_controller', '/teleop_gripper_controller',
         '/teleop_servo', '/teleop_servo_watcher', '/xarm6_traj_controller',
         '/xarm_gripper_traj_controller', '/xarm_mock_components_genericsystem',
@@ -645,3 +646,37 @@ def assert_stack_nodes(probe, launch, expected, settle=2.0):
         left = [n for n in left if n not in hits]
     left = ignoring(left, running)
     assert not wrong and not left, f'nodes not of this stack: {left}; counts wrong: {wrong}'
+
+
+def node_pids(name, pgid=None, environ=None):
+    """
+    Return the pids of this test's processes running ``name`` (a node executable).
+
+    Only processes of the process group ``pgid``, or with ``environ`` (a 'KEY=value' string)
+    in their environment, count: never a process this test did not start.
+    """
+    out = []
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
+        try:
+            if pgid is not None and os.getpgid(int(entry)) != pgid:
+                continue
+            if environ is not None:
+                with open(f'/proc/{entry}/environ', 'rb') as handle:
+                    if environ.encode() not in handle.read().split(b'\0'):
+                        continue
+            with open(f'/proc/{entry}/cmdline', 'rb') as handle:
+                cmd = handle.read().replace(b'\0', b' ').decode(errors='replace')
+        except (OSError, ProcessLookupError):
+            continue
+        if name in cmd and 'ros2 ' not in cmd:
+            out.append(int(entry))
+    return out
+
+
+def cpu_seconds(pid):
+    """Return the CPU time (user + system, s) the process has used so far."""
+    with open(f'/proc/{pid}/stat', encoding='utf-8') as handle:
+        fields = handle.read().rsplit(')', 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')

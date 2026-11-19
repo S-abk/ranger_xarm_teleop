@@ -25,6 +25,12 @@ simulator wrappers pass. ``motion_enabled`` defaults to false.
 Gripper teleop (``gripper_enabled``, default false): adds the teleop gripper controller
 (inactive), names both gripper controllers to the mux so it swaps them with the arm's,
 and starts the gripper relay. The limits file must then hold the gripper's range and speed.
+
+Operator feedback (``feedback``, default true): the operator feedback node starts with the
+stack, before arming. It observes /teleop/state and /teleop/episode/state and publishes
+/teleop/haptic and /teleop/operator/status, which the bridge forwards to the headset. It
+decides nothing for teleop; parameters from ``feedback_params_file`` (patterns, rates), and
+the gripper's range from the limits file.
 """
 
 import os
@@ -185,7 +191,17 @@ def launch_setup(context, *args, **kwargs):
         output='screen', parameters=teleop_parameters,
         additional_env={'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'})
 
-    return [spawner, servo_node, mux, teleop] + gripper_nodes
+    feedback_nodes = []
+    if _true(arg('feedback')):
+        params_file = arg('feedback_params_file') or os.path.join(
+            get_package_share_directory('ranger_xarm_teleop_bridge'), 'config',
+            'operator_feedback.yaml')
+        # The limits file gives the gripper's open and closed positions (shown as % closed).
+        feedback_nodes.append(Node(
+            package='ranger_xarm_teleop_bridge', executable='feedback_node', output='screen',
+            parameters=[params_file, limits_file, sim_time]))
+
+    return [spawner, servo_node, mux, teleop] + gripper_nodes + feedback_nodes
 
 
 def generate_launch_description():
@@ -225,5 +241,13 @@ def generate_launch_description():
             'teleop_params_file', default_value='',
             description='Optional extra parameters of the teleop node (keep-out planes, '
                         'wrist frame, wrist-pivot offset, filter).'),
+        DeclareLaunchArgument(
+            'feedback', default_value='true',
+            description='Start the operator feedback node (vibration and panel status for the '
+                        'headset; information only).'),
+        DeclareLaunchArgument(
+            'feedback_params_file', default_value='',
+            description='Parameters of the operator feedback node (empty: the bridge '
+                        "package's config/operator_feedback.yaml)."),
         OpaqueFunction(function=launch_setup),
     ])

@@ -177,6 +177,33 @@ ros2 run ranger_xarm_teleop_bridge replay_node --ros-args -p file:=<recording.js
     -p wait_for_subscriber_s:=15.0 -p start_delay_s:=3.0
 ```
 
+**Simulator rendering (machines with two GPUs).** The gate releases the clutch when the newest
+joint state is older than `tool_pose_timeout_s` (0.1 s). A simulator well below real time
+delivers clock and joint states in bursts, and the gaps between bursts reach that limit: the
+clutch then releases on "Arm position late". On a laptop with an integrated and a discrete GPU,
+gz renders its window **and its cameras** (`sensors:=true`, also with `headless:=true`) on the
+default device, often the integrated one, which also draws the desktop. Measured on one such
+machine with both cameras on: 0.36-0.72 of real time on the integrated GPU, with up to 7 such
+releases in 4 minutes; 0.87-0.92 and 0-1 per run on the discrete GPU. Render it on the discrete GPU
+(NVIDIA PRIME render offload; the NVIDIA driver provides the files):
+
+```bash
+# terminal 1, for the simulator only:
+export __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia \
+       __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+ros2 launch ranger_xarm_gazebo sim.launch.py sensors:=true          # window on, or headless:=true
+# check the machine with the simulator up, before the teleop stack (refuses while one runs):
+ros2 run ranger_xarm_teleop_record record_commission --simulator \
+    --limits $(ros2 pkg prefix ranger_xarm_teleop_bringup)/share/ranger_xarm_teleop_bringup/config/SIMULATION_ONLY_limits.yaml
+```
+
+With the window on, `nvidia-smi` then lists `gz sim server` and `gz sim gui`; headless it lists
+nothing in either case (the server loads `libnvidia-glcore` only with these settings). The check
+prints the joint-state gaps and the real-time factor, and warns (exit code 4) when any gap
+exceeds `tool_pose_timeout_s`, the p99 gap exceeds half of it, or the simulator runs below 0.6
+of real time. During a session the headset panel says "Simulator slow: 0.4x real time" whenever
+the real-time factor is below 0.6 (it does not see the gaps themselves).
+
 **Operating it** (right controller):
 
 0. **Start from the ready posture.** A simulator spawns the arm with every joint at 0, where
@@ -595,6 +622,7 @@ ros2 run ranger_xarm_teleop_record episode_export ~/teleop_data/<session> 3 --ti
 ros2 run ranger_xarm_teleop_record episode_fit ~/teleop_data/<s1> ~/teleop_data/<s2> --out fit.yaml
 ros2 run ranger_xarm_teleop_record episode_purge ~/teleop_data                    # dry run
 ros2 run ranger_xarm_teleop_record record_commission --profile gazebo             # new machine
+ros2 run ranger_xarm_teleop_record record_commission --simulator   # simulator up, before teleop
 ```
 
 **Data directory** (default `~/teleop_data`; refused inside this repo's checkout, and inside
@@ -653,3 +681,65 @@ false means hold: no new target; `action_valid` is false there, and `gripper_act
 false in cycles where teleop held no gripper command. `data.npz` + `export.json` + lossless PNG
 images (32-bit depth as `.npy`): numpy and PIL only, nothing tied to a training framework.
 
+
+## Operator feedback (vibration and the headset panel)
+
+The operator, in the headset, knows the system's state without a screen.
+
+**What runs.** The operator feedback node (`ranger_xarm_teleop_bridge feedback_node`, node
+`operator_feedback`) starts with the stack (`feedback:=true`, the default of
+`teleop_core.launch.py`), before arming. It only observes `/teleop/state` (every message) and
+`/teleop/episode/state`, and publishes:
+
+| Topic | Type | What |
+|---|---|---|
+| `/teleop/haptic` | `Haptic` | one vibration request per episode event (left controller) |
+| `/teleop/operator/status` | `OperatorStatus` | the panel's content, 5 Hz: plain words for the hold, the limit and the last refusal, the last fault and the most severe recent limit latched, how fresh each source is |
+
+Both are recorded (optional streams of the profiles): what the operator felt and saw. The
+bridge (`bridge.launch.py feedback:=true`, the default) subscribes to these two topics only and
+sends them to the page over its relay connection (`teleop_haptic`, `teleop_status`). It never
+waits for a send while reading headset frames, drops what is older than its maximum age
+instead of sending it late, and queues nothing while the link is down. With `feedback:=false`
+nothing is subscribed or sent. If the feedback node stops, teleop goes on and the panel shows
+NO DATA.
+
+**Vibration** (left controller; distinct by count and length; the two you must not miss are
+long and strong):
+
+| Event | Pattern |
+|---|---|
+| mark (left trigger) | one tick, 40 ms |
+| start | one buzz, 200 ms |
+| stop | two short, 120 ms each |
+| keep | one long, 500 ms |
+| discard | three quick, 80 ms each |
+| refused | two long and strong, 350 ms each |
+| stopped by itself | an alarm: five short and strong, a pause, five again (2.4 s) |
+
+An event is vibrated once (by the episode node's event counter): a repeated state message, a
+reconnect or a lost message neither doubles nor invents one. A request older than 0.75 s
+anywhere on the way is dropped, never played late.
+
+**Panel.** A small panel about 10 cm above the left controller, turned to face you (or
+head-locked at the lower left: `panel_anchor: head` in the parameter file below). It shows the recording state with the
+episode and elapsed time, kept and discarded counts, armed, clutch, calibration, the
+translation scale and active limit, the gripper, the hold or latched fault in plain words, and
+the last refusal or self-stop. The recording state, the current hold or fault and the active
+limit are large and bold; the rest is smaller. When the ROS clock runs below 0.6 of real time
+(a slow simulator; `sim_slow_below`, `sim_slow_clear` in the parameter file) it adds
+"Simulator slow: 0.4x real time", measured by the bridge from the statuses' ROS stamps against
+their wall times. The left thumbstick click hides and shows it (remembered by the
+page). It has no controls. When its newest status is older than 1 s it shows NO DATA instead.
+
+**Tuning.** Patterns, priorities, rates and the panel's place and size are parameters in
+`ranger_xarm_teleop_bridge/config/operator_feedback.yaml` (`feedback_params_file:=` on both
+launches). The page shows its version (`client feedback-N`) in its log, next to the status pill
+and in the panel corner: after an update, reload the page fully in the headset browser.
+
+**Cost on the headset.** Record the same motion with the panel hidden, shown, and with
+`feedback:=false`, then compare the link statistics of the sidecars:
+
+```bash
+tools/compare_link.py ~/teleop_data/<session> --group hidden=1-3 --group shown=4-6 --group off=7-9
+```

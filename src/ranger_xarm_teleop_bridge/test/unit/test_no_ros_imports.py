@@ -21,7 +21,8 @@ import sys
 import pytest
 
 PKG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-MODULES = ['axes', 'frame_parse', 'joy_layout', 'jsonl_io']
+MODULES = ['axes', 'episode_feedback', 'frame_parse', 'joy_layout', 'jsonl_io',
+           'operator_status', 'outbox', 'relay_messages']
 FORBIDDEN = ['rclpy', 'geometry_msgs', 'sensor_msgs', 'std_msgs',
              'ranger_xarm_teleop_interfaces']
 IMPORT_RE = re.compile(r'^\s*(?:from|import)\s+(?:%s)\b' % '|'.join(FORBIDDEN), re.MULTILINE)
