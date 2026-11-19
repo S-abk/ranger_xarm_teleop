@@ -29,8 +29,9 @@ from moveit_msgs.srv import GetStateValidity
 import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
-from stack_helpers import (ARM_JOINTS, assert_stack_nodes, child_environment, MOCK_STACK_NODES,
-                           Probe, Process, READY, replay_with_clean_input, SERVO_FIXTURES)
+from stack_helpers import (arm_by_replay, ARM_JOINTS, assert_stack_nodes, child_environment,
+                           MOCK_STACK_NODES, prime, Probe, Process, READY,
+                           replay_with_clean_input, SERVO_FIXTURES, start_input)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -58,6 +59,12 @@ def stack(tmp_path_factory):
         model = ko.build(probe.description, ko.make_resolver(get_package_share_directory),
                          'xarm_link_base', 'xarm_link_tcp', MARGIN)
         arm = dls.arm_from_urdf(probe.description, 'xarm_link_base', 'xarm_link_tcp')
+        # The first test reads the joint positions and the tools read the teleop state: both
+        # must have reached the probe (start_input waits for them), and the teleop node must
+        # know where the tool is.
+        probe.wait_for(lambda: probe.state() is not None
+                       and probe.state().measured_tool_pose_valid, 60.0, 'the teleop state')
+        start_input(probe, env, logs)
         yield probe, env, logs, launch, model, arm
     finally:
         probe.close()
@@ -182,51 +189,32 @@ def _drive_into_contact(probe, path):
 
 def _arm_teleop(probe, env, logs, index):
     """Arm teleop from a recording that presses calibrate and arm only (no grip)."""
-    for attempt in range(2):
-        arming = Process(['ros2', 'run', 'ranger_xarm_teleop_bridge', 'replay_node',
-                          '--ros-args', '-p',
-                          f'file:={os.path.join(SERVO_FIXTURES, "arm_only.jsonl")}',
-                          '-p', 'wait_for_subscriber_s:=15.0', '-p', 'start_delay_s:=3.0'],
-                         env, str(logs / f'arm_{index}.{attempt}.log'))
-        try:
-            assert arming.wait(60.0) == 0, arming.output()
-        finally:
-            arming.stop()
-        try:
-            probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 10.0,
-                           'teleop owning')
-            return
-        except AssertionError:
-            # The button presses of a replay sometimes do not reach the node while the
-            # new publisher is being discovered (see replay_with_clean_input).
-            print(f'arming {index}: attempt {attempt} did not arm; repeated')
-    raise AssertionError('teleop was not armed')
+    arm_by_replay(probe, env, str(logs / f'arm_{index}.log'), start_delay=3.0, disarm=False)
+    probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 10.0, 'teleop owning')
 
 
 def _recover(env, logs, index):
-    """Run recover_arm.py (MoveIt plans to the ready posture); again if not handed back."""
-    for attempt in range(2):
-        recover = Process(['python3', os.path.join(TOOLS, 'recover_arm.py')], env,
-                          str(logs / f'recover_{index}.{attempt}.log'))
-        try:
-            code = recover.wait(180.0)
-        finally:
-            recover.stop()
-        if code == 0:
-            return
-        # Exit 4: the owner report was not fresh (nothing moved); seen at the baseline too.
-        assert code == 4, recover.output()
-        print(f'recover {index}: {recover.output()}; repeated')
-    raise AssertionError('recover_arm.py did not recover')
+    """Run recover_arm.py once: MoveIt plans to the ready posture."""
+    recover = Process(['python3', os.path.join(TOOLS, 'recover_arm.py')], env,
+                      str(logs / f'recover_{index}.log'))
+    try:
+        code = recover.wait(180.0)
+    finally:
+        recover.stop()
+    assert code == 0, recover.output()
 
 
 def _valid(probe, q, extra):
-    client = probe.node.create_client(GetStateValidity, '/check_state_validity')
-    assert client.wait_for_service(timeout_sec=10.0)
     state = RobotState()
     state.joint_state.name = ARM_JOINTS + list(extra)
     state.joint_state.position = [float(v) for v in q] + list(extra.values())
-    future = client.call_async(GetStateValidity.Request(robot_state=state, group_name='xarm6'))
+    request = GetStateValidity.Request(robot_state=state, group_name='xarm6')
+    client = getattr(probe, 'validity_client', None)
+    if client is None:
+        client = probe.validity_client = probe.node.create_client(GetStateValidity,
+                                                                  '/check_state_validity')
+        prime(client, request, timeout=10.0)    # a new client; the question changes nothing
+    future = client.call_async(request)
     probe.wait_for(future.done, 10.0, 'the state validity')
     return future.result().valid
 

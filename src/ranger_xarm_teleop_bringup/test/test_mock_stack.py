@@ -28,8 +28,8 @@ import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 
 from stack_helpers import (assert_stack_nodes, BODY_OBSTACLE, BODY_OBSTACLE_LINK,
-                           child_environment, INTO_BODY_START, MOCK_STACK_NODES, Probe, Process,
-                           READY, replay, replay_with_clean_input)
+                           child_environment, INTO_BODY_START, MOCK_STACK_NODES, prime, Probe,
+                           Process, READY, replay, replay_with_clean_input, start_input)
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
 ELSEWHERE = [0.3, -0.4, -0.9, 0.2, 1.1, -0.3]
@@ -51,6 +51,7 @@ def stack(tmp_path_factory):
         probe.wait_for(lambda: probe.controllers().get(TELEOP) == 'inactive', 60.0,
                        'the teleop controller to be loaded inactive')
         probe.move_to(READY)
+        start_input(probe, env, logs)
         yield probe, env, logs, launch
     finally:
         probe.close()
@@ -164,6 +165,9 @@ def test_failed_switch_leaves_the_owner_where_it_was(stack):
         from ranger_xarm_teleop_interfaces.srv import SetArmOwner
         client = probe.node.create_client(SetArmOwner, '/bad_mux/set_owner')
         assert client.wait_for_service(timeout_sec=20.0)
+        # A new server and a new client: its answer is lost until it has matched this client.
+        # Asking for the owner it already reports changes nothing and shows that it has.
+        prime(client, SetArmOwner.Request(owner=ArmOwner.OWNER_MOVEIT), each=6.0)
         time.sleep(1.5)             # it needs its own 0.3 s of joint states first
         before = probe.joint_positions()
         start = time.monotonic()

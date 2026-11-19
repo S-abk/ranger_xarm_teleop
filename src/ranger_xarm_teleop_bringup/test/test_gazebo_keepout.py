@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from stack_helpers import (child_environment, kill_gz_partition, Probe, Process, READY,
-                           replay_with_clean_input)
+                           replay_with_clean_input, start_input)
 from test_mock_keepout import (_arm_teleop, _contact_paths, _drive_into_contact,  # noqa
                                _extra, _recover, _tool, _valid, dls, ko, MARGIN,
                                SERVO_HALT_CODES, TOOLS)
@@ -63,6 +63,7 @@ def stack(tmp_path_factory):
         model = ko.build(probe.description, ko.make_resolver(get_package_share_directory),
                          'xarm_link_base', 'xarm_link_tcp', MARGIN)
         arm = dls.arm_from_urdf(probe.description, 'xarm_link_base', 'xarm_link_tcp')
+        start_input(probe, env, logs)
         yield probe, env, logs, model, arm
     finally:
         probe.close()

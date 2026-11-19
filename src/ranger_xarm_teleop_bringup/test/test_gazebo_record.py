@@ -31,7 +31,7 @@ from ranger_xarm_teleop_record.checker import check_episode
 from ranger_xarm_teleop_record.export import build_export, write_export
 from ranger_xarm_teleop_record.profile import load_checks
 from stack_helpers import (child_environment, cpu_seconds, kill_gz_partition, node_pids,
-                           Process, READY)
+                           Process, READY, start_input)
 from test_mock_record import (engaged_spans, EVENT_NAMES, fixture_file, RecordProbe,
                               replay_file, wait_for_settled_graph)
 
@@ -74,6 +74,7 @@ def stack(tmp_path_factory):
         time.sleep(5.0)             # MoveIt Servo start-up and verification
         probe.move_to(READY, seconds=4.0)
         probe.move_gripper(0.0, 1.5)
+        start_input(probe, env, logs)       # before the graph settles: its node stays
         wait_for_settled_graph(probe)
         yield probe, env, logs, os.path.join(data, session)
     finally:

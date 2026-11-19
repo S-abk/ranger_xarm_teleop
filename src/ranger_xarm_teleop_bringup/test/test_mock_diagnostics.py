@@ -31,7 +31,7 @@ import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 
 from stack_helpers import (assert_stack_nodes, child_environment, MOCK_STACK_NODES, Probe, Process,
-                           READY, replay)
+                           READY, replay, start_input)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -62,6 +62,7 @@ def stack(tmp_path_factory):
         probe.wait_for(lambda: probe.controllers().get('teleop_arm_controller') == 'inactive',
                        60.0, 'the teleop controller to be loaded inactive')
         probe.move_to(READY)
+        start_input(probe, env, logs)
         yield probe, env, logs, launch
     finally:
         probe.close()

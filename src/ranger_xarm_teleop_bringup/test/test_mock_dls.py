@@ -38,7 +38,7 @@ import rclpy
 
 from stack_helpers import (assert_stack_nodes, BODY_OBSTACLE, BODY_OBSTACLE_LINK,
                            child_environment, INTO_BODY_START, MOCK_STACK_NODES, Probe, Process,
-                           READY, replay, replay_with_clean_input, SHOULDER_START)
+                           READY, replay, replay_with_clean_input, SHOULDER_START, start_input)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -76,6 +76,7 @@ def stack(tmp_path_factory):
                        60.0, 'the teleop controller to be loaded inactive')
         probe.wait_for(lambda: probe.description is not None, 30.0, 'the robot description')
         probe.move_to(READY)
+        start_input(probe, env, logs)
         yield probe, env, logs, launch
     finally:
         probe.close()
@@ -462,17 +463,14 @@ def test_arming_is_refused_at_the_spawn_pose(stack):
     probe.disarm()
     probe.move_to(SPAWN)                    # straight to the controller: test only
     try:
-        for attempt in range(3):
-            asked = launch.output().count('arm requested')
-            start = time.monotonic()
-            process = replay(env, 'clutch_line', str(logs / f'replay_spawn.log.{attempt}'))
-            try:
-                assert process.wait(90.0) == 0, process.output()
-            finally:
-                process.stop()
-            time.sleep(1.0)
-            if launch.output().count('arm requested') > asked:
-                break               # the arm button reached the node (else: discovery, again)
+        asked = launch.output().count('arm requested')
+        start = time.monotonic()
+        process = replay(env, 'clutch_line', str(logs / 'replay_spawn.log'))
+        try:
+            assert process.wait(90.0) == 0, process.output()
+        finally:
+            process.stop()
+        time.sleep(1.0)
         output = launch.output()
         assert output.count('arm requested') > asked
         assert 'arm refused: orientation conditioning 0.00' in output

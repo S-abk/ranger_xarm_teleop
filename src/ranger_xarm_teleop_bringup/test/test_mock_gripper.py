@@ -38,7 +38,8 @@ from stack_helpers import (arm_by_replay, assert_stack_nodes, BODY_OBSTACLE,
                            BODY_OBSTACLE_LINK, child_environment, enabled_rigid_pairs,
                            INTO_BODY_START, MOCK_STACK_NODES, node_pids, press_frames,
                            press_never_arrived, Probe, Process, READY, replay,
-                           replay_with_clean_input, SERVO_FIXTURES, tool_speed_profile)
+                           replay_with_clean_input, SERVO_FIXTURES, start_input,
+                           tool_speed_profile)
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
@@ -145,6 +146,7 @@ def stack(tmp_path_factory):
                        'the teleop gripper controller to be loaded inactive')
         probe.move_to(READY)
         probe.move_gripper(0.0)
+        start_input(probe, env, logs)
         yield probe, env, logs, launch
     finally:
         probe.close()
@@ -152,15 +154,14 @@ def stack(tmp_path_factory):
         print(launch.output()[-6000:])
 
 
-def arm(probe, env, logs, name, attempts=3):
+def arm(probe, env, logs, name):
     """
     Calibrate and arm with the arm_only recording; wait until teleop owns both.
 
-    The presses are in the recording's first second, while the replay's new publisher is
-    still being discovered; a run is repeated only when the press demonstrably never reached
-    the teleop node (``stack_helpers.arm_by_replay``).
+    Once: the stack's input player was acknowledged before any test input, so the presses
+    in the recording's first second arrive (``stack_helpers.arm_by_replay``).
     """
-    start, _ = arm_by_replay(probe, env, str(logs / f'replay_{name}.log'), attempts=attempts)
+    start, _ = arm_by_replay(probe, env, str(logs / f'replay_{name}.log'))
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 10.0, 'teleop owner')
     return start
 
@@ -340,10 +341,13 @@ def test_a_held_reference_from_before_the_switch_delivered_late_is_refused(stack
 
 def test_the_arm_retry_does_not_repeat_an_arming_that_was_refused(stack):
     """
-    The retry on lost first frames cannot hide a real failure to arm.
+    A refused arming is returned as it is: arm_by_replay never tries again.
 
     At the spawn pose (every joint 0) arming is refused (the wrist is aligned). The presses
-    reach the teleop node, so arm_by_replay must return without another try, not armed.
+    reach the teleop node, so arm_by_replay must return after its one attempt, not armed.
+    (It used to repeat an attempt whose presses demonstrably never arrived; since the stack's
+    input player is acknowledged before any test input it repeats nothing, and the list of
+    discarded attempts it returns is always empty.)
     """
     probe, env, logs, launch = stack
     probe.disarm()
