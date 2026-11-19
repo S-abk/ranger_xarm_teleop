@@ -19,11 +19,18 @@ The teleop node publishes one gripper command per cycle on ``/teleop/gripper/com
 
 * ``trajectory`` (mock execution, Gazebo, Isaac Sim): each command becomes a one-point
   trajectory, reached one target period later, on the teleop gripper controller's topic.
-  The relay also reports the opening that controller holds (the reference in its state),
-  which is the held reference the teleop node starts from after an owner switch: the
-  controller activates holding the last command of the controller it replaced.
-* ``action`` (hardware, not built): would send ``control_msgs/GripperCommand`` goals and
-  report its last goal as the held reference. The relay refuses this mode.
+  The relay also reports the opening that controller holds (the reference in its state,
+  with that state's stamp), which is the held reference the teleop node starts from after
+  an owner switch: the controller activates holding the last command of the controller it
+  replaced, and publishes its state only while active.
+* ``action`` (hardware, not built): would send ``control_msgs/GripperCommand`` goals. Its
+  held reference must be **read from the device (or its driver) after the owner switch**
+  and stamped with the time of that read. It must never be the relay's own last goal: after
+  MoveIt has moved the gripper, that is teleop's command from before the switch. The teleop
+  node refuses a reference stamped before it asked for the arm (``gripper.held_usable``),
+  so a relay that stamps an old value with an old time is caught; one that stamps an old
+  value with a new time is not, which is why the read must come after the switch. The
+  relay refuses this mode.
 """
 
 import math

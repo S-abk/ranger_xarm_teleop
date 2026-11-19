@@ -408,3 +408,40 @@ def test_no_keep_out_check_while_the_command_does_not_change():
     run.cycles(10, trigger=0.0, clearance=clear)
     run.cycle(trigger=0.9, clearance=clear)     # CLOSE, already closed
     assert calls == []
+
+
+# ---- the held reference counts only when produced after teleop asked for the arm ----
+
+def test_a_held_reference_stamped_after_the_ownership_request_is_usable():
+    from ranger_xarm_teleop_servo.gripper import held_usable
+    request, tol = 100_000_000_000, 50_000_000
+    assert held_usable(request, request, request + 10_000_000, tol) == (True, '')
+    assert held_usable(request + 5_000_000, request, request + 10_000_000, tol)[0]
+    # Up to the tolerance ahead of this clock (the controller's clock runs a little ahead).
+    assert held_usable(request + 60_000_000, request, request + 10_000_000, tol)[0]
+
+
+def test_a_held_reference_from_before_the_request_is_refused_however_late_it_arrives():
+    from ranger_xarm_teleop_servo.gripper import held_usable
+    request, tol = 100_000_000_000, 50_000_000
+    usable, why = held_usable(request - 1, request, request + 30_000_000_000, tol)
+    assert not usable and why == 'stamped before the ownership request'
+
+
+def test_without_a_request_or_a_stamp_nothing_is_usable():
+    from ranger_xarm_teleop_servo.gripper import held_usable
+    assert held_usable(5, None, 10, 0) == (False, 'teleop has not asked for the arm')
+    assert held_usable(0, 1, 10, 0) == (False, 'not stamped')
+
+
+def test_a_clock_that_went_back_refuses_the_held_reference():
+    from ranger_xarm_teleop_servo.gripper import held_usable
+    tol = 50_000_000
+    # A simulation restarted after teleop asked for the arm (request at 300 s, the clock now
+    # at 2 s): a new reference is stamped before the request, and the clock is behind it.
+    usable, why = held_usable(1_500_000_000, 300_000_000_000, 2_000_000_000, tol)
+    assert not usable and why == 'the clock went back since the ownership request'
+    # Teleop asked after the restart (request at 1 s, now at 2 s); a reference from before
+    # the restart (stamped 299 s) arrives late: ahead of this clock, refused.
+    usable, why = held_usable(299_000_000_000, 1_000_000_000, 2_000_000_000, tol)
+    assert not usable and why == 'stamped ahead of this clock (the clock went back?)'

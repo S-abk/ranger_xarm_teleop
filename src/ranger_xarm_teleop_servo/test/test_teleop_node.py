@@ -149,8 +149,13 @@ class Harness:
                                  else teleop_node.SERVO_PAUSED)
 
     def _ownership(self, now, owner):
+        # Stands in for the mux: armed means teleop owns the arm. Like the node's own request
+        # (manage_ownership), taking the arm records the ROS time it was asked for.
+        was = self.node.owner
         self.node.owner = (ArmOwner.OWNER_TELEOP if self.node.state.want_armed
                            else ArmOwner.OWNER_MOVEIT)
+        if self.node.owner == ArmOwner.OWNER_TELEOP and was != ArmOwner.OWNER_TELEOP:
+            self.node.owner_request_ros_ns = self.node.get_clock().now().nanoseconds
         self.node.owner_arrival = now
 
     def close(self):

@@ -20,6 +20,9 @@ ROS domain. In mock execution "MoveIt's gripper controller" is this repo's stand
 directly. The measured opening in mock execution is an echo of the command.
 """
 
+import os
+import signal
+import threading
 import time
 
 from action_msgs.msg import GoalStatus
@@ -31,16 +34,18 @@ import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, TeleopState
 from rclpy.action import ActionClient
 from sensor_msgs.msg import JointState
-from stack_helpers import (assert_stack_nodes, BODY_OBSTACLE, BODY_OBSTACLE_LINK,
-                           child_environment, enabled_rigid_pairs, INTO_BODY_START,
-                           MOCK_STACK_NODES, Probe, Process, READY, replay,
-                           replay_with_clean_input, tool_speed_profile)
+from stack_helpers import (arm_by_replay, assert_stack_nodes, BODY_OBSTACLE,
+                           BODY_OBSTACLE_LINK, child_environment, enabled_rigid_pairs,
+                           INTO_BODY_START, MOCK_STACK_NODES, node_pids, press_frames,
+                           press_never_arrived, Probe, Process, READY, replay,
+                           replay_with_clean_input, SERVO_FIXTURES, tool_speed_profile)
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 MOVEIT, TELEOP = 'xarm6_traj_controller', 'teleop_arm_controller'
 MOVEIT_G, TELEOP_G = 'xarm_gripper_traj_controller', 'teleop_gripper_controller'
 JOINT = 'xarm_drive_joint'
 CLOSED = 0.849
+ARM_ONLY = os.path.join(SERVO_FIXTURES, 'arm_only.jsonl')
 
 
 class GripperProbe(Probe):
@@ -151,22 +156,11 @@ def arm(probe, env, logs, name, attempts=3):
     """
     Calibrate and arm with the arm_only recording; wait until teleop owns both.
 
-    The arm button is pressed in the recording's first second, while the replay's new
-    publisher is still being discovered; a run in which the press never arrived (no state
-    says armed) is repeated, as replay_with_clean_input does.
+    The presses are in the recording's first second, while the replay's new publisher is
+    still being discovered; a run is repeated only when the press demonstrably never reached
+    the teleop node (``stack_helpers.arm_by_replay``).
     """
-    for attempt in range(attempts):
-        probe.disarm()
-        start = time.monotonic()
-        process = replay(env, 'arm_only', str(logs / f'replay_{name}.{attempt}.log'),
-                         start_delay=1.0)
-        try:
-            assert process.wait(40.0) == 0, process.output()
-        finally:
-            process.stop()
-        if any(s.armed for s in probe.states_since(start)) or attempt + 1 == attempts:
-            break
-        print(f'discarded replay {name}.{attempt}: the arm button press never arrived')
+    start, _ = arm_by_replay(probe, env, str(logs / f'replay_{name}.log'), attempts=attempts)
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 10.0, 'teleop owner')
     return start
 
@@ -290,6 +284,84 @@ def test_arming_starts_from_the_opening_moveit_left_and_disarming_keeps_teleops(
     time.sleep(1.0)
     assert probe.controllers()[MOVEIT_G] == 'active'
     assert max(abs(p - 0.37) for p in probe.gripper_since(before)) < 1e-3
+
+
+def test_a_held_reference_from_before_the_switch_delivered_late_is_refused(stack):
+    """
+    The mechanism: a held reference produced before the owner switch, delivered after it.
+
+    Teleop owns the gripper holding 0.0; the relay's last report (0.0, stamped then) is kept.
+    MoveIt moves the gripper to 0.37. The relay is stopped (SIGSTOP: a stalled relay), teleop
+    is armed again, and the kept report is delivered after the switch, as the stalled relay
+    would deliver its backlog. It arrives after the switch but was stamped before the
+    ownership request: it is refused and said so, the measured opening (0.37) is used after
+    the reference timeout and said so, and the gripper does not move.
+    """
+    probe, env, logs, launch = stack
+    kept = []
+    probe.node.create_subscription(JointState, '/teleop/gripper/held', kept.append, 10)
+    stale_pub = probe.node.create_publisher(JointState, '/teleop/gripper/held', 10)
+    probe.disarm()
+    probe.move_gripper(0.0)
+    arm(probe, env, logs, 'stale_before')          # teleop's controller now holds 0.0
+    probe.wait_for(lambda: kept, 5.0, 'a held report from the relay')
+    stale = kept[-1]
+    assert stale.position[0] == pytest.approx(0.0, abs=1e-6)
+    probe.disarm()
+    probe.move_gripper(0.37)
+    relays = node_pids('gripper_relay_node', pgid=launch.proc.pid)
+    assert len(relays) == 1, relays
+    stop = threading.Event()
+
+    def backlog():
+        while not stop.is_set():
+            if probe.owner_value() == ArmOwner.OWNER_TELEOP:
+                stale_pub.publish(stale)
+            time.sleep(0.01)
+
+    os.kill(relays[0], signal.SIGSTOP)
+    worker = threading.Thread(target=backlog, daemon=True)
+    try:
+        worker.start()
+        start = arm(probe, env, logs, 'stale_after')
+        grips = probe.wait_for(lambda: probe.grips_since(start), 5.0, 'a gripper command')
+    finally:
+        stop.set()
+        worker.join(2.0)
+        os.kill(relays[0], signal.SIGCONT)
+    assert grips[0].reference_source == GripperCommand.SOURCE_MEASURED
+    assert grips[0].position == pytest.approx(0.37, abs=0.01)
+    assert max(abs(p - 0.37) for p in probe.gripper_since(start)) < 1e-3   # it never moved
+    output = launch.output()
+    assert 'held reference 0.0000 refused: stamped before the ownership request' in output
+    assert 'no held reference within' in output             # the fallback's own message
+    probe.disarm()
+
+
+def test_the_arm_retry_does_not_repeat_an_arming_that_was_refused(stack):
+    """
+    The retry on lost first frames cannot hide a real failure to arm.
+
+    At the spawn pose (every joint 0) arming is refused (the wrist is aligned). The presses
+    reach the teleop node, so arm_by_replay must return without another try, not armed.
+    """
+    probe, env, logs, launch = stack
+    probe.disarm()
+    probe.move_to([0.0] * 6)                # the spawn pose, straight to the controller
+    try:
+        refused = launch.output().count('arm refused: orientation conditioning')
+        start, discarded = arm_by_replay(probe, env, str(logs / 'replay_refused_arm.log'))
+        states = probe.states_since(start)
+        assert not any(s.armed for s in states)
+        seqs = [s.input_seq for s in states]
+        assert not press_never_arrived(seqs, press_frames(ARM_ONLY)[1]), seqs[:5]
+        # The press reached the node, which refused it, exactly once: an attempt after a
+        # refusal (a retry hiding the failure) would refuse again.
+        assert launch.output().count('arm refused: orientation conditioning') == refused + 1
+        assert all('the press never arrived' in d for d in discarded), discarded
+    finally:
+        probe.disarm()
+        probe.move_to(READY)
 
 
 def test_a_moving_gripper_refuses_the_switch(stack):

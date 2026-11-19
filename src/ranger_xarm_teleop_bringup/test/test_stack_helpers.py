@@ -13,9 +13,13 @@
 # limitations under the License.
 """The stack tests' launch-log reading and expected-node check on recorded lines (no ROS graph)."""
 
+import os
+
 import pytest
-from stack_helpers import (assert_stack_nodes, exited_node_patterns, ignoring,
-                           launched_processes, MOCK_RECORD_NODES, MOCK_STACK_NODES)
+import stack_helpers
+from stack_helpers import (assert_stack_nodes, exited_node_patterns, ignoring, keep_logs,
+                           launched_processes, MOCK_RECORD_NODES, MOCK_STACK_NODES,
+                           press_frames, press_never_arrived, SERVO_FIXTURES)
 
 # Lines as a mock stack's launch prints them (abridged from a real log; ``rviz:=false``).
 STARTED = """[INFO] [launch]: Default logging verbosity is set to INFO
@@ -130,3 +134,49 @@ def test_the_live_stack_matches_its_expected_nodes_with_or_without_a_spawner():
 def test_anything_but_this_stack_and_its_probe_fails(names, log, message):
     with pytest.raises(AssertionError, match=message.replace('[', r'\[').replace(']', r'\]')):
         check(names, STARTED + SPAWNER_DONE + log)
+
+
+# ---- the arm retry: only a press that demonstrably never arrived is tried again ----
+
+def test_the_presses_of_arm_only_are_seq_27_to_80():
+    # A (calibrate) 27-44, B (arm) 63-80.
+    assert press_frames(os.path.join(SERVO_FIXTURES, 'arm_only.jsonl')) == (27, 80)
+
+
+def test_a_press_is_lost_only_when_the_first_frame_is_well_after_the_last_press():
+    # The previous stream's newest frame (683) first, then the replay's own frames. The last
+    # pressed frame is 80; with the margin (10) only a first frame after 90 means "never arrived".
+    assert press_never_arrived([], 80)                          # nothing at all
+    assert press_never_arrived([683, 683, 683], 80)             # no frame of the replay
+    assert press_never_arrived([683, 144, 145], 80)             # the Gazebo failure: seq 144
+    assert press_never_arrived([683, 91, 92], 80)               # just beyond the margin
+    assert not press_never_arrived([683, 90, 91], 80)           # within it: may have arrived
+    assert not press_never_arrived([683, 60, 61], 80)           # A lost, B can arm (same session)
+    assert not press_never_arrived([683, 0, 1, 2], 80)          # from the start
+    assert not press_never_arrived([683, 30, 31], 80)           # mid-press: the level registers
+    assert not press_never_arrived([269, 28, 29], 80)           # 27 may have come between cycles
+    assert not press_never_arrived([683, 20, 150], 80)          # a gap later: still arrived
+    assert not press_never_arrived([5, 6, 7], 80)               # no previous stream
+
+
+# ---- logs kept when a test fails ----
+
+def test_keep_logs_copies_what_the_module_registered(tmp_path, monkeypatch):
+    monkeypatch.setattr(stack_helpers, '_LOGS', [])
+    launch = tmp_path / 'launch.log'
+    launch.write_text('launch output\n')
+    ros_logs = tmp_path / 'ros_log'
+    (ros_logs / 'run1').mkdir(parents=True)
+    (ros_logs / 'run1' / 'teleop_node.log').write_text('node log\n')
+    other = tmp_path / 'other.log'
+    other.write_text('another module\n')
+    monkeypatch.setenv('PYTEST_CURRENT_TEST', 'test/test_mock_x.py::test_a (setup)')
+    stack_helpers.register_log(str(launch))
+    stack_helpers.register_log(str(ros_logs))
+    monkeypatch.setenv('PYTEST_CURRENT_TEST', 'test/test_mock_y.py::test_b (setup)')
+    stack_helpers.register_log(str(other))
+    target = keep_logs('test/test_mock_x.py', 'test_a', str(tmp_path / 'kept'))
+    kept = sorted(os.path.relpath(os.path.join(d, f), target)
+                  for d, _, files in os.walk(target) for f in files)
+    assert kept == ['00_launch.log', os.path.join('01_ros_log', 'run1', 'teleop_node.log')]
+    assert os.path.basename(target).endswith('test_mock_x.py__test_a')

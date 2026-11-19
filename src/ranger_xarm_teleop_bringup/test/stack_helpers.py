@@ -13,11 +13,14 @@
 # limitations under the License.
 """Helpers for the tests that start real processes: own ROS domain, localhost discovery."""
 
+import json
 import math
 import os
 import re
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -62,6 +65,53 @@ def band_domain(base: int, offset: int) -> int:
     return 10 + (base - 10 + offset) % 90
 
 
+# ---- logs kept when a test fails ----
+#
+# Every child process's output file (``Process``) and every ROS log directory of a child
+# environment (``child_environment`` sets ``ROS_LOG_DIR``, so the launched nodes' own log
+# files land there) is registered with the test module that created it. When a test fails and
+# ``TELEOP_TEST_KEEP_LOGS`` names a directory, conftest.py copies what its module registered
+# into a new subdirectory there, so an intermittent failure keeps its evidence.
+
+KEEP_LOGS_ENV = 'TELEOP_TEST_KEEP_LOGS'
+_LOGS = []      # (test module path, file or directory)
+TEMP_LOG_DIRS = []   # the ROS_LOG_DIRs this session made; removed when it ends (conftest.py)
+
+
+def _current_module() -> str:
+    """Return the module of the running test ('' outside a test)."""
+    return os.environ.get('PYTEST_CURRENT_TEST', '').split('::')[0]
+
+
+def register_log(path: str) -> None:
+    """Keep ``path`` (a file or a directory) for the running test module."""
+    _LOGS.append((_current_module(), path))
+
+
+def registered_logs(module: str):
+    """Return the paths registered by ``module`` (a test module path, as pytest names it)."""
+    return [path for owner, path in _LOGS if owner == module]
+
+
+def keep_logs(module: str, test: str, destination: str) -> str:
+    """Copy what ``module`` registered into a new directory under ``destination``."""
+    stamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime())
+    name = re.sub(r'[^A-Za-z0-9_.-]+', '_', f'{os.path.basename(module)}__{test}')[:150]
+    target = os.path.join(destination, f'{stamp}_{name}')
+    os.makedirs(target, exist_ok=True)
+    for index, path in enumerate(registered_logs(module)):
+        dest = os.path.join(target, f'{index:02d}_{os.path.basename(path.rstrip(os.sep))}')
+        try:
+            if os.path.isdir(path):
+                shutil.copytree(path, dest, dirs_exist_ok=True)
+            elif os.path.isfile(path):
+                shutil.copy2(path, dest)
+        except OSError as err:          # a log being written as it is copied: say so, go on
+            with open(dest + '.copy_error.txt', 'w', encoding='utf-8') as handle:
+                handle.write(f'{path}: {err}\n')
+    return target
+
+
 def child_environment(offset: int) -> dict:
     """
     Return an environment for child processes and this test's own ROS context.
@@ -83,6 +133,11 @@ def child_environment(offset: int) -> dict:
     env['ROS_AUTOMATIC_DISCOVERY_RANGE'] = 'LOCALHOST'
     env.pop('ROS_STATIC_PEERS', None)
     env['QT_QPA_PLATFORM'] = 'offscreen'
+    # The launched nodes' own log files (rclcpp/rclpy file logging) for this environment only,
+    # kept with the test's other logs when it fails.
+    env['ROS_LOG_DIR'] = tempfile.mkdtemp(prefix=f'teleop_test_ros_log_{offset}_')
+    register_log(env['ROS_LOG_DIR'])
+    TEMP_LOG_DIRS.append(env['ROS_LOG_DIR'])
     return env
 
 
@@ -91,6 +146,7 @@ class Process:
 
     def __init__(self, command, env, log_path):
         self.log_path = log_path
+        register_log(str(log_path))
         self.log = open(log_path, 'w', encoding='utf-8')
         self.proc = subprocess.Popen(command, env=env, stdout=self.log,
                                      stderr=subprocess.STDOUT, start_new_session=True)
@@ -454,6 +510,91 @@ def replay(env, fixture, log_path, start_delay=3.0):
          '-p', f'file:={os.path.join(SERVO_FIXTURES, fixture + ".jsonl")}',
          '-p', 'wait_for_subscriber_s:=15.0', '-p', f'start_delay_s:={start_delay}'],
         env, log_path)
+
+
+# Frames a teleop cycle (50 Hz) can be behind the newest frame it reports, with a 90 Hz
+# input that may arrive in bursts: ``TeleopState.input_seq`` is the newest frame of the cycle,
+# so the first one a state reports can be later than the first one the node received.
+PRESS_SEQ_MARGIN = 10
+
+
+def press_frames(path: str):
+    """
+    Return ``(first, last)``: the seqs of the first and last frame with A or B pressed.
+
+    The right controller's A (calibrate) and B (arm); in ``arm_only`` A is 27-44, B 63-80.
+    """
+    first = last = None
+    with open(path, encoding='utf-8') as handle:
+        for line in handle:
+            msg = json.loads(line).get('msg', {})
+            if msg.get('type') != 'xr_frame':
+                continue
+            buttons = msg.get('controllers', {}).get('right', {}).get('buttons', [])
+            if any(len(buttons) > i and buttons[i].get('p') for i in (4, 5)):
+                first = int(msg['seq']) if first is None else first
+                last = int(msg['seq'])
+    if first is None:
+        raise ValueError(f'{path}: no A or B press')
+    return first, last
+
+
+def press_never_arrived(seqs, press_last: int, margin: int = PRESS_SEQ_MARGIN) -> bool:
+    """
+    Return True when none of a replay's presses can have reached the teleop node.
+
+    ``seqs``: ``TeleopState.input_seq`` in order since the replay started; the leading entries
+    can still be the previous stream's newest frame. The replay's own frames start at the
+    first change. True only when none arrived, or when the first one reported is more than
+    ``margin`` frames after the **last** pressed frame (``press_frames``). The gate reads
+    buttons as levels and keeps the previous stream's, so any frame of a press registers it;
+    it also keeps the calibration of the same XR session, so the arm press alone can arm; and
+    a state can report a frame or a burst later than the first one received. Anything nearer
+    counts as arrived: a node that may have got a press and did not arm is a real failure,
+    never given another try.
+    """
+    seqs = list(seqs)
+    if not seqs:
+        return True
+    start = next((i for i, seq in enumerate(seqs) if seq != seqs[0]), None)
+    if start is None:
+        return True                                     # no frame of the replay arrived
+    return seqs[start] > press_last + margin
+
+
+def arm_by_replay(probe, env, log_prefix, fixture='arm_only', attempts=3, start_delay=1.0):
+    """
+    Calibrate and arm with ``fixture``; return ``(start, discarded attempts)``.
+
+    The calibrate and arm presses are in the recording's first second, while the replay's
+    new publisher is still being discovered. An attempt is repeated only when the teleop node
+    did not arm **and** the press demonstrably never reached it (``press_never_arrived``):
+    a press that arrived without arming is returned as it is, for the caller's assertions to
+    fail on. Every discarded attempt is printed and returned.
+    """
+    first, last = press_frames(os.path.join(SERVO_FIXTURES, fixture + '.jsonl'))
+    discarded = []
+    start = time.monotonic()
+    for attempt in range(attempts):
+        probe.disarm()
+        start = time.monotonic()
+        process = replay(env, fixture, f'{log_prefix}.{attempt}', start_delay=start_delay)
+        try:
+            assert process.wait(40.0) == 0, process.output()
+        finally:
+            process.stop()
+        states = probe.states_since(start)
+        if any(s.armed for s in states):
+            return start, discarded
+        seqs = [s.input_seq for s in states]
+        if not press_never_arrived(seqs, last) or attempt + 1 == attempts:
+            return start, discarded
+        changed = next((seq for seq in seqs if seq != seqs[0]), None) if seqs else None
+        discarded.append(f'attempt {attempt + 1}: the first frame the teleop node got was '
+                         f'seq {changed} (presses at seq {first}-{last}): the press never '
+                         'arrived')
+        print(f'discarded replay of {fixture}: {discarded[-1]}')
+    return start, discarded
 
 
 # Releases that mean "data arrived late", not "the operator or a limit stopped it".

@@ -57,7 +57,9 @@ time (simulation time under ``use_sim_time``), which is what MoveIt Servo checks
 Gripper (``gripper.py``). The right trigger opens and closes the gripper while armed, clutch
 or not. ``gripper_enabled`` defaults to false; off, no gripper publisher exists and the
 trigger is not read. The opening the gripper's controller holds arrives on
-``/teleop/gripper/held`` (sensor_msgs/JointState, from the backend's gripper relay).
+``/teleop/gripper/held`` (sensor_msgs/JointState, from the backend's gripper relay); it is
+used only when stamped after this node asked for the arm and not ahead of its clock
+(``gripper.held_usable``), otherwise the measured opening after ``reference_timeout``.
 
 Safety. ``motion_enabled`` defaults to false (G-1). The limit values have no defaults:
 the node exits when one is missing. Values marked simulation-only are refused unless the
@@ -508,7 +510,11 @@ class TeleopNode(Node):
         self.gripper_tripped = False        # a frame since the last cycle tripped (any clutch)
         self.owner_gripper = False          # the mux swaps the gripper with the arm
         self.gripper_owner_since: Optional[float] = None    # monotonic, teleop owns it since
-        self.gripper_held = None            # (arrival, position) from the gripper relay
+        self.gripper_held = None            # (arrival, position, stamp ns) from the relay
+        # ROS time (ns) when this node last asked the mux for the arm; a held reference must
+        # be stamped at or after it (gripper.held_usable).
+        self.owner_request_ros_ns: Optional[int] = None
+        self.gripper_held_refused = ''      # why the newest held reference was refused
         self.gripper_keepout: Optional[ko.Model] = None     # the pairs the fingers move
         self.gripper_moved: frozenset = frozenset()          # the gripper joint and its mimics
         self.gripper_last_hold = None
@@ -875,7 +881,7 @@ class TeleopNode(Node):
             value = float(msg.position[list(msg.name).index(self.gripper_params.joint)])
         except (ValueError, IndexError):
             return
-        self.gripper_held = (self.mono(), value)
+        self.gripper_held = (self.mono(), value, stamp_key(msg.header.stamp))
 
     def _on_servo_status(self, msg: ServoStatus) -> None:
         self.servo_status = int(msg.code)
@@ -1223,12 +1229,25 @@ class TeleopNode(Node):
         owned = owner == ArmOwner.OWNER_TELEOP and self.owner_gripper
         if not owned:
             self.gripper_owner_since = None
+            self.gripper_held_refused = ''
         elif self.gripper_owner_since is None:
             self.gripper_owner_since = now
         held = None
         latest = self.gripper_held
         if owned and latest is not None and latest[0] > self.gripper_owner_since:
-            held = latest[1]        # produced after teleop's controller became active
+            # Arrived after the switch; it counts only if it was also produced after this
+            # node asked for the arm (its stamp), so a late pre-switch value never does.
+            usable, why = grip.held_usable(latest[2], self.owner_request_ros_ns,
+                                           self.get_clock().now().nanoseconds,
+                                           int(FUTURE_STAMP_TOLERANCE_S * 1e9))
+            if usable:
+                held = latest[1]
+            elif why != self.gripper_held_refused:
+                self.get_logger().warning(
+                    f'gripper: held reference {latest[1]:.4f} refused: {why}; without a '
+                    'usable one the measured opening is used after '
+                    f'{self.gripper_params.reference_timeout:.2f} s')
+            self.gripper_held_refused = '' if usable else why
         # Joint states recent enough to check the finger keep-out: the same age, by arrival
         # and by stamp, and the same timeout as the arm's measured tool pose.
         joints_fresh = joint_age <= self.params.tool_pose_timeout
@@ -1802,6 +1821,10 @@ class TeleopNode(Node):
                 self._disarm('the command mux is not available')
             return
         self.owner_request_since = now
+        # Teleop's request window: opened when it asks for the arm, closed when it gives it back
+        # (a later owner switch it did not ask for has no request: no held report counts).
+        self.owner_request_ros_ns = (self.get_clock().now().nanoseconds
+                                     if wanted == ArmOwner.OWNER_TELEOP else None)
         future = self.owner_client.call_async(SetArmOwner.Request(owner=wanted))
         future.add_done_callback(lambda f: self._owner_answered(f, wanted))
 
