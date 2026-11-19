@@ -303,7 +303,8 @@ test('lines: idle names the next episode', () => {
 
 test('lines: review, with and without discard armed', () => {
   const rev = FB.panelLines(accepted({ episode: episode({ state: 'REVIEW' }) }), NOW);
-  assert.strictEqual(texts(rev)[0], 'REVIEW ep 7: Y keep, hold Y discard');
+  assert.deepStrictEqual(texts(rev).slice(0, 2), ['REVIEW ep 7', 'Y keep, hold Y discard']);
+  assert.deepStrictEqual(rev.lines.slice(0, 2).map((l) => l.size), ['key', 'small']);
   assert.ok(!texts(rev).some((t) => t.includes('DISCARDING')));
   const arm = FB.panelLines(
     accepted({ episode: episode({ state: 'REVIEW', discard_armed: true }) }), NOW);
@@ -336,8 +337,84 @@ test('lines: teleop flags, limit, gripper', () => {
       gripper: 'open' }),
   }), NOW);
   assert.ok(texts(res).includes('disarmed  CLUTCH  NOT CALIBRATED'));
-  assert.ok(texts(res).includes('scale 1.00x   limit: wrist'));
+  assert.ok(texts(res).includes('Limit: wrist'));
+  assert.ok(texts(res).includes('scale 1.00x'));
   assert.ok(texts(res).includes('gripper: open'));
+});
+
+test('lines: the key values are the large ones, the rest small', () => {
+  const sizeOf = (res, start) => res.lines.find((l) => l.text.startsWith(start)).size;
+  const res = FB.panelLines(accepted({
+    teleop: teleop({ hold: 'Arm position late: wait', limit: 'keep-out zone', gripper: 'open' }),
+    episode: episode({ refusal: 'arm first (B)', refusal_age_s: 2, missed: 1 }),
+  }), NOW);
+  assert.strictEqual(sizeOf(res, '● REC'), 'key');
+  assert.strictEqual(sizeOf(res, 'Arm position late'), 'key');
+  assert.strictEqual(sizeOf(res, 'Limit: keep-out zone'), 'key');
+  for (const start of ['kept', 'ARMED', 'scale', 'gripper', 'Refused', 'missed']) {
+    assert.strictEqual(sizeOf(res, start), 'small', start);
+  }
+  const fault = FB.panelLines(accepted({ teleop: teleop({ fault: 'Arm position late: wait', fault_age_s: 1 }) }), NOW);
+  assert.strictEqual(sizeOf(fault, 'Arm position late'), 'key');
+  for (const ep of [episode({ state: 'IDLE' }), episode({ state: 'REVIEW' }), null]) {
+    assert.strictEqual(FB.panelLines(accepted({ episode: ep }), NOW).lines[0].size, 'key');
+  }
+  assert.strictEqual(sizeOf(FB.panelLines(accepted({ teleop: null }), NOW), 'Teleop: no data'), 'key');
+});
+
+test('lines: no key line is wider than a key line holds (no squeezed key text)', () => {
+  const eps = [episode({}), episode({ state: 'IDLE', index: 99 }), episode({ state: 'REVIEW', index: 999 }),
+    episode({ state: 'REVIEW', index: 999, discard_armed: true }), episode({ state: 'NOT_READY' }), null];
+  // every limit word of operator_status.py LIMIT_TEXT
+  const limits = ['reach range', 'rotation range', 'keep-out zone', 'near robot body', 'arm controller slowing',
+    'arm lagging hand', 'speed', 'joint speed', 'joint at its end'];
+  for (const ep of eps) {
+    for (const limit of limits) {
+      const res = FB.panelLines(accepted({ episode: ep, teleop: teleop({ limit }) }), NOW);
+      for (const l of res.lines.filter((x) => x.size === 'key')) {
+        assert.ok(l.text.length <= 26, `key line too wide: ${l.text}`);
+      }
+    }
+  }
+});
+
+test('lines: the longest hold text, with its age, is never cut', () => {
+  // HOLD_SERVO_HALTED, the longest text of the hold table (operator_status.py), 81 characters.
+  const text = 'Arm halted near a collision or joint limit: disarm (B), then use the retreat tool';
+  for (const over of [{ hold: text }, { fault: text, fault_age_s: 9.5 }, { fault: text, fault_age_s: 599 }]) {
+    const lines = FB.panelLines(accepted({ teleop: teleop(over) }), NOW).lines.filter((l) => l.size === 'key');
+    const shown = lines.slice(1).map((l) => l.text).join(' ');   // lines[0]: the recording state
+    assert.ok(shown.startsWith(text), shown);
+    assert.ok(!shown.includes('\u2026'), shown);
+  }
+});
+
+test('lines: the picture key carries the size of each line (a size change redraws)', () => {
+  const key = FB.panelLines(accepted(), NOW).key.split('\n');
+  assert.ok(key[0].startsWith('key|rec|● REC'), key[0]);
+  assert.ok(key[1].startsWith('small|text|kept'), key[1]);
+});
+
+test('layout: key lines larger and bold, everything above the footer, even at the worst case', () => {
+  const typical = FB.panelLayout(FB.panelLines(accepted({ teleop: teleop({ hold: 'Arm position late: wait' }) }), NOW));
+  const key = typical.filter((l) => l.bold), small = typical.filter((l) => !l.bold);
+  assert.ok(key.length >= 2 && small.length >= 2);
+  assert.ok(key.every((l) => l.px === FB.KEY_PX) && small.every((l) => l.px === FB.SMALL_PX));
+  for (let i = 1; i < typical.length; i++) assert.ok(typical[i].y > typical[i - 1].y);
+  const long = 'word '.repeat(40);
+  const worst = FB.panelLayout(FB.panelLines(accepted({
+    teleop: teleop({ fault: long, fault_age_s: 1, limit: 'keep-out zone', gripper: 'closing 40 %' }),
+    episode: episode({ refusal: long, refusal_age_s: 1, missed: 2 }),
+  }), NOW));
+  assert.strictEqual(worst.length, 13);
+  assert.ok(Math.min(...worst.map((l) => l.px)) >= 16, 'worst case still readable');
+  const last = worst[worst.length - 1];
+  const lastStep = last.px * (last.bold ? 1.2 : 1.25);
+  assert.ok(last.y + lastStep <= FB.PANEL_H - FB.FOOTER_PX + 1, `${last.y} + ${lastStep}`);
+  const kw = worst.filter((l) => l.bold), sw = worst.filter((l) => !l.bold);
+  assert.ok(Math.min(...kw.map((l) => l.px)) > Math.max(...sw.map((l) => l.px)));
+  const stale = FB.panelLayout({ stale: true, lines: [{ text: 'NO DATA', tone: 'bad', big: true }] });
+  assert.deepStrictEqual([stale.length, stale[0].px, stale[0].align], [1, 72, 'center']);
 });
 
 test('lines: hold text, and a fault whose age grows locally', () => {
@@ -368,7 +445,7 @@ test('lines: an automatic stop is shown with its text, whole', () => {
     last_event_text: 'Episode 12 stopped by itself: teleop state lost', last_event_age_s: 2,
   }) });
   const shown = texts(FB.panelLines(st, NOW));
-  const i = shown.indexOf('Episode 12 stopped by itself:');
+  const i = shown.findIndex((t) => t.startsWith('Episode 12 stopped by itself:'));
   assert.ok(i >= 0, shown);
   assert.strictEqual(shown[i] + ' ' + shown[i + 1], 'Episode 12 stopped by itself: teleop state lost');
   const keep = accepted({ episode: episode({
@@ -394,7 +471,7 @@ test('lines: unknown keys are ignored', () => {
   assert.strictEqual(FB.panelLines(s.state, NOW).stale, false);
 });
 
-test('lines: the worst case fits the panel (at most 10 lines of at most 34 characters)', () => {
+test('lines: the worst case is bounded (at most 13 lines of at most 40 characters)', () => {
   const long = 'word '.repeat(40);
   const st = accepted({
     episode: episode({ state: 'REVIEW', discard_armed: true, refusal: long, refusal_age_s: 1,
@@ -402,7 +479,10 @@ test('lines: the worst case fits the panel (at most 10 lines of at most 34 chara
     teleop: teleop({ fault: long, fault_age_s: 1, limit: 'wrist', gripper: 'closed' }),
   });
   const res = FB.panelLines(st, NOW);
-  assert.ok(res.lines.length <= 10, `got ${res.lines.length} lines`);
+  assert.ok(res.lines.length <= 13, `got ${res.lines.length} lines`);
+  for (const l of res.lines.filter((x) => x.size === 'key')) {
+    assert.ok(l.text.length <= 26, `key line too long: ${l.text}`);
+  }
   for (const l of res.lines) {
     assert.ok(l.text.length <= 40, `line too long: ${l.text}`);
   }
@@ -523,7 +603,7 @@ test('config: defaults, limits and bad values', () => {
 });
 
 test('version is exported', () => {
-  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-3');
+  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-4');
 });
 
 test('lines: a section older than the staleness limit shows no data, never its old state', () => {

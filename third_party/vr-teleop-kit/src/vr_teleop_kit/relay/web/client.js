@@ -1418,12 +1418,13 @@
     c.fill();
     c.lineWidth = 4; c.strokeStyle = res.stale ? FB_TONES.bad : "#2a2e38"; c.stroke();
     c.textBaseline = "top"; c.textAlign = "left";
-    res.lines.forEach((l, i) => {
+    FB.panelLayout(res).forEach((l) => {   // key values large and bold, the rest smaller
       c.fillStyle = FB_TONES[l.tone] || FB_TONES.text;
-      if (l.big) { c.font = "bold 72px sans-serif"; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(l.text, FB.PANEL_W / 2, FB.PANEL_H / 2, 480); c.textAlign = "left"; c.textBaseline = "top"; }
-      else { c.font = "26px sans-serif"; c.fillText(l.text, 16, 8 + i * 29, 480); }  // 480: squeezed if wider
+      c.font = (l.bold ? "bold " : "") + l.px + "px sans-serif";
+      c.textAlign = l.align; c.textBaseline = l.baseline;
+      c.fillText(l.text, l.x, l.y, l.maxWidth);   // squeezed to maxWidth if wider
     });
-    c.font = "14px sans-serif"; c.fillStyle = FB_TONES.dim; c.textAlign = "right";
+    c.font = "14px sans-serif"; c.fillStyle = FB_TONES.dim; c.textAlign = "right"; c.textBaseline = "top";
     c.fillText(fbVersion, FB.PANEL_W - 14, FB.PANEL_H - 20);
   };
 

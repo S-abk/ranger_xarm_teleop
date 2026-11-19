@@ -15,11 +15,18 @@
 (function (root) {
   'use strict';
 
-  const FEEDBACK_VERSION = 'feedback-3';
+  const FEEDBACK_VERSION = 'feedback-4';
   const SEEN_MAX = 512;               // (run, id) pairs remembered for de-duplication
   const MAX_PULSES = 32;
   const MAX_PATTERN_MS = 10000;
-  const WRAP_CHARS = 34;              // characters per panel line at the panel font size
+  // Two text sizes: the key values (recording state, current hold or fault, active limit) larger
+  // and bold, the rest smaller. Characters per line at each size on the 480 px text width.
+  const KEY_PX = 34, SMALL_PX = 22, SMALL_MIN_PX = 16;
+  const KEY_WRAP = 26, SMALL_WRAP = 40;
+  const HOLD_LINES = 4;                       // the longest hold text with its age, never cut
+  const KEY_LINE = 1.2, SMALL_LINE = 1.25;   // line height, in font sizes
+  const TOP_PX = 10, FOOTER_PX = 26;          // above the first line; below the last (version)
+  const TEXT_W = 480;                         // text squeezed to this width if wider
   const RECENT_S = 30;                // how long a refusal / automatic stop stays on the panel
   const DEFAULT_STALE_MS = 1000;
   const PANEL_W = 512, PANEL_H = 320; // panel canvas size in pixels
@@ -173,8 +180,9 @@
     return Math.floor(n / 60) + ':' + String(n % 60).padStart(2, '0');
   };
 
-  // Lines for the panel from the tracker state: {stale, lines: [{text, tone, big?}], key}.
-  // tone: 'rec' | 'ok' | 'warn' | 'bad' | 'dim' | 'text'. `key` changes exactly when the picture does.
+  // Lines for the panel from the tracker state: {stale, lines: [{text, tone, size, big?}], key}.
+  // tone: 'rec' | 'ok' | 'warn' | 'bad' | 'dim' | 'text'. size: 'key' (recording state, current
+  // hold or fault, active limit) | 'small' (the rest). `key` changes exactly when the picture does.
   // When stale, nothing of the old state is in the result (never show old state as current).
   function panelLines(st, nowMs) {
     if (isStale(st, nowMs)) {
@@ -188,43 +196,45 @@
     const staleS = (isNum(msg.stale_ms) ? msg.stale_ms : DEFAULT_STALE_MS) / 1000;
     const fresh = (a) => isNum(a) && a + since <= staleS;   // an unknown age is not fresh
     const lines = [];
-    const add = (text, tone) => lines.push({ text, tone });
-    const addWrapped = (text, tone) => wrapText(text, WRAP_CHARS, 2).forEach((t) => add(t, tone));
+    const add = (text, tone, size) => lines.push({ text, tone, size: size || 'small' });
+    const addKey = (text, tone) => add(text, tone, 'key');
+    const addWrapped = (text, tone, size, maxLines = 2) =>
+      wrapText(text, size === 'key' ? KEY_WRAP : SMALL_WRAP, maxLines).forEach((t) => add(t, tone, size));
 
     const ep = msg.episode && fresh(msg.episode_age_s) ? msg.episode : null;
     if (!ep) {
-      add('Recording: no data', 'warn');
+      addKey('Recording: no data', 'warn');
     } else {
       if (ep.state === 'RECORDING') {
-        add('● REC  ep ' + ep.index + '  ' + clock((isNum(ep.elapsed_s) ? ep.elapsed_s : 0) + since), 'rec');
+        addKey('● REC  ep ' + ep.index + '  ' + clock((isNum(ep.elapsed_s) ? ep.elapsed_s : 0) + since), 'rec');
       } else if (ep.state === 'IDLE') {
-        add('IDLE  X starts ep ' + (ep.index + 1), 'text');
+        addKey('IDLE  X starts ep ' + (ep.index + 1), 'text');
       } else if (ep.state === 'REVIEW') {
-        if (ep.discard_armed) add('REVIEW ep ' + ep.index + ': DISCARDING\u2026', 'bad');
-        else add('REVIEW ep ' + ep.index + ': Y keep, hold Y discard', 'warn');
+        if (ep.discard_armed) addKey('REVIEW ep ' + ep.index + ': DISCARDING\u2026', 'bad');
+        else { addKey('REVIEW ep ' + ep.index, 'warn'); add('Y keep, hold Y discard', 'warn'); }
       } else if (ep.state === 'NOT_READY') {
-        add('NOT READY', 'warn');
+        addKey('NOT READY', 'warn');
       } else {
-        add('Recording: ' + String(ep.state), 'warn');
+        addKey('Recording: ' + String(ep.state), 'warn');
       }
       add('kept ' + ep.kept + '  discarded ' + ep.discarded, 'text');
     }
 
     const t = msg.teleop && fresh(msg.teleop_age_s) ? msg.teleop : null;
     if (!t) {
-      add('Teleop: no data', 'warn');
+      addKey('Teleop: no data', 'warn');
     } else {
       add((t.armed ? 'ARMED' : 'disarmed') + '  ' + (t.clutch ? 'CLUTCH' : 'clutch off') + '  '
         + (t.calibrated ? 'calibrated' : 'NOT CALIBRATED'), t.calibrated ? (t.armed ? 'ok' : 'dim') : 'bad');
-      add('scale ' + (isNum(t.scale) ? t.scale.toFixed(2) : '?') + 'x' + (t.limit ? '   limit: ' + t.limit : ''),
-        t.limit ? 'warn' : 'text');
-      if (t.gripper) add('gripper: ' + t.gripper, 'text');
       if (t.fault) {
         const a = ageOf(t.fault_age_s);
-        addWrapped(t.fault + (a === null ? '' : ' (' + a + ' s ago)'), 'bad');
+        addWrapped(t.fault + (a === null ? '' : ' (' + a + ' s ago)'), 'bad', 'key', HOLD_LINES);
       } else if (t.hold) {
-        addWrapped(t.hold, 'warn');
+        addWrapped(t.hold, 'warn', 'key', HOLD_LINES);
       }
+      if (t.limit) addWrapped('Limit: ' + t.limit, 'warn', 'key');
+      add('scale ' + (isNum(t.scale) ? t.scale.toFixed(2) : '?') + 'x', 'text');
+      if (t.gripper) add('gripper: ' + t.gripper, 'text');
     }
 
     if (ep) {
@@ -239,7 +249,36 @@
       }
       if (ep.missed > 0) add('missed ' + ep.missed + ' events', 'warn');
     }
-    return { stale: false, lines, key: lines.map((l) => l.tone + '|' + l.text).join('\n') };
+    return { stale: false, lines, key: lines.map((l) => l.size + '|' + l.tone + '|' + l.text).join('\n') };
+  }
+
+  // Where and how each line is drawn on the canvas (pure; computed only when the picture changes):
+  // [{text, tone, px, bold, x, y, align, baseline, maxWidth}]. Lines run top-down from TOP_PX. When
+  // they would reach the footer (the version text), the small lines shrink first, down to
+  // SMALL_MIN_PX; only then do the key lines shrink too.
+  function panelLayout(res) {
+    if (res.stale) {
+      return res.lines.map((l) => ({ text: l.text, tone: l.tone, px: 72, bold: true, x: PANEL_W / 2,
+        y: PANEL_H / 2, align: 'center', baseline: 'middle', maxWidth: TEXT_W }));
+    }
+    const isKey = (l) => l.size === 'key';
+    const room = PANEL_H - TOP_PX - FOOTER_PX;
+    const keyH = res.lines.filter(isKey).length * KEY_PX * KEY_LINE;
+    const nSmall = res.lines.filter((l) => !isKey(l)).length;
+    let smallPx = SMALL_PX, keyPx = KEY_PX;
+    if (keyH + nSmall * SMALL_PX * SMALL_LINE > room) {
+      smallPx = nSmall ? Math.max(SMALL_MIN_PX, (room - keyH) / (nSmall * SMALL_LINE)) : SMALL_PX;
+      const smallH = nSmall * smallPx * SMALL_LINE;
+      if (keyH + smallH > room) keyPx = Math.max(smallPx, KEY_PX * (room - smallH) / keyH);
+    }
+    let y = TOP_PX;
+    return res.lines.map((l) => {
+      const px = isKey(l) ? keyPx : smallPx;
+      const out = { text: l.text, tone: l.tone, px: Math.floor(px), bold: isKey(l), x: 16,
+        y: Math.round(y), align: 'left', baseline: 'top', maxWidth: TEXT_W };
+      y += px * (isKey(l) ? KEY_LINE : SMALL_LINE);
+      return out;
+    });
   }
 
   // ---- Panel placement ----
@@ -321,9 +360,9 @@
   const resolveVisible = (stored, visibleDefault) => (stored === '1' ? true : stored === '0' ? false : visibleDefault);
 
   const api = {
-    FEEDBACK_VERSION, PANEL_W, PANEL_H, TOGGLE_BUTTON,
+    FEEDBACK_VERSION, PANEL_W, PANEL_H, TOGGLE_BUTTON, KEY_PX, SMALL_PX, TOP_PX, FOOTER_PX,
     downlinkMs, totalAgeMs, layoutPulses, createHaptics, createStatus, isStale,
-    wrapText, panelLines, panelConfig, panelModel, createEdge, resolveVisible,
+    wrapText, panelLines, panelLayout, panelConfig, panelModel, createEdge, resolveVisible,
   };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.TeleopFeedback = api;

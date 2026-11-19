@@ -45,7 +45,7 @@ Reason for each change:
 7. Viewer `emulated_position`: flag an emulated headset position.
 8. Unconditional `xr_frame` send with `t_xr`, `seq`, `reset_count`, `session_id`: frames go out even with no controller, so a missing controller is visible as absence. The bridge rejects frames without these fields as "client not patched".
    A reference-space reset adds `reset_event: {count, transform}` to the next frame only (`transform` is `{position, orientation}` in WebXR axes, or null when the headset does not report it); frames without a pending reset do not carry the key.
-9. Operator feedback: a block before `onXRFrame`, one branch in `ws.onmessage` and one call at the end of `onXRFrame`, after the `xr_frame` is sent, so drawing the panel never delays the input stream (not in the wrist-calibration mode). The page receives `teleop_haptic` (vibration patterns) and `teleop_status` (a small panel near the left controller) from the robot side. The decisions (age against the sender's echo of this page's `xr_frame`, de-duplication, priority, text, placement) are in `feedback.js`; `client.js` passes messages in, calls the player each XR frame, toggles the panel with the left thumbstick click (kept in `localStorage`), draws it as one textured quad per eye (own 2D canvas, redrawn only when its text changes) and shows the feedback version in the page log, next to the status pill and in the panel corner. The two message types skip the RTT readout (their echo is not a round trip). Until the first accepted `teleop_status` nothing is drawn, and `xr_frame` is unchanged. The header comment (reason 1) names this.
+9. Operator feedback: a block before `onXRFrame`, one branch in `ws.onmessage` and one call at the end of `onXRFrame`, after the `xr_frame` is sent, so drawing the panel never delays the input stream (not in the wrist-calibration mode). The page receives `teleop_haptic` (vibration patterns) and `teleop_status` (a small panel near the left controller) from the robot side. The decisions (age against the sender's echo of this page's `xr_frame`, de-duplication, priority, text, placement) are in `feedback.js`; `client.js` passes messages in, calls the player each XR frame, toggles the panel with the left thumbstick click (kept in `localStorage`), draws it as one textured quad per eye (own 2D canvas, redrawn only when the picture changes; the line sizes and positions come from `feedback.js` `panelLayout`: the key values large and bold, the rest smaller) and shows the feedback version in the page log, next to the status pill and in the panel corner. The two message types skip the RTT readout (their echo is not a round trip). Until the first accepted `teleop_status` nothing is drawn, and `xr_frame` is unchanged. The header comment (reason 1) names this.
 
 ```diff
 @@ -1,3 +1,4 @@
@@ -111,7 +111,7 @@ Reason for each change:
  
          calibMode = true;
          calibrating = false;
-@@ -1348,6 +1369,150 @@
+@@ -1348,6 +1369,151 @@
      gl.disable(gl.BLEND);
    };
  
@@ -164,12 +164,13 @@ Reason for each change:
 +    c.fill();
 +    c.lineWidth = 4; c.strokeStyle = res.stale ? FB_TONES.bad : "#2a2e38"; c.stroke();
 +    c.textBaseline = "top"; c.textAlign = "left";
-+    res.lines.forEach((l, i) => {
++    FB.panelLayout(res).forEach((l) => {   // key values large and bold, the rest smaller
 +      c.fillStyle = FB_TONES[l.tone] || FB_TONES.text;
-+      if (l.big) { c.font = "bold 72px sans-serif"; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(l.text, FB.PANEL_W / 2, FB.PANEL_H / 2, 480); c.textAlign = "left"; c.textBaseline = "top"; }
-+      else { c.font = "26px sans-serif"; c.fillText(l.text, 16, 8 + i * 29, 480); }  // 480: squeezed if wider
++      c.font = (l.bold ? "bold " : "") + l.px + "px sans-serif";
++      c.textAlign = l.align; c.textBaseline = l.baseline;
++      c.fillText(l.text, l.x, l.y, l.maxWidth);   // squeezed to maxWidth if wider
 +    });
-+    c.font = "14px sans-serif"; c.fillStyle = FB_TONES.dim; c.textAlign = "right";
++    c.font = "14px sans-serif"; c.fillStyle = FB_TONES.dim; c.textAlign = "right"; c.textBaseline = "top";
 +    c.fillText(fbVersion, FB.PANEL_W - 14, FB.PANEL_H - 20);
 +  };
 +
@@ -262,7 +263,7 @@ Reason for each change:
    function onXRFrame(_time, frame) {
      if (!xrSession) return;
      xrSession.requestAnimationFrame(onXRFrame);
-@@ -1411,11 +1576,23 @@
+@@ -1411,11 +1577,23 @@
      for (const src of xrSession.inputSources) {
        if (calibMode || calibrating) calibHandednessSeen.add(src.handedness || "(unset)");
        if (src.handedness !== "left" && src.handedness !== "right") continue;
@@ -288,7 +289,7 @@ Reason for each change:
        const orient = xyzw(t.orientation);
        const rawPos = xyz(t.position);
        // Shift the reported readout point in the controller's local frame so
-@@ -1434,10 +1611,12 @@
+@@ -1434,10 +1612,12 @@
          calibBuffers[src.handedness].push({ p: rawPos, R: quatToMat3(orient) });
        }
        controllers[src.handedness] = {
@@ -302,7 +303,7 @@ Reason for each change:
        };
      }
  
-@@ -1503,11 +1682,17 @@
+@@ -1503,11 +1683,17 @@
        viewer = {
          position: xyz(vt.position),
          orientation: xyzw(vt.orientation),
@@ -343,8 +344,8 @@ Reason for each change:
  
    <!-- bump v= to force the Quest browser to refetch the JS after a change -->
 -  <script src="/static/client.js?v=37"></script>
-+  <script src="/static/feedback.js?v=3"></script>
-+  <script src="/static/client.js?v=38"></script>
++  <script src="/static/feedback.js?v=4"></script>
++  <script src="/static/client.js?v=39"></script>
  </body>
  </html>
 ```

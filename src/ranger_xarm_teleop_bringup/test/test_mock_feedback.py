@@ -19,6 +19,8 @@ the episode fixtures from a stand-in headset to the bridge and the bridge's feed
 the headset end: exactly one ``teleop_haptic`` per episode event with its pattern, nothing older
 than its maximum age, ``teleop_status`` at 5 Hz with the stack's state; with the feedback node
 stopped or killed teleop goes on and the panel (feedback.js, run in node) shows NO DATA.
+The feedback node slowed or stopped never delays the teleop node: its /teleop/state stream and
+the joint-state age it judges stay as with the feedback node running, and the clutch holds.
 Without ``.venv`` or node the module is skipped and reported NOT RUN.
 """
 
@@ -269,6 +271,98 @@ def test_marks_fixture_vibrations_status_rate_and_content_and_cpu(stack):
     assert last['teleop']['armed'] == teleop.armed
     assert last['teleop']['scale'] == pytest.approx(teleop.translation_scale)
     assert total_age_ms(t, last, sid) <= last['stale_ms']
+
+
+def teleop_timing(timed_states, since, until):
+    """Arrival intervals of /teleop/state at the probe and the joint-state age (s) per cycle."""
+    states = [(w, s) for w, s in timed_states if since <= w < until]
+    intervals = np.diff([w for w, _ in states])
+    ages = np.array([(s.header.stamp.sec - s.measured_tool_pose_stamp.sec)
+                     + (s.header.stamp.nanosec - s.measured_tool_pose_stamp.nanosec) * 1e-9
+                     for _, s in states if s.measured_tool_pose_valid])
+    return intervals, ages
+
+
+def test_feedback_node_slowed_or_stopped_never_delays_the_teleop_node(stack):
+    """
+    Check that a slowed or stopped feedback node never delays the teleop node.
+
+    The feedback node reads every /teleop/state. Whatever it does, slow or stopped, the teleop
+    node's cycle, its /teleop/state stream and the joint-state age it judges are what they are
+    with the feedback node running, and the clutch is not released. Engaged 1.2-13.0 s of the
+    fixture: running 1.5-4.5 s (the baseline), slowed (stopped 90 ms of every 100 ms) 4.5-7.5 s,
+    stopped 7.5-12.5 s.
+    """
+    pid, probe = stack['pids']['feedback_node'], stack['probe']
+    marks = {}
+    late_before = stack['launch'].output().count('late cycle')
+    abort, finished = threading.Event(), threading.Event()
+
+    def slow_then_stop():
+        try:
+            if abort.wait(4.5):
+                return
+            marks['slow'] = time.monotonic()
+            while time.monotonic() < marks['slow'] + 3.0 and not abort.is_set():
+                os.kill(pid, signal.SIGSTOP)
+                time.sleep(0.09)
+                os.kill(pid, signal.SIGCONT)
+                time.sleep(0.01)
+            if abort.is_set():
+                return
+            marks['stop'] = time.monotonic()
+            os.kill(pid, signal.SIGSTOP)
+            abort.wait(5.0)
+            marks['cont'] = time.monotonic()
+        finally:
+            os.kill(pid, signal.SIGCONT)
+            finished.set()
+
+    try:
+        start, _, _ = replay(stack, 'episode_marks_engaged', slow_then_stop)
+    finally:
+        abort.set()                     # a failed replay must not leave the node stopped
+        finished.wait(10.0)
+        os.kill(pid, signal.SIGCONT)
+    timed = probe.timed_states_since(start)
+    phases = {'running': (start + 1.5, marks['slow']), 'slowed': (marks['slow'], marks['stop']),
+              'stopped': (marks['stop'], marks['cont'])}
+    report = {}
+    for name, (a, b) in phases.items():
+        intervals, ages = teleop_timing(timed, a, b)
+        # The teleop node publishes every cycle (50 Hz): a delayed node publishes fewer.
+        assert len(intervals) + 1 >= 0.9 * 50.0 * (b - a), \
+            f'{name}: {len(intervals) + 1} /teleop/state in {b - a:.1f} s (50 Hz expected)'
+        assert len(ages) > 100, (name, len(ages))
+        report[name] = {
+            'state_interval_ms': {'median': 1e3 * float(np.median(intervals)),
+                                  'p99': 1e3 * float(np.percentile(intervals, 99)),
+                                  'max': 1e3 * float(intervals.max())},
+            'joint_state_age_ms': {'median': 1e3 * float(np.median(ages)),
+                                   'p99': 1e3 * float(np.percentile(ages, 99)),
+                                   'max': 1e3 * float(ages.max())}}
+    report['late_cycle_warnings'] = stack['launch'].output().count('late cycle') - late_before
+    stack['results']['teleop_timing_feedback_slowed_stopped'] = report
+    print('teleop timing, feedback node running / slowed / stopped:', json.dumps(report))
+    base = report['running']
+    for name in ('slowed', 'stopped'):
+        got = report[name]
+        bound = max(1.5 * base['state_interval_ms']['p99'],
+                    base['state_interval_ms']['p99'] + 5.0)
+        assert got['state_interval_ms']['p99'] <= bound, (name, report)
+        assert got['state_interval_ms']['median'] <= base['state_interval_ms']['median'] + 2.0, \
+            (name, report)
+        # No single stall either: the longest gap stays within the teleop node's own late-cycle
+        # limit (3 periods, 60 ms), or within 20 ms of the baseline's longest when that is larger.
+        longest = max(60.0, base['state_interval_ms']['max'] + 20.0)
+        assert got['state_interval_ms']['max'] <= longest, (name, report)
+        assert got['joint_state_age_ms']['p99'] <= base['joint_state_age_ms']['p99'] + 10.0, \
+            (name, report)
+    # Engaged throughout: no release of any kind from 1.5 s to the end of the stopped window.
+    engaged = [s.clutch_engaged for w, s in timed if start + 1.5 <= w < marks['cont']]
+    assert engaged and all(engaged), [(round(w - start, 2), s.hold_reason) for w, s in timed
+                                      if start + 1.5 <= w < marks['cont'] and
+                                      not s.clutch_engaged][:5]
 
 
 def test_feedback_node_stopped_teleop_goes_on_panel_no_data_no_late_vibration(stack):
