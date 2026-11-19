@@ -185,18 +185,19 @@ gz renders its window **and its cameras** (`sensors:=true`, also with `headless:
 default device, often the integrated one, which also draws the desktop. Measured on one such
 machine with both cameras on: 0.36-0.72 of real time on the integrated GPU, with up to 7 such
 releases in 4 minutes; 0.87-0.92 and 0-1 per run on the discrete GPU. Render it on the discrete GPU
-(NVIDIA PRIME render offload; the NVIDIA driver provides the files):
+with the simulator's `gpu:=nvidia` (NVIDIA PRIME render offload; the launch refuses if the NVIDIA
+driver's files are missing):
 
 ```bash
-# terminal 1, for the simulator only:
-export __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia \
-       __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
-ros2 launch ranger_xarm_gazebo sim.launch.py sensors:=true          # window on, or headless:=true
+ros2 launch ranger_xarm_gazebo sim.launch.py sensors:=true gpu:=nvidia   # window on, or headless:=true
 # check the machine with the simulator up, before the teleop stack (refuses while one runs):
 ros2 run ranger_xarm_teleop_record record_commission --simulator \
     --limits $(ros2 pkg prefix ranger_xarm_teleop_bringup)/share/ranger_xarm_teleop_bringup/config/SIMULATION_ONLY_limits.yaml
 ```
 
+`gpu:=nvidia` sets `__NV_PRIME_RENDER_OFFLOAD=1`, `__GLX_VENDOR_LIBRARY_NAME=nvidia` and
+`__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json` for the simulator's
+processes; with a robot workspace older than that argument, export them before the launch instead.
 With the window on, `nvidia-smi` then lists `gz sim server` and `gz sim gui`; headless it lists
 nothing in either case (the server loads `libnvidia-glcore` only with these settings). The check
 prints the joint-state gaps and the real-time factor, and warns (exit code 4) when any gap
