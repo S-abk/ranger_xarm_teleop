@@ -150,10 +150,8 @@ class Player:
                 else:
                     passes += 1
                     say(event='pass', id=ident, passes=passes)
-                if not loop:
-                    finished = True         # every record was sent: not "stopped" any more
-                    break
-                if stop.wait(period):
+                    finished = not loop     # every record was sent: a stop now changes nothing
+                if not loop or stop.wait(period):
                     break
             log.info(f'play {ident}: replayed {count} records from {path} in {passes} '
                      f'pass(es){" (stopped)" if stop.is_set() and not finished else ""}')
