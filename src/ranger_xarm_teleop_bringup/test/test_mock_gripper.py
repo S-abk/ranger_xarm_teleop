@@ -362,7 +362,7 @@ def test_the_arm_retry_does_not_repeat_an_arming_that_was_refused(stack):
         # The press reached the node, which refused it, exactly once: an attempt after a
         # refusal (a retry hiding the failure) would refuse again.
         assert launch.output().count('arm refused: orientation conditioning') == refused + 1
-        assert all('the press never arrived' in d for d in discarded), discarded
+        assert discarded == [], discarded
     finally:
         probe.disarm()
         probe.move_to(READY)

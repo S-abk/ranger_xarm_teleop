@@ -125,7 +125,7 @@ class Player:
     def _run(self, ident, path, records, start_delay, loop, source, stop) -> None:
         log = self.node.get_logger()
         count = passes = 0
-        failed = False
+        failed = finished = False
         try:
             if start_delay > 0.0 and stop.wait(start_delay):
                 return
@@ -150,16 +150,19 @@ class Player:
                 else:
                     passes += 1
                     say(event='pass', id=ident, passes=passes)
-                if not loop or stop.wait(period):
+                if not loop:
+                    finished = True         # every record was sent: not "stopped" any more
+                    break
+                if stop.wait(period):
                     break
             log.info(f'play {ident}: replayed {count} records from {path} in {passes} '
-                     f'pass(es){" (stopped)" if stop.is_set() else ""}')
+                     f'pass(es){" (stopped)" if stop.is_set() and not finished else ""}')
         except Exception as err:  # noqa: B902 - reported; the player goes on
             failed = True
             say(event='error', id=ident, text=f'{type(err).__name__}: {err}')
         finally:
-            say(event='done', id=ident, records=count, passes=passes, stopped=stop.is_set(),
-                failed=failed, loop=loop)
+            say(event='done', id=ident, records=count, passes=passes,
+                stopped=stop.is_set() and not finished, failed=failed, loop=loop)
 
     def commands(self) -> None:
         """Read and carry out commands until told to leave or stdin closes."""

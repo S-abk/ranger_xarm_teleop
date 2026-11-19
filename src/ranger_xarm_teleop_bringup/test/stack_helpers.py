@@ -219,8 +219,9 @@ def prime(client, request, timeout=30.0, each=3.0):
     for that match, then logs "failed to send response ... client will not receive response"
     and the call never returns. The client cannot see from its side whether the server has
     matched it (``wait_for_service`` shows the client's view only). One answered round trip
-    shows that it has, and a match stays. ``request`` must be harmless and nothing the test
-    asserts on: only it is ever asked again, never the call under test. Every lost answer is
+    shows that it has, and a match stays. ``request`` must change nothing (a read, or a
+    request for what already holds); its answer is thrown away. Only it is ever asked again:
+    the call whose answer a test asserts on is made once, after it. Every lost answer is
     printed; no answer within ``timeout`` fails.
     """
     assert client.wait_for_service(timeout_sec=timeout), f'no service {client.srv_name}'
@@ -255,6 +256,7 @@ class Probe:
         self.joints = []            # (monotonic, [q1..q6])
         self.owner = None
         self.inputs = []            # monotonic arrival of every input status
+        self.input_stamps = []      # (monotonic arrival, header stamp s) of every input status
         self.stamped_joints = []    # (monotonic, header stamp, [q1..q6])
         self.targets = []           # (monotonic, (x, y, z)) of /teleop/target_pose
         self.description = None     # /robot_description text
@@ -330,8 +332,11 @@ class Probe:
             self.description = msg.data
 
     def _on_input(self, msg):
+        now = time.monotonic()
         with self.lock:
-            self.inputs.append(time.monotonic())
+            self.inputs.append(now)
+            self.input_stamps.append(
+                (now, msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9))
 
     def _on_owner(self, msg):
         with self.lock:
@@ -404,6 +409,11 @@ class Probe:
     def inputs_since(self, t):
         with self.lock:
             return [when for when in self.inputs if when >= t]
+
+    def input_stamps_since(self, t):
+        """Return ``(arrival, stamp)`` of the input statuses that arrived since ``t``."""
+        with self.lock:
+            return [pair for pair in self.input_stamps if pair[0] >= t]
 
     def joint_positions(self):
         with self.lock:
@@ -580,7 +590,7 @@ class Probe:
 # start delays only make the loss rarer. The calibrate and arm presses are in a recording's
 # first second, so a test then saw no arming. Now a stack has one input source for its whole
 # life (``input_player.py``: the bridge's own code path, as ``replay_node``). Before any test
-# sends input, ``start_input`` waits for the two things that make loss impossible:
+# sends input, ``start_input`` waits for the two things that rule out loss to discovery:
 #
 # 1. matched: each publisher a frame is built from (status, joy, right pose, head pose) is
 #    matched by every subscription known on its topic, the teleop node's among them;
@@ -612,6 +622,10 @@ class Replay:
 
     def _events(self):
         return self.player.events_of(self.ident)
+
+    def events(self):
+        """Return the events the player has reported about this recording so far."""
+        return self._events()
 
     def _done(self):
         return next((e for e in self._events() if e.get('event') == 'done'), None)
@@ -750,14 +764,15 @@ class InputPlayer:
                     self.proc.wait(10.0)
                 except subprocess.TimeoutExpired:
                     pass
-            try:
-                os.killpg(self.proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                self.proc.wait(5.0)
-            except subprocess.TimeoutExpired:
-                pass
+            if self.running():          # never a process group whose leader was reaped
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    self.proc.wait(5.0)
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             self.log.close()
 
@@ -821,10 +836,21 @@ def start_input(probe, env, logs, match_timeout=60.0, acknowledge_timeout=30.0):
     lead_in = player.play(path, loop=True, source='replay:lead_in',
                           log_path=os.path.join(str(logs), 'lead_in.log'))
     try:
-        probe.wait_for(lambda: lead_in_acknowledged(probe.states_since(since)),
+        probe.wait_for(lambda: (lead_in_acknowledged(probe.states_since(since))
+                                or not player.running()),
                        acknowledge_timeout, 'the lead-in to be acknowledged')
-        passes = lead_in.passes         # complete passes before the acknowledgement
-    except AssertionError:
+        assert lead_in_acknowledged(probe.states_since(since)), (
+            f'the input player exited during the lead-in:\n{player.output()[-3000:]}')
+        # Complete passes before the acknowledging state arrived, by the player's own times
+        # (not by when this thread came to look).
+        arrived = next(when for when, s in probe.timed_states_since(since)
+                       if lead_in_acknowledged([s]))
+        seen = time.time() - (time.monotonic() - arrived)
+        passes = sum(1 for e in lead_in.events() if e.get('event') == 'pass'
+                     and e.get('t', 0.0) <= seen)
+    except AssertionError as err:
+        if 'the input player exited' in str(err):
+            raise
         state = probe.state()
         seen = ('no teleop state' if state is None else
                 f'input_age {state.input_age:.3f} s, input_seq {state.input_seq}, calibrated '
@@ -957,27 +983,53 @@ def arm_by_replay(probe, env, log_prefix, fixture='arm_only', start_delay=1.0, d
 STALE_INPUT = (TeleopState.HOLD_INPUT_STALE, TeleopState.HOLD_POSE_ABSENT,
                TeleopState.HOLD_HEAD_ABSENT)
 STALE_DATA = STALE_INPUT + (TeleopState.HOLD_TOOL_POSE_STALE,)
-# A stream counts as late on its way when the probe, which takes the same stream, saw a gap of
-# at least this much (half the gate's 0.1 s input and tool-pose timeouts) just before.
-LATE_GAP_S = 0.05
-LATE_WINDOW_S = 0.5
+LATE_WINDOW_S = 0.5         # how far before a release the cause is looked for
+LATE_SLACK_S = 0.02         # one target cycle
+INPUT_TIMEOUT_S = 0.1       # the gate's input timeout
+TOOL_POSE_TIMEOUT_S = 0.1   # the gate's tool_pose_timeout_s
+STEADY_GAP_S = 0.05         # teleop states (50 Hz) arriving closer than this: the probe is awake
 
 
-def late_on_the_way(probe, hold_reason, when):
+def late_on_the_way(probe, release, when):
     """
-    Return the largest gap (s) in the probe's own arrivals of the stream a release names.
+    Return ``(late, text)``: whether a stale release's data was late outside the teleop node.
 
-    Over the ``LATE_WINDOW_S`` before ``when`` (the release as the probe saw it): the input
-    status for a release on stale or incomplete input, the joint states for a stale tool
-    pose. The window's edges count, so a stream that had stopped shows as a gap.
+    ``release`` is the first released TeleopState, ``when`` its arrival at the probe. Only
+    what the probe can show counts as late on the way:
+
+    * ``INPUT_STALE``: by the stamps the input source gave its status messages (its time of
+      sending), not by when they reached the probe: a probe that paused changes arrivals, not
+      stamps. Late when two frames in a row were sent at least as far apart as the gate saw
+      no input (``release.input_age``, less one cycle): the source itself paused.
+    * ``TOOL_POSE_STALE``: by the arrival of the joint states at the probe (their stamps are
+      the robot side's clock, which a slow simulator keeps even). Late when they left a gap of
+      at least the gate's timeout, less one cycle, while teleop states kept arriving at the
+      probe through that gap: neither the probe nor the teleop node was what paused.
+    * ``POSE_ABSENT``, ``HEAD_ABSENT``: never. A pose, head or joy message lost on the way and
+      one the teleop node took too late look the same from the probe, which takes none of
+      those topics.
     """
+    reason = release.hold_reason
     begin = when - LATE_WINDOW_S
-    if hold_reason in STALE_INPUT:
-        arrivals = probe.inputs_since(begin)
-    else:
-        arrivals = [t for t, _ in probe.timed_joints_since(begin)]
-    arrivals = [begin] + [t for t in arrivals if t <= when] + [when]
-    return max(b - a for a, b in zip(arrivals, arrivals[1:]))
+    if reason == TeleopState.HOLD_INPUT_STALE:
+        # Messages that arrived around the window (an arrival can be late; a stamp cannot).
+        stamps = [stamp for arrival, stamp in probe.input_stamps_since(begin - 0.3)
+                  if arrival <= when + 0.3]
+        gap = max((b - a for a, b in zip(stamps, stamps[1:])), default=0.0)
+        age = release.input_age if release.input_age > 0.0 else INPUT_TIMEOUT_S
+        needed = max(STEADY_GAP_S, age - LATE_SLACK_S)
+        return gap >= needed, (f'the input source sent two frames {gap * 1000.0:.0f} ms apart '
+                               f'(the gate saw no input for {age * 1000.0:.0f} ms)')
+    if reason == TeleopState.HOLD_TOOL_POSE_STALE:
+        joints = [begin] + [t for t, _ in probe.timed_joints_since(begin) if t <= when] + [when]
+        gap, a, b = max((y - x, x, y) for x, y in zip(joints, joints[1:]))
+        states = [a] + [t for t, _ in probe.timed_states_since(a) if t < b] + [b]
+        awake = max(y - x for x, y in zip(states, states[1:])) < STEADY_GAP_S
+        return gap >= TOOL_POSE_TIMEOUT_S - LATE_SLACK_S and awake, (
+            f'the joint states left a gap of {gap * 1000.0:.0f} ms at the probe, teleop states '
+            f'{"kept arriving" if awake else "did not arrive either"} meanwhile')
+    return False, ('the probe takes the status topic only: it cannot tell a pose, head or joy '
+                   'message lost on the way from one the teleop node took too late')
 
 
 def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, attempts=3,
@@ -991,14 +1043,14 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
     discarded and repeated only when
 
     * the gate itself reported such a release before ``expected_engaged_s`` of engagement,
-    * **and** the probe, which takes the same stream, saw it late too (``late_on_the_way``):
-      the data was late on its way (the player, the transport, the robot side), which no test
-      here asserts on.
+    * **and** the data was late outside the teleop node, as far as the probe can show
+      (``late_on_the_way``): the input source paused, or the robot side's joint states did.
+      No test here asserts on either.
 
-    A stale release while the stream reached the probe steadily means the teleop node was
-    late itself, which is the stack's behaviour: that run is returned as it is, with a
-    printed line, for the test to fail on. So is a release for any other reason, and a run in
-    which nothing engaged. Every discarded run is printed and returned, so it stays visible.
+    Any other stale release is returned as it is, with a printed line, for the test to fail
+    on: the teleop node being late itself is the stack's behaviour. So is a release for any
+    other reason, and a run in which nothing engaged. Every discarded run is printed and
+    returned, so it stays visible.
     """
     discarded = []
     start = time.monotonic()
@@ -1025,15 +1077,15 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
         early = release is not None and release[0] - first < expected_engaged_s
         if not (early and release[1].hold_reason in STALE_DATA):
             return start, discarded
-        gap = late_on_the_way(probe, release[1].hold_reason, release[0])
+        late, how = late_on_the_way(probe, release[1], release[0])
         what = (f'released after {release[0] - first:.2f} s with hold_reason '
-                f'{release[1].hold_reason} (input age {release[1].input_age * 1000.0:.0f} ms); '
-                f'largest gap in the same stream at the probe {gap * 1000.0:.0f} ms')
-        if gap < LATE_GAP_S:
-            print(f'replay of {fixture} not repeated: {what}: the stream arrived steadily, so '
-                  'the teleop node was late itself')
+                f'{release[1].hold_reason}; {how}')
+        if not late:
+            print(f'replay of {fixture} not repeated: {what}: not shown late on its way, so '
+                  "it counts as the stack's own")
             return start, discarded
         if attempt + 1 == attempts:
+            print(f'replay of {fixture} not repeated again after {attempts} attempts: {what}')
             return start, discarded
         discarded.append(f'attempt {attempt + 1}: {what}: late on its way')
         print(f'discarded replay of {fixture}: {discarded[-1]}')

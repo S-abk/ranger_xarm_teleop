@@ -225,10 +225,16 @@ class _Played:
 
 
 class _ScriptedProbe:
-    """A probe whose stack answers the n-th replay with the n-th list of states."""
+    """
+    A probe whose stack answers the n-th replay with the n-th list of states.
 
-    def __init__(self, runs, steady=False):
-        self.runs, self.replays, self.disarms, self.steady = runs, 0, 0, steady
+    ``late`` says what was late in the quarter second before a run's release: 'source' (the
+    input source sent nothing for 0.15 s), 'joints' (no joint state reached the probe for
+    0.12 s), 'probe' (nothing at all reached the probe for 0.12 s: the probe paused), or None.
+    """
+
+    def __init__(self, runs, late=None):
+        self.runs, self.replays, self.disarms, self.late = runs, 0, 0, late
 
     def disarm(self):
         self.disarms += 1
@@ -236,19 +242,33 @@ class _ScriptedProbe:
     def states_since(self, start):
         return self.runs[self.replays - 1]
 
-    def timed_states_since(self, start):
+    def _all_states(self, start):
         return [(start + 0.02 * i, s) for i, s in enumerate(self.runs[self.replays - 1], 1)]
 
-    def _arrivals(self, begin):
-        # The half second from ``begin`` at 90 Hz; unless steady, 0.12 s of it are missing.
-        times = [begin + k / 90.0 for k in range(46)]
-        return [t for t in times if self.steady or not 0.30 < t - begin < 0.42]
+    def timed_states_since(self, since):
+        # Scripted from the replay's start, which is the first time asked for.
+        self.start = getattr(self, 'start', since) if self.replays == getattr(
+            self, '_run', None) else since
+        self._run = self.replays
+        states = self._all_states(self.start)
+        release = next((t for t, s in states if not s.clutch_engaged and t > states[0][0]), None)
+        self.release = release
+        if self.late == 'probe' and release is not None:
+            states = [(t, s) for t, s in states if not release - 0.25 < t < release - 0.13]
+        return [(t, s) for t, s in states if t >= since]
 
-    def inputs_since(self, begin):
-        return self._arrivals(begin)
+    def input_stamps_since(self, since):
+        # 90 Hz up to the release, stamped by the source 1000 s off the probe's clock.
+        times = [since + k / 90.0 for k in range(int((self.release + 0.3 - since) * 90))]
+        if self.late == 'source':
+            times = [t for t in times if not self.release - 0.25 < t < self.release - 0.10]
+        return [(t, t + 1000.0) for t in times]
 
-    def timed_joints_since(self, begin):
-        return [(t, None) for t in self._arrivals(begin)]
+    def timed_joints_since(self, since):
+        times = [since + k / 150.0 for k in range(int((self.release - since) * 150))]
+        if self.late in ('joints', 'probe'):
+            times = [t for t in times if not self.release - 0.25 < t < self.release - 0.13]
+        return [(t, None) for t in times]
 
 
 @pytest.fixture
@@ -256,8 +276,8 @@ def scripted(monkeypatch):
     """Return a function making a scripted probe; replays are counted, nothing is slept."""
     made = []
 
-    def make(*runs, steady=False):
-        made.append(_ScriptedProbe(list(runs), steady))
+    def make(*runs, late=None):
+        made.append(_ScriptedProbe(list(runs), late))
         return made[-1]
 
     def played(env, fixture, log_path, start_delay=3.0):
@@ -276,26 +296,39 @@ RELEASED = _state(armed=True, hold_reason=TeleopState.HOLD_CLUTCH_RELEASED)
 HALTED = _state(armed=True, hold_reason=TeleopState.HOLD_SERVO_HALTED)
 
 
-@pytest.mark.parametrize('late', [STALE, POSE_STALE], ids=['input', 'joint_states'])
-def test_only_data_late_on_its_way_is_repeated_and_it_is_printed(scripted, capsys, late):
-    # 2 s engaged, then released on stale data where 2.8 s were expected, and the probe saw
-    # the same stream 0.12 s late too: late on its way.
-    probe = scripted(ENGAGED + [late], ENGAGED + ENGAGED + [RELEASED])
+POSE_ABSENT = _state(armed=True, hold_reason=TeleopState.HOLD_POSE_ABSENT, input_age=0.01)
+
+
+@pytest.mark.parametrize('release, late', [(STALE, 'source'), (POSE_STALE, 'joints')],
+                         ids=['the_source_paused', 'the_joint_states_paused'])
+def test_only_data_late_outside_the_teleop_node_is_repeated_and_it_is_printed(
+        scripted, capsys, release, late):
+    # 2 s engaged, then released on stale data where 2.8 s were expected, and the probe can
+    # show it: the source sent nothing for 0.15 s (input age 0.15 s), or no joint state
+    # arrived for 0.12 s while teleop states kept coming.
+    probe = scripted(ENGAGED + [release], ENGAGED + ENGAGED + [RELEASED], late=late)
     start, discarded = replay_with_clean_input(probe, {}, 'log', 'clutch_line', 2.8)
     assert probe.replays == 2 and len(discarded) == 1
-    assert f'hold_reason {late.hold_reason}' in discarded[0] and 'late on its way' in discarded[0]
+    assert f'hold_reason {release.hold_reason}' in discarded[0]
+    assert 'late on its way' in discarded[0]
     assert 'discarded replay of clutch_line: attempt 1' in capsys.readouterr().out
 
 
-@pytest.mark.parametrize('late', [STALE, POSE_STALE], ids=['input', 'joint_states'])
-def test_a_stale_release_with_a_steady_stream_is_the_stacks_own_and_not_repeated(
-        scripted, capsys, late):
-    # The same release, but the stream reached the probe steadily: the teleop node was late.
-    probe = scripted(ENGAGED + [late], ENGAGED + ENGAGED + [RELEASED], steady=True)
+@pytest.mark.parametrize('release, late', [
+    pytest.param(STALE, None, id='input_stale_but_sent_steadily'),
+    pytest.param(STALE, 'probe', id='input_stale_and_only_the_probe_paused'),
+    pytest.param(STALE, 'joints', id='input_stale_and_something_else_was_late'),
+    pytest.param(POSE_STALE, None, id='tool_pose_stale_but_joint_states_steady'),
+    pytest.param(POSE_STALE, 'probe', id='tool_pose_stale_and_the_probe_paused'),
+    pytest.param(POSE_ABSENT, 'source', id='pose_absent_is_never_shown'),
+])
+def test_a_stale_release_not_shown_late_on_its_way_is_the_stacks_own_and_not_repeated(
+        scripted, capsys, release, late):
+    probe = scripted(ENGAGED + [release], ENGAGED + ENGAGED + [RELEASED], late=late)
     start, discarded = replay_with_clean_input(probe, {}, 'log', 'clutch_line', 2.8)
     assert probe.replays == 1 and discarded == []
     printed = capsys.readouterr().out
-    assert 'not repeated' in printed and 'the teleop node was late itself' in printed
+    assert 'not repeated' in printed and "the stack's own" in printed
 
 
 @pytest.mark.parametrize('run', [
@@ -307,30 +340,29 @@ def test_a_stale_release_with_a_steady_stream_is_the_stacks_own_and_not_repeated
     pytest.param(ENGAGED + ENGAGED + [STALE], id='late_data_after_the_expected_time'),
 ])
 def test_any_other_outcome_is_returned_at_once_for_the_test_to_judge(scripted, capsys, run):
-    probe = scripted(run, ENGAGED + ENGAGED + [RELEASED])
+    probe = scripted(run, ENGAGED + ENGAGED + [RELEASED], late='source')
     start, discarded = replay_with_clean_input(probe, {}, 'log', 'clutch_line', 2.8)
     assert probe.replays == 1 and discarded == []
     assert capsys.readouterr().out == ''
 
 
-def test_late_data_is_repeated_at_most_twice_then_returned(scripted):
-    probe = scripted(*[ENGAGED + [STALE]] * 3)
+def test_late_data_is_repeated_at_most_twice_then_returned_with_a_line(scripted, capsys):
+    probe = scripted(*[ENGAGED + [STALE]] * 3, late='source')
     start, discarded = replay_with_clean_input(probe, {}, 'log', 'clutch_line', 2.8)
     assert probe.replays == 3 and len(discarded) == 2
+    assert 'not repeated again after 3 attempts' in capsys.readouterr().out
 
 
-def test_a_stream_that_stopped_counts_as_a_gap():
-    arrivals = [99.0 + k / 90.0 for k in range(136)]            # 99.0 to 100.5 s, then nothing
-    probe = SimpleNamespace(inputs_since=lambda begin: [t for t in arrivals if t >= begin],
-                            timed_joints_since=lambda begin: [(t, None) for t in arrivals
-                                                              if t >= begin and t < 100.3])
-    late = stack_helpers.late_on_the_way
-    assert late(probe, TeleopState.HOLD_INPUT_STALE, 100.5) < 0.02          # steady to the end
-    assert 0.19 < late(probe, TeleopState.HOLD_INPUT_STALE, 100.7) < 0.21   # stopped 0.2 s ago
-    assert late(probe, TeleopState.HOLD_POSE_ABSENT, 100.7) > 0.19          # the same stream
-    # A stale tool pose is judged by the joint states, which stopped at 100.3 s here.
-    assert 0.19 < late(probe, TeleopState.HOLD_TOOL_POSE_STALE, 100.5) < 0.22
-    assert late(probe, TeleopState.HOLD_TOOL_POSE_STALE, 100.25) < 0.02
+def test_a_pause_of_the_source_shorter_than_the_gate_saw_does_not_count():
+    # The gate saw no input for 150 ms; the source's own stamps show 60 ms at most.
+    stamps = [(100.0 + k / 90.0, 5000.0 + k / 90.0) for k in range(90) if not 40 <= k < 45]
+    probe = SimpleNamespace(input_stamps_since=lambda since: stamps)
+    late, text = stack_helpers.late_on_the_way(probe, STALE, 101.0)
+    assert not late and 'sent two frames 67 ms apart' in text, text
+    # A pause as long as the gate saw (less one cycle) does.
+    stamps = [(100.0 + k / 90.0, 5000.0 + k / 90.0) for k in range(90) if not 40 <= k < 52]
+    late, text = stack_helpers.late_on_the_way(probe, STALE, 101.0)
+    assert late and '144 ms apart' in text, text
 
 
 def test_arming_is_tried_once_whatever_comes_of_it(scripted):
