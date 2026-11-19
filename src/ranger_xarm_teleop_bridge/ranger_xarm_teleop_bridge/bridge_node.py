@@ -47,6 +47,7 @@ from ranger_xarm_teleop_bridge.frame_parse import (Ignored, Malformed, parse_tex
                                                    ResetEvent)
 from ranger_xarm_teleop_bridge.joy_layout import build_joy_arrays
 from ranger_xarm_teleop_bridge.jsonl_io import RecordWriter
+from ranger_xarm_teleop_bridge.operator_status import SimSpeed
 from ranger_xarm_teleop_bridge.outbox import Outbox
 from ranger_xarm_teleop_bridge.relay_messages import (echo_of, encode, FrameInfo,
                                                       haptic_payload, panel_config,
@@ -130,6 +131,8 @@ class BridgeNode(Node):
         self.declare_parameter('status_max_age_s', 0.4)
         self.declare_parameter('haptic_queue', 8)
         self.declare_parameter('send_buffer_limit_bytes', 16384)
+        self.declare_parameter('sim_slow_below', 0.6)
+        self.declare_parameter('sim_slow_clear', 0.7)
 
         self.frame_id = str(self.get_parameter('frame_id').value)
         self.source = str(self.get_parameter('source').value)
@@ -186,6 +189,9 @@ class BridgeNode(Node):
         # Measured from the statuses' arrivals (what the page can expect), 200 ms until known.
         self.status_period_ms = 200.0
         self._last_status_at: Optional[float] = None
+        # The ROS clock against the wall clock, from the statuses' stamps: a slow simulator.
+        self.sim_speed = SimSpeed(slow_below=float(param('sim_slow_below').value),
+                                  clear_above=float(param('sim_slow_clear').value))
         self.send_buffer_limit = int(param('send_buffer_limit_bytes').value)
         # Below the connection's own write limit (websockets: 64 KiB), above which a send, and
         # the protocol's own replies to the relay's pings, would wait for the link to drain.
@@ -225,8 +231,11 @@ class BridgeNode(Node):
                 period = 1000.0 * (now - self._last_status_at)
                 self.status_period_ms = min(2000.0, max(20.0, period))
             self._last_status_at = now
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            self.sim_speed.update(stamp, float(msg.wall_time))
             payload = status_payload(msg, self.run_id, self._status_seq, self.panel,
-                                     self.status_stale_ms, self.status_period_ms)
+                                     self.status_stale_ms, self.status_period_ms,
+                                     self.sim_speed.text())
             self.outbox.set_status(payload, time.time() - msg.wall_time)
             self._wake()
         except Exception as exc:  # noqa: B902 - feedback must never take the bridge down

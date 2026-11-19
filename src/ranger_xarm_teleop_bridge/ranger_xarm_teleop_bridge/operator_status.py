@@ -19,8 +19,12 @@ What the operator's panel shows, in plain words (no ROS).
 lasted one cycle) and the most severe limit (held ``limit_hold_s`` after it clears, so the
 panel does not flicker). ``snapshot`` gives the fields of OperatorStatus. A source older than
 its staleness limit is reported as not valid; its fields are then defaults, never old values.
+
+``SimSpeed`` takes the (ROS stamp, wall time) pair of each status and says, in words, when the
+ROS clock runs much slower than real time (a slow simulator: arm data then arrives late).
 """
 
+from collections import deque
 from dataclasses import dataclass, field
 import math
 from typing import Dict, Optional
@@ -381,3 +385,72 @@ class StatusTracker:
                 out.last_refusal_text = self._refusal
                 out.last_refusal_age = max(0.0, wall_now - self._refusal_wall)
         return out
+
+
+class SimSpeed:
+    """
+    How fast the ROS clock runs against the host wall clock, from successive status messages.
+
+    The factor is measured over the last ``window_s`` of wall time. It is "slow" once it falls
+    below ``slow_below`` and stays so until it rises above ``clear_above`` (no flicker). A ROS
+    clock that goes back (simulation restarted) or a wall-clock gap or jump of ``max_gap_s``
+    starts the measurement again. On hardware the ROS clock is the wall clock: never slow.
+    """
+
+    SHOWN_STEP = 0.1        # the shown factor changes only when the measured one moved this much
+    PAUSED_BELOW = 0.05     # below this the simulator is said to be paused or stalled
+
+    def __init__(self, window_s: float = 3.0, slow_below: float = 0.6,
+                 clear_above: float = 0.7, max_gap_s: float = 2.0) -> None:
+        if not 0.0 < slow_below < clear_above <= 1.0:
+            raise ValueError('need 0 < slow_below < clear_above <= 1')
+        if not window_s > 0.0:
+            raise ValueError('window_s must be positive')
+        self.window_s, self.slow_below, self.clear_above = window_s, slow_below, clear_above
+        self.max_gap_s = max_gap_s
+        self._samples: deque = deque()
+        self.factor: Optional[float] = None
+        self.slow = False
+        self.shown: Optional[float] = None   # the factor the text gives, held (no flicker)
+
+    def reset(self) -> None:
+        self._samples.clear()
+        self.factor = None
+        self.slow = False
+        self.shown = None
+
+    def update(self, ros_s: float, wall_s: float) -> Optional[float]:
+        """Take one (ROS time, wall time) pair, s; return the factor, None until measured."""
+        if not (math.isfinite(ros_s) and math.isfinite(wall_s)) or ros_s <= 0.0:
+            return self.factor          # no time yet (an unset stamp, or no /clock yet)
+        if self._samples:
+            last_ros, last_wall = self._samples[-1]
+            if ros_s < last_ros or not 0.0 < wall_s - last_wall < self.max_gap_s:
+                self.reset()
+        self._samples.append((ros_s, wall_s))
+        while len(self._samples) > 2 and wall_s - self._samples[1][1] >= self.window_s:
+            self._samples.popleft()
+        first_ros, first_wall = self._samples[0]
+        span = wall_s - first_wall
+        if span < 0.8 * self.window_s:
+            return None                 # not yet a full window (start, or after a reset)
+        self.factor = (ros_s - first_ros) / span
+        if self.factor < self.slow_below:
+            self.slow = True
+        elif self.factor > self.clear_above:
+            self.slow = False
+        if not self.slow:
+            self.shown = None
+        elif self.shown is None or abs(self.factor - self.shown) >= self.SHOWN_STEP:
+            # A bursty clock makes the measured factor jitter; the text (and so the panel
+            # texture) changes only when it really moved.
+            self.shown = max(0.0, self.factor)
+        return self.factor
+
+    def text(self) -> str:
+        """Return the panel line while slow, else ''; it changes only when the factor moved 0.1."""
+        if not self.slow or self.shown is None:
+            return ''
+        if self.shown < self.PAUSED_BELOW:
+            return 'Simulator paused or stalled'
+        return f'Simulator slow: {self.shown:.1f}x real time'

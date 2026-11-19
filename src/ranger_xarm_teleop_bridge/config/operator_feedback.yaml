@@ -46,3 +46,5 @@ teleop_input_bridge:
     status_max_age_s: 0.4         # a status older than this is not sent
     haptic_queue: 8
     send_buffer_limit_bytes: 16384
+    sim_slow_below: 0.6           # the panel says "Simulator slow" when ROS time runs slower
+    sim_slow_clear: 0.7           # than this fraction of real time, until it is above this

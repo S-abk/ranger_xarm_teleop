@@ -77,8 +77,12 @@ def haptic_payload(msg, run: int, ident: int) -> Dict[str, Any]:
 
 
 def status_payload(msg, run: int, seq: int, panel: Dict[str, Any], stale_ms: float,
-                   period_ms: float) -> Dict[str, Any]:
-    """Build a ``teleop_status`` body (without age and echo) from an OperatorStatus-like object."""
+                   period_ms: float, sim_text: str = '') -> Dict[str, Any]:
+    """
+    Build a ``teleop_status`` body (without age and echo) from an OperatorStatus-like object.
+
+    ``sim_text``: the "simulator slow" line (operator_status.SimSpeed), '' when not slow.
+    """
     teleop = None
     if msg.teleop_valid:
         fault_current = msg.last_fault == msg.hold_reason
@@ -114,6 +118,7 @@ def status_payload(msg, run: int, seq: int, panel: Dict[str, Any], stale_ms: flo
         'stale_ms': float(stale_ms), 'period_ms': float(period_ms),
         'teleop': teleop, 'teleop_age_s': _num(msg.teleop_age),
         'episode': episode, 'episode_age_s': _num(msg.episode_age),
+        'sim_text': str(sim_text),
         'panel': dict(panel),
     }
 

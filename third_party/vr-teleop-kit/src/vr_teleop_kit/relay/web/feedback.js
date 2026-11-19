@@ -15,7 +15,7 @@
 (function (root) {
   'use strict';
 
-  const FEEDBACK_VERSION = 'feedback-4';
+  const FEEDBACK_VERSION = 'feedback-5';
   const SEEN_MAX = 512;               // (run, id) pairs remembered for de-duplication
   const MAX_PULSES = 32;
   const MAX_PATTERN_MS = 10000;
@@ -221,8 +221,11 @@
     }
 
     const t = msg.teleop && fresh(msg.teleop_age_s) ? msg.teleop : null;
+    // Information only: the simulator runs much slower than real time (arm data comes late).
+    const sim = typeof msg.sim_text === 'string' && msg.sim_text ? msg.sim_text : '';
     if (!t) {
       addKey('Teleop: no data', 'warn');
+      if (sim) add(sim, 'warn');
     } else {
       add((t.armed ? 'ARMED' : 'disarmed') + '  ' + (t.clutch ? 'CLUTCH' : 'clutch off') + '  '
         + (t.calibrated ? 'calibrated' : 'NOT CALIBRATED'), t.calibrated ? (t.armed ? 'ok' : 'dim') : 'bad');
@@ -232,6 +235,7 @@
       } else if (t.hold) {
         addWrapped(t.hold, 'warn', 'key', HOLD_LINES);
       }
+      if (sim) add(sim, 'warn');
       if (t.limit) addWrapped('Limit: ' + t.limit, 'warn', 'key');
       add('scale ' + (isNum(t.scale) ? t.scale.toFixed(2) : '?') + 'x', 'text');
       if (t.gripper) add('gripper: ' + t.gripper, 'text');

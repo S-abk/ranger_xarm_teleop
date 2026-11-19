@@ -197,6 +197,7 @@ class Rig:
     def publish_status(self):
         m = OperatorStatus()
         m.wall_time = time.time()
+        m.header.stamp = self.node.get_clock().now().to_msg()   # wall clock: real time
         m.teleop_valid, m.armed, m.hold_text = True, True, 'Ready: hold right grip to move'
         m.teleop_age = 0.01
         self.status_pub.publish(m)
@@ -255,6 +256,8 @@ def test_input_timing_is_unchanged_by_feedback_and_a_stalled_send(ros):
                     range(1, len(rig.haptics_published) + 1))
                 n_status = len(rig.relay.of_type('teleop_status'))
                 assert 0.9 * 5 * RUN_S <= n_status <= 1.1 * 5 * RUN_S + 1, n_status
+                # ROS time is the wall clock here: never "Simulator slow".
+                assert {m['sim_text'] for _, m in rig.relay.of_type('teleop_status')} == {''}
             if mode == 'stalled':
                 assert len(rig.node.outbox) <= 9           # bounded while nothing drains
             if mode == 'off':

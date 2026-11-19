@@ -65,6 +65,13 @@ def test_status_without_sources_has_null_sections_and_no_nan():
     msg = json.loads(text)
     assert msg['teleop'] is None and msg['episode'] is None and msg['echo'] is None
     assert msg['teleop_age_s'] is None and msg['panel'] == PANEL
+    assert msg['sim_text'] == ''                  # not slow unless told
+
+
+def test_status_carries_the_slow_simulator_line():
+    msg = rm.status_payload(Snapshot(), 1, 1, PANEL, 1000, 200,
+                            sim_text='Simulator slow: 0.4x real time')
+    assert msg['sim_text'] == 'Simulator slow: 0.4x real time'
 
 
 def test_status_content():

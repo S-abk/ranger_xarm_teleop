@@ -378,6 +378,22 @@ test('lines: no key line is wider than a key line holds (no squeezed key text)',
   }
 });
 
+test('lines: a slow simulator is said in one small line after the hold, only while it is sent', () => {
+  const slow = 'Simulator slow: 0.4x real time';
+  const res = FB.panelLines(accepted({ sim_text: slow, teleop: teleop({ hold: 'Arm position late: wait' }) }), NOW);
+  const i = texts(res).indexOf(slow);
+  assert.ok(i > 0, texts(res));
+  assert.strictEqual(texts(res)[i - 1], 'Arm position late: wait');
+  assert.deepStrictEqual([res.lines[i].size, res.lines[i].tone], ['small', 'warn']);
+  assert.ok(texts(FB.panelLines(accepted({ sim_text: slow, teleop: null }), NOW)).includes(slow));
+  for (const none of [{}, { sim_text: '' }, { sim_text: 7 }]) {
+    assert.ok(!texts(FB.panelLines(accepted(none), NOW)).some((t) => t.startsWith('Simulator')));
+  }
+  // Stale: NO DATA only, never the old line.
+  const st = accepted({ sim_text: slow });
+  assert.deepStrictEqual(texts(FB.panelLines(st, NOW + 5000)), ['NO DATA']);
+});
+
 test('lines: the longest hold text, with its age, is never cut', () => {
   // HOLD_SERVO_HALTED, the longest text of the hold table (operator_status.py), 81 characters.
   const text = 'Arm halted near a collision or joint limit: disarm (B), then use the retreat tool';
@@ -405,8 +421,9 @@ test('layout: key lines larger and bold, everything above the footer, even at th
   const worst = FB.panelLayout(FB.panelLines(accepted({
     teleop: teleop({ fault: long, fault_age_s: 1, limit: 'keep-out zone', gripper: 'closing 40 %' }),
     episode: episode({ refusal: long, refusal_age_s: 1, missed: 2 }),
+    sim_text: 'Simulator slow: 0.4x real time',
   }), NOW));
-  assert.strictEqual(worst.length, 13);
+  assert.strictEqual(worst.length, 14);
   assert.ok(Math.min(...worst.map((l) => l.px)) >= 16, 'worst case still readable');
   const last = worst[worst.length - 1];
   const lastStep = last.px * (last.bold ? 1.2 : 1.25);
@@ -471,15 +488,16 @@ test('lines: unknown keys are ignored', () => {
   assert.strictEqual(FB.panelLines(s.state, NOW).stale, false);
 });
 
-test('lines: the worst case is bounded (at most 13 lines of at most 40 characters)', () => {
+test('lines: the worst case is bounded (at most 14 lines of at most 40 characters)', () => {
   const long = 'word '.repeat(40);
   const st = accepted({
     episode: episode({ state: 'REVIEW', discard_armed: true, refusal: long, refusal_age_s: 1,
       missed: 9 }),
     teleop: teleop({ fault: long, fault_age_s: 1, limit: 'wrist', gripper: 'closed' }),
+    sim_text: 'Simulator slow: 0.4x real time',
   });
   const res = FB.panelLines(st, NOW);
-  assert.ok(res.lines.length <= 13, `got ${res.lines.length} lines`);
+  assert.ok(res.lines.length <= 14, `got ${res.lines.length} lines`);
   for (const l of res.lines.filter((x) => x.size === 'key')) {
     assert.ok(l.text.length <= 26, `key line too long: ${l.text}`);
   }
@@ -603,7 +621,7 @@ test('config: defaults, limits and bad values', () => {
 });
 
 test('version is exported', () => {
-  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-4');
+  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-5');
 });
 
 test('lines: a section older than the staleness limit shows no data, never its old state', () => {

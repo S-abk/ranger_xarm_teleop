@@ -188,3 +188,93 @@ def test_event_texts(event, detail, text):
     t = StatusTracker()
     t.on_episode(episode(last_event=event, detail=detail), 0.0)
     assert t.snapshot(0.0, 1000.0).last_event_text == text
+
+
+# ---- SimSpeed: the ROS clock against the wall clock ----
+
+def feed(speed, factor, seconds, ros0=100.0, wall0=1000.0, period=0.2):
+    """Feed statuses every ``period`` s of wall time with ROS time at ``factor``; last result."""
+    out = None
+    for i in range(int(round(seconds / period)) + 1):
+        out = speed.update(ros0 + factor * period * i, wall0 + period * i)
+    return out
+
+
+def test_sim_speed_real_time_is_never_slow():
+    s = st.SimSpeed()
+    assert feed(s, 1.0, 10.0) == pytest.approx(1.0)
+    assert s.text() == ''
+
+
+def test_sim_speed_slow_simulator_is_said_with_one_decimal():
+    s = st.SimSpeed()
+    assert feed(s, 0.36, 1.0) is None                 # not a full window yet
+    assert s.text() == ''
+    assert feed(s, 0.36, 10.0) == pytest.approx(0.36)
+    assert s.text() == 'Simulator slow: 0.4x real time'
+
+
+def test_sim_speed_hysteresis():
+    s = st.SimSpeed(slow_below=0.6, clear_above=0.7)
+    clock = {'ros': 100.0, 'wall': 1000.0}
+
+    def run(factor, seconds):
+        for _ in range(int(round(seconds / 0.2))):
+            clock['ros'] += factor * 0.2
+            clock['wall'] += 0.2
+            s.update(clock['ros'], clock['wall'])
+
+    run(0.5, 6.0)
+    assert s.slow
+    run(0.65, 6.0)                                    # between the two: stays slow
+    assert s.slow and s.text().startswith('Simulator slow: 0.')
+    run(0.8, 6.0)
+    assert not s.slow and s.text() == ''
+    run(0.65, 6.0)                                    # between the two from fast: stays clear
+    assert not s.slow
+
+
+def test_sim_speed_restart_of_the_clock_or_a_wall_gap_starts_again():
+    s = st.SimSpeed()
+    feed(s, 0.3, 6.0)
+    assert s.slow
+    assert s.update(5.0, 1006.4) is None              # ROS time went back (simulation restarted)
+    assert s.text() == ''
+    feed(s, 0.3, 6.0, ros0=5.0, wall0=1006.6)
+    assert s.slow
+    assert s.update(100.0, 1100.0) is None            # 90 s without a status
+    assert not s.slow
+    assert s.update(float('nan'), 1100.2) is None     # ignored, nothing changes
+    z = st.SimSpeed()
+    for i in range(30):                               # unset stamps: unknown, never slow
+        z.update(0.0, 1000.0 + 0.2 * i)
+    assert z.factor is None and z.text() == ''
+
+
+def test_sim_speed_text_does_not_flicker_on_a_bursty_clock():
+    # The measured factor jitters around 0.45 (bursts of /clock): 0.4/0.5 by plain rounding.
+    s = st.SimSpeed()
+    ros, wall, texts = 100.0, 1000.0, []
+    for i in range(600):                              # 120 s of statuses at 5 Hz
+        ros += 0.2 * (0.42 if i % 2 else 0.48)
+        wall += 0.2
+        s.update(ros, wall)
+        texts.append(s.text())
+    shown = [t for t in texts if t]
+    assert shown and all(t.startswith('Simulator slow: ') for t in shown)
+    changes = sum(1 for a, b in zip(shown, shown[1:]) if a != b)
+    assert changes <= 1, changes
+
+
+def test_sim_speed_a_paused_simulator_is_said_so():
+    s = st.SimSpeed()
+    for i in range(30):
+        s.update(100.0 + 0.0001 * i, 1000.0 + 0.2 * i)
+    assert s.text() == 'Simulator paused or stalled'
+
+
+def test_sim_speed_parameters_checked():
+    for bad in ({'slow_below': 0.7, 'clear_above': 0.6}, {'slow_below': 0.0},
+                {'clear_above': 1.5}, {'window_s': 0.0}):
+        with pytest.raises(ValueError):
+            st.SimSpeed(**bad)
