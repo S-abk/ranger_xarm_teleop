@@ -2,9 +2,10 @@
 # Tune by feel in a live session; restart the stack (patterns) or the bridge (panel) to apply.
 #
 # Patterns: flat [intensity 0..1, on_ms, off_ms, ...] per episode event, on the left controller.
-# Distinct by count and length. An all-zero intensity silences an event. Priority: a pattern
-# replaces a playing one of lower or equal priority; the two the operator must not miss
-# (REFUSED, AUTO_STOP) outrank the others. Maximum 16 pulses, 5 s.
+# Distinct by count and length. An all-zero intensity silences an event. The two the operator
+# must not miss (REFUSED, AUTO_STOP) are long and full strength. A newer episode event always
+# replaces the pattern playing (your latest press is felt, even during the alarm); priority
+# decides against other sources (later arm-side warnings cannot cut these). Maximum 16 pulses, 5 s.
 operator_feedback:
   ros__parameters:
     hand: left

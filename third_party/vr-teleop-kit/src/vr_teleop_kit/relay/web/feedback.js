@@ -15,7 +15,7 @@
 (function (root) {
   'use strict';
 
-  const FEEDBACK_VERSION = 'feedback-2';
+  const FEEDBACK_VERSION = 'feedback-3';
   const SEEN_MAX = 512;               // (run, id) pairs remembered for de-duplication
   const MAX_PULSES = 32;
   const MAX_PATTERN_MS = 10000;
@@ -186,7 +186,7 @@
     // A section is shown only while its source (its age when the status was built, plus the
     // status's own age) is within the staleness limit: no section is older than stale_ms.
     const staleS = (isNum(msg.stale_ms) ? msg.stale_ms : DEFAULT_STALE_MS) / 1000;
-    const fresh = (a) => !isNum(a) || a + since <= staleS;
+    const fresh = (a) => isNum(a) && a + since <= staleS;   // an unknown age is not fresh
     const lines = [];
     const add = (text, tone) => lines.push({ text, tone });
     const addWrapped = (text, tone) => wrapText(text, WRAP_CHARS, 2).forEach((t) => add(t, tone));

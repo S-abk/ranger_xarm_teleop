@@ -329,6 +329,17 @@ def test_a_send_buffer_limit_at_or_above_the_connection_write_limit_is_refused(r
             Parameter('send_buffer_limit_bytes', value=limit)])
 
 
+@pytest.mark.parametrize('limit', [1024, 32768])
+def test_the_send_buffer_limit_edges_are_accepted(ros, limit):
+    node = BridgeNode(node_name='bridge_edge_limit', parameter_overrides=[
+        Parameter('feedback_enabled', value=True),
+        Parameter('send_buffer_limit_bytes', value=limit)])
+    try:
+        assert node.send_buffer_limit == limit
+    finally:
+        node.destroy_node()
+
+
 def subscriptions(node):
     return {topic for topic, _ in node.get_subscriber_names_and_types_by_node(
         node.get_name(), node.get_namespace())}

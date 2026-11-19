@@ -523,7 +523,7 @@ test('config: defaults, limits and bad values', () => {
 });
 
 test('version is exported', () => {
-  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-2');
+  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-3');
 });
 
 test('lines: a section older than the staleness limit shows no data, never its old state', () => {
@@ -534,4 +534,12 @@ test('lines: a section older than the staleness limit shows no data, never its o
   assert.ok(later.includes('Teleop: no data'), later);
   assert.ok(!later.some((t) => t.startsWith('ARMED')), later);
   assert.ok(!later.includes('Recording: no data'), later);
+  // The same for the episode section, and an unknown age is never shown as fresh.
+  const ep = accepted({ teleop_age_s: 0.1, episode_age_s: 0.95, episode: episode({ index: 7 }) });
+  const epLater = texts(FB.panelLines(ep, NOW + 100));
+  assert.ok(epLater.includes('Recording: no data'), epLater);
+  assert.ok(!epLater.some((t) => t.includes('ep 7')), epLater);
+  const unknown = accepted({ teleop_age_s: null, episode_age_s: null, episode: episode({}) });
+  const u = texts(FB.panelLines(unknown, NOW));
+  assert.ok(u.includes('Teleop: no data') && u.includes('Recording: no data'), u);
 });

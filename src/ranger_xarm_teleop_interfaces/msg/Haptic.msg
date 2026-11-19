@@ -10,7 +10,9 @@ float64 wall_time           # host wall clock (s) of the event this request repo
 string hand                 # "left" or "right"
 string source               # what asks for it: "episode" (later sources add their own names)
 string event                # the source's event name, e.g. START, STOP, KEEP, DISCARD, MARK, REFUSED, AUTO_STOP
-uint8 priority              # replaces a playing pattern of lower or equal priority; dropped while a higher one plays
+# A newer request of the same source always replaces the playing one; another source's request
+# replaces it only with equal or higher priority (otherwise it is dropped, never queued).
+uint8 priority
 
 float32[] intensity         # per pulse, 0..1 (0: a pause)
 uint32[] on_ms              # per pulse, vibration time

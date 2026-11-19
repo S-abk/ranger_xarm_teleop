@@ -86,7 +86,8 @@ class Pattern:
 
 
 # Distinct by count and length. The two the operator must not miss (REFUSED, AUTO_STOP) are
-# long, full strength and outrank the others.
+# long and full strength, and outrank other sources' requests; a newer episode event still
+# replaces them (the page plays the newest request of a source).
 DEFAULT_PATTERNS: Dict[str, Pattern] = {
     'MARK': Pattern(((0.5, 40, 0),), 1),
     'START': Pattern(((0.8, 200, 0),), 2),
