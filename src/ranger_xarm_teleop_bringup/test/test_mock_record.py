@@ -35,7 +35,7 @@ from ranger_xarm_teleop_record.profile import load_checks
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from stack_helpers import (assert_stack_nodes, child_environment, exited_node_patterns,
                            full_name, ignoring, launched_processes, MOCK_RECORD_NODES, Process,
-                           READY, SERVO_FIXTURES)
+                           READY, replay_file, SERVO_FIXTURES, start_input)
 from test_mock_gripper import GripperProbe
 
 SESSION = 'test_session'
@@ -102,13 +102,6 @@ def fixture_file(directory, name):
     return path
 
 
-def replay_file(env, path, log_path, start_delay=3.0):
-    return Process(
-        ['ros2', 'run', 'ranger_xarm_teleop_bridge', 'replay_node', '--ros-args',
-         '-p', f'file:={path}', '-p', 'wait_for_subscriber_s:=15.0',
-         '-p', f'start_delay_s:={start_delay}'], env, log_path)
-
-
 @pytest.fixture(scope='module')
 def stack(tmp_path_factory):
     logs = tmp_path_factory.mktemp('mock_record')
@@ -126,6 +119,7 @@ def stack(tmp_path_factory):
                        and probe.state().measured_tool_pose_valid, 60.0, 'the teleop state')
         probe.wait_for(lambda: probe.episode_state() is not None, 60.0, 'the episode state')
         probe.move_to(READY)
+        start_input(probe, env, logs)       # before the graph settles: its node stays
         wait_for_settled_graph(probe, launch)
         yield probe, env, logs, os.path.join(str(data), SESSION), launch
     finally:

@@ -26,7 +26,7 @@ import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, TeleopState
 
 from stack_helpers import (arm_by_replay, child_environment, enabled_rigid_pairs,
-                           kill_gz_partition, Process, READY, replay)
+                           kill_gz_partition, Process, READY, replay, start_input)
 from test_mock_gripper import assert_same_tool_speed, GripperProbe, speed_run
 
 pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
@@ -64,6 +64,7 @@ def stack(tmp_path_factory):
         probe.move_to(READY, seconds=4.0)
         probe.move_gripper(0.0, 1.5)
         time.sleep(3.0)             # discovery of the probe's clients settles
+        start_input(probe, env, logs)
         yield probe, env, logs
     finally:
         probe.close()
@@ -100,8 +101,8 @@ def test_arming_starts_from_the_opening_moveit_left(stack):
     probe, env, logs = stack
     probe.disarm()
     probe.move_gripper(0.37, 1.5)
-    # Repeated only when the calibrate and arm presses demonstrably never reached the teleop
-    # node (lost while the replay's publisher was being discovered); see arm_by_replay.
+    # Once: the input player was acknowledged in the fixture, so the calibrate and arm presses
+    # arrive; see arm_by_replay.
     start, _ = arm_by_replay(probe, env, str(logs / 'replay_held.log'))
     grips = probe.grips_since(start)
     assert grips, 'no gripper command while armed'

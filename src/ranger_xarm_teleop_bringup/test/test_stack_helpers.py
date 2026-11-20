@@ -13,13 +13,19 @@
 # limitations under the License.
 """The stack tests' launch-log reading and expected-node check on recorded lines (no ROS graph)."""
 
+import json
 import os
+import shutil
+from types import SimpleNamespace
 
 import pytest
+from ranger_xarm_teleop_interfaces.msg import TeleopState
 import stack_helpers
-from stack_helpers import (assert_stack_nodes, exited_node_patterns, ignoring, keep_logs,
-                           launched_processes, MOCK_RECORD_NODES, MOCK_STACK_NODES,
-                           press_frames, press_never_arrived, SERVO_FIXTURES)
+from stack_helpers import (arm_by_replay, assert_stack_nodes, exited_node_patterns, ignoring,
+                           INPUT_NODE, keep_logs, launched_processes, lead_in_acknowledged,
+                           lead_in_file, LEAD_IN_SESSION, MOCK_RECORD_NODES, MOCK_STACK_NODES,
+                           press_frames, press_never_arrived, prime, replay,
+                           replay_with_clean_input, SERVO_FIXTURES)
 
 # Lines as a mock stack's launch prints them (abridged from a real log; ``rviz:=false``).
 STARTED = """[INFO] [launch]: Default logging verbosity is set to INFO
@@ -136,7 +142,356 @@ def test_anything_but_this_stack_and_its_probe_fails(names, log, message):
         check(names, STARTED + SPAWNER_DONE + log)
 
 
-# ---- the arm retry: only a press that demonstrably never arrived is tried again ----
+# ---- the stack's input player: one more expected node, and only one ----
+
+class _PlayerProbe(_Probe):
+    """A probe of a stack whose fixture started an input player."""
+
+    domain = 'a domain of this test'
+
+
+def test_the_input_player_is_expected_once_when_the_fixture_started_one(monkeypatch):
+    monkeypatch.setitem(stack_helpers._PLAYERS, _PlayerProbe.domain, object())
+    launch = _Launch(STARTED + SPAWNER_DONE)
+    assert_stack_nodes(_PlayerProbe(LIVE + [INPUT_NODE]), launch, MOCK_STACK_NODES, settle=0.0)
+    with pytest.raises(AssertionError, match='teleop_test_input'):      # it has gone
+        assert_stack_nodes(_PlayerProbe(LIVE), launch, MOCK_STACK_NODES, settle=0.0)
+    with pytest.raises(AssertionError, match='teleop_test_input'):      # a second one
+        assert_stack_nodes(_PlayerProbe(LIVE + [INPUT_NODE] * 2), launch, MOCK_STACK_NODES,
+                           settle=0.0)
+    with pytest.raises(AssertionError, match='teleop_test_input'):      # none was started
+        check(LIVE + [INPUT_NODE], STARTED + SPAWNER_DONE)
+
+
+# ---- the lead-in: a calibrate press under a session of its own, nothing else ----
+
+def test_the_lead_in_is_the_calibrate_press_of_arm_only_under_its_own_session(tmp_path):
+    path, count = lead_in_file(tmp_path)
+    with open(path, encoding='utf-8') as handle:
+        frames = [json.loads(line)['msg'] for line in handle]
+    assert count == len(frames) == 63                           # seq 0-62: the arm press is 63-80
+    assert [f['seq'] for f in frames] == list(range(63))
+    assert {f['session_id'] for f in frames} == {LEAD_IN_SESSION}
+    with open(os.path.join(SERVO_FIXTURES, 'arm_only.jsonl'), encoding='utf-8') as handle:
+        assert json.loads(handle.readline())['msg']['session_id'] != LEAD_IN_SESSION
+    pressed = [[i for i, b in enumerate(f['controllers']['right']['buttons']) if b['p']]
+               for f in frames]
+    assert [f['seq'] for f, p in zip(frames, pressed) if p == [4]] == list(range(27, 45))
+    assert all(p in ([], [4]) for p in pressed)         # calibrate (A) only: no arm, no grip
+    assert pressed[0] == [] and pressed[-1] == []       # released at both ends: it can loop
+    assert all(max(f['controllers']['right']['axes']) == 0.0 for f in frames)   # trigger open
+
+
+def _state(**fields):
+    base = {'armed': False, 'clutch_engaged': False, 'input_seq': 0, 'input_age': 0.01,
+            'hold_reason': TeleopState.HOLD_NOT_ARMED, 'calibrated': False,
+            'calibration_session_id': 0}
+    return SimpleNamespace(**{**base, **fields})
+
+
+def test_only_a_calibration_under_the_lead_in_session_acknowledges_it():
+    assert not lead_in_acknowledged([])
+    assert not lead_in_acknowledged([_state(input_seq=30)])     # frames arrive, not calibrated
+    # A calibration left from a fixture's session, valid or not, is not the lead-in's.
+    assert not lead_in_acknowledged([_state(calibrated=True, calibration_session_id=195939070)])
+    assert not lead_in_acknowledged([_state(calibrated=False,
+                                            calibration_session_id=LEAD_IN_SESSION)])
+    assert lead_in_acknowledged([_state(), _state(calibrated=True,
+                                                  calibration_session_id=LEAD_IN_SESSION)])
+
+
+def test_a_replay_is_refused_without_an_acknowledged_input_player(monkeypatch):
+    env = {'ROS_DOMAIN_ID': 'a domain of this test'}
+    with pytest.raises(AssertionError, match='no acknowledged input player'):
+        replay(env, 'arm_only', None)
+    monkeypatch.setitem(stack_helpers._PLAYERS, env['ROS_DOMAIN_ID'],
+                        SimpleNamespace(acknowledged=False))     # started, lead-in not yet seen
+    with pytest.raises(AssertionError, match='no acknowledged input player'):
+        replay(env, 'arm_only', None)
+
+
+# ---- a recording has ended when the teleop node sees its input stop ----
+
+def test_a_finished_recording_has_ended_once_the_node_reports_its_input_stopped():
+    state = _state(input_age=0.03, input_seq=269)
+    events = [{'event': 'done', 'id': 1, 'records': 270, 'passes': 1, 'stopped': False,
+               'failed': False, 'loop': False, 't': stack_helpers.time.time()}]
+    arrived = SimpleNamespace(age=0.01)                     # the newest state is new
+    player = SimpleNamespace(events_of=lambda ident: events, running=lambda: True,
+                             probe=SimpleNamespace(state=lambda: state,
+                                                   state_age=lambda: arrived.age))
+    ended = stack_helpers.Replay(player, 1, 'arm_only.jsonl', None)
+    assert ended.returncode == 0                            # every record was sent ...
+    assert ended.wait(0.05) is None                         # ... but the node still has input
+    state.input_age = 0.12                                  # beyond the gate's 0.1 s
+    assert ended.wait(0.05) == 0
+    state.input_age = 0.03                                  # (the next recording's input)
+    assert ended.wait(0.05) == 0                            # ended stays ended
+    # Input that never stops after a recording's end is somebody else's: say so, in time.
+    events[0]['t'] -= 3.0
+    stuck = stack_helpers.Replay(player, 1, 'arm_only.jsonl', None)
+    with pytest.raises(AssertionError, match='still reports fresh input'):
+        stuck.wait(0.05)
+    # ... unless that fresh input is only the last state the probe ever got: then the teleop
+    # node or the probe stopped, and the message says that instead.
+    arrived.age = 2.4
+    with pytest.raises(AssertionError, match='no teleop state has reached the probe for 2.4 s'):
+        stack_helpers.Replay(player, 1, 'arm_only.jsonl', None).wait(0.05)
+    arrived.age = 0.01
+    # A stopped recording, a failed one and a looped one do not wait for anything.
+    for change, code in (({'stopped': True}, 2), ({'failed': True}, 1), ({'loop': True}, 0)):
+        events[0] = {**events[0], 'stopped': False, 'failed': False, 'loop': False, **change}
+        assert stack_helpers.Replay(player, 1, 'x.jsonl', None).wait(0.05) == code
+    # Without a probe (the player on its own) the last record is the end.
+    player.probe = None
+    events[0] = {**events[0], 'stopped': False, 'failed': False, 'loop': False}
+    assert stack_helpers.Replay(player, 1, 'x.jsonl', None).wait(0.05) == 0
+
+
+def test_stopping_a_recording_waits_for_the_player_only_and_checks_nothing():
+    # A recording that ends by itself just as it is stopped: every record sent, and the node
+    # still reporting fresh input from something else. stop() runs in finally blocks, so it
+    # must not fail there in place of the test.
+    state = _state(input_age=0.03, input_seq=269)
+    events, sent = [], []
+
+    def send(**command):
+        sent.append(command)
+        events.append({'event': 'done', 'id': 1, 'records': 270, 'passes': 1, 'stopped': False,
+                       'failed': False, 'loop': False, 't': stack_helpers.time.time() - 3.0})
+
+    player = SimpleNamespace(events_of=lambda ident: events, running=lambda: True, send=send,
+                             output=lambda: '', probe=SimpleNamespace(
+                                 state=lambda: state, state_age=lambda: 0.01))
+    playing = stack_helpers.Replay(player, 1, 'arm_only.jsonl', None)
+    playing.stop()
+    assert sent == [{'cmd': 'stop', 'id': 1}] and playing.returncode == 0
+    with pytest.raises(AssertionError, match='still reports fresh input'):
+        playing.wait(0.05)                                  # the check is wait's, as before
+
+
+# ---- the helpers that replay: what is repeated, and what never is ----
+
+class _Played:
+    """A recording that has been played to its end."""
+
+    def wait(self, timeout):
+        return 0
+
+    def stop(self):
+        pass
+
+    def output(self):
+        return ''
+
+
+class _ScriptedProbe:
+    """
+    A probe whose stack answers the n-th replay with the n-th list of states.
+
+    ``late`` says what was late in the quarter second before a run's release: 'source' (the
+    input source sent nothing for 0.15 s), 'joints' (no joint state reached the probe for
+    0.12 s), 'probe' (nothing at all reached the probe for 0.12 s: the probe paused), or None.
+    """
+
+    def __init__(self, runs, late=None):
+        self.runs, self.replays, self.disarms, self.late = runs, 0, 0, late
+
+    def disarm(self):
+        self.disarms += 1
+
+    def states_since(self, start):
+        return self.runs[self.replays - 1]
+
+    def _all_states(self, start):
+        return [(start + 0.02 * i, s) for i, s in enumerate(self.runs[self.replays - 1], 1)]
+
+    def timed_states_since(self, since):
+        # Scripted from the replay's start, which is the first time asked for.
+        self.start = getattr(self, 'start', since) if self.replays == getattr(
+            self, '_run', None) else since
+        self._run = self.replays
+        states = self._all_states(self.start)
+        release = next((t for t, s in states if not s.clutch_engaged and t > states[0][0]), None)
+        self.release = release
+        if self.late == 'probe' and release is not None:
+            states = [(t, s) for t, s in states if not release - 0.25 < t < release - 0.13]
+        return [(t, s) for t, s in states if t >= since]
+
+    def input_stamps_since(self, since):
+        # 90 Hz up to the release, stamped by the source 1000 s off the probe's clock.
+        times = [since + k / 90.0 for k in range(int((self.release + 0.3 - since) * 90))]
+        if self.late == 'source':
+            times = [t for t in times if not self.release - 0.25 < t < self.release - 0.10]
+        return [(t, t + 1000.0) for t in times]
+
+    def timed_joints_since(self, since):
+        times = [since + k / 150.0 for k in range(int((self.release - since) * 150))]
+        if self.late in ('joints', 'probe'):
+            times = [t for t in times if not self.release - 0.25 < t < self.release - 0.13]
+        return [(t, None) for t in times]
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    """Return a function making a scripted probe; replays are counted, nothing is slept."""
+    made = []
+
+    def make(*runs, late=None):
+        made.append(_ScriptedProbe(list(runs), late))
+        return made[-1]
+
+    def played(env, fixture, log_path, start_delay=3.0):
+        made[-1].replays += 1
+        return _Played()
+
+    monkeypatch.setattr(stack_helpers, 'replay', played)
+    monkeypatch.setattr(stack_helpers.time, 'sleep', lambda seconds: None)
+    return make
+
+
+ENGAGED = [_state(armed=True, clutch_engaged=True, hold_reason=TeleopState.HOLD_NONE)] * 100
+STALE = _state(armed=True, hold_reason=TeleopState.HOLD_INPUT_STALE, input_age=0.15)
+POSE_STALE = _state(armed=True, hold_reason=TeleopState.HOLD_TOOL_POSE_STALE)
+RELEASED = _state(armed=True, hold_reason=TeleopState.HOLD_CLUTCH_RELEASED)
+HALTED = _state(armed=True, hold_reason=TeleopState.HOLD_SERVO_HALTED)
+
+
+POSE_ABSENT = _state(armed=True, hold_reason=TeleopState.HOLD_POSE_ABSENT, input_age=0.01)
+
+
+@pytest.mark.parametrize('release, late', [(STALE, 'source'), (POSE_STALE, 'joints')],
+                         ids=['the_source_paused', 'the_joint_states_paused'])
+def test_only_data_late_outside_the_teleop_node_is_repeated_and_it_is_printed(
+        scripted, capsys, release, late):
+    # 2 s engaged, then released on stale data where 2.8 s were expected, and the probe can
+    # show it: the source sent nothing for 0.15 s (input age 0.15 s), or no joint state
+    # arrived for 0.12 s while teleop states kept coming.
+    probe = scripted(ENGAGED + [release], ENGAGED + ENGAGED + [RELEASED], late=late)
+    start, discarded = replay_with_clean_input(probe, {}, 'log', 'clutch_line', 2.8)
+    assert probe.replays == 2 and len(discarded) == 1
+    assert f'hold_reason {release.hold_reason}' in discarded[0]
+    assert 'late on its way' in discarded[0]
+    assert 'discarded replay of clutch_line: attempt 1' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('release, late', [
+    pytest.param(STALE, None, id='input_stale_but_sent_steadily'),
+    pytest.param(STALE, 'probe', id='input_stale_and_only_the_probe_paused'),
+    pytest.param(STALE, 'joints', id='input_stale_and_something_else_was_late'),
+    pytest.param(POSE_STALE, None, id='tool_pose_stale_but_joint_states_steady'),
+    pytest.param(POSE_STALE, 'probe', id='tool_pose_stale_and_the_probe_paused'),
+    pytest.param(POSE_ABSENT, 'source', id='pose_absent_is_never_shown'),
+])
+def test_a_stale_release_not_shown_late_on_its_way_is_the_stacks_own_and_not_repeated(
+        scripted, capsys, release, late):
+    probe = scripted(ENGAGED + [release], ENGAGED + ENGAGED + [RELEASED], late=late)
+    start, discarded = replay_with_clean_input(probe, {}, 'log', 'clutch_line', 2.8)
+    assert probe.replays == 1 and discarded == []
+    printed = capsys.readouterr().out
+    assert 'not repeated' in printed and "the stack's own" in printed
+
+
+@pytest.mark.parametrize('run', [
+    pytest.param(ENGAGED + [HALTED], id='released_early_for_another_reason'),
+    pytest.param(ENGAGED + [RELEASED], id='grip_released_early'),
+    pytest.param([_state(armed=True, hold_reason=TeleopState.HOLD_NOT_CALIBRATED)] * 50,
+                 id='armed_never_engaged'),
+    pytest.param([_state(input_seq=5)] * 50, id='nothing_armed'),
+    pytest.param(ENGAGED + ENGAGED + [STALE], id='late_data_after_the_expected_time'),
+])
+def test_any_other_outcome_is_returned_at_once_for_the_test_to_judge(scripted, capsys, run):
+    probe = scripted(run, ENGAGED + ENGAGED + [RELEASED], late='source')
+    start, discarded = replay_with_clean_input(probe, {}, 'log', 'clutch_line', 2.8)
+    assert probe.replays == 1 and discarded == []
+    assert capsys.readouterr().out == ''
+
+
+def test_late_data_is_repeated_at_most_twice_then_returned_with_a_line(scripted, capsys):
+    probe = scripted(*[ENGAGED + [STALE]] * 3, late='source')
+    start, discarded = replay_with_clean_input(probe, {}, 'log', 'clutch_line', 2.8)
+    assert probe.replays == 3 and len(discarded) == 2
+    assert 'not repeated again after 3 attempts' in capsys.readouterr().out
+
+
+def test_a_pause_of_the_source_shorter_than_the_gate_saw_does_not_count():
+    # The gate saw no input for 150 ms; the source's own stamps show 60 ms at most.
+    stamps = [(100.0 + k / 90.0, 5000.0 + k / 90.0) for k in range(90) if not 40 <= k < 45]
+    probe = SimpleNamespace(input_stamps_since=lambda since: stamps)
+    late, text = stack_helpers.late_on_the_way(probe, STALE, 101.0)
+    assert not late and 'sent two frames 67 ms apart' in text, text
+    # A pause as long as the gate saw (less one cycle) does.
+    stamps = [(100.0 + k / 90.0, 5000.0 + k / 90.0) for k in range(90) if not 40 <= k < 52]
+    late, text = stack_helpers.late_on_the_way(probe, STALE, 101.0)
+    assert late and '144 ms apart' in text, text
+
+
+def test_arming_is_tried_once_whatever_comes_of_it(scripted):
+    seqs = [683, 683, 0, 2, 40, 80, 120, 269]
+    armed = [_state(input_seq=q, armed=q >= 80) for q in seqs]
+    refused = [_state(input_seq=q) for q in seqs]               # the presses arrived; not armed
+    for run in (armed, refused):
+        probe = scripted(run, armed)
+        start, discarded = arm_by_replay(probe, {}, 'log')
+        assert probe.replays == 1 and probe.disarms == 1 and discarded == []
+    probe = scripted(armed)
+    arm_by_replay(probe, {}, 'log', disarm=False)
+    assert probe.replays == 1 and probe.disarms == 0
+
+
+@pytest.mark.parametrize('seqs', [[683, 683, 683], [683, 144, 200, 269], []])
+def test_presses_that_never_arrived_fail_as_the_inputs_failure_not_the_stacks(scripted, seqs):
+    probe = scripted([_state(input_seq=q) for q in seqs], [_state(armed=True)])
+    with pytest.raises(AssertionError, match='the presses never arrived'):
+        arm_by_replay(probe, {}, 'log')
+    assert probe.replays == 1                                   # and nothing was tried again
+
+
+# ---- a new service client: a harmless request until the server answers it ----
+
+class _Client:
+    """A client whose server answers from the n-th request on (never: n = 0)."""
+
+    srv_name = '/some/service'
+
+    def __init__(self, answers_from, available=True):
+        self.answers_from, self.available = answers_from, available
+        self.requests, self.dropped = [], []
+
+    def wait_for_service(self, timeout_sec):
+        return self.available
+
+    def call_async(self, request):
+        self.requests.append(request)
+        answered = bool(self.answers_from) and len(self.requests) >= self.answers_from
+        return SimpleNamespace(done=lambda: answered)
+
+    def remove_pending_request(self, future):
+        self.dropped.append(future)
+
+
+def test_priming_asks_the_harmless_request_until_it_is_answered_and_says_so(capsys):
+    client = _Client(answers_from=1)
+    assert prime(client, 'harmless', timeout=1.0, each=0.05) == 1
+    assert client.requests == ['harmless'] and capsys.readouterr().out == ''
+    client = _Client(answers_from=3)                # the first two answers are lost
+    assert prime(client, 'harmless', timeout=5.0, each=0.05) == 3
+    assert client.requests == ['harmless'] * 3 and len(client.dropped) == 2
+    printed = capsys.readouterr().out.splitlines()
+    assert len(printed) == 2 and all('/some/service: no answer to harmless request' in line
+                                     for line in printed)
+
+
+def test_priming_fails_in_bounded_time_when_no_answer_ever_comes():
+    client = _Client(answers_from=0)
+    with pytest.raises(AssertionError, match='/some/service answered none of'):
+        prime(client, 'harmless', timeout=0.3, each=0.05)
+    assert 2 <= len(client.requests) <= 7
+    with pytest.raises(AssertionError, match='no service /some/service'):
+        prime(_Client(answers_from=1, available=False), 'harmless', timeout=0.1)
+
+
+# ---- when a press counts as never arrived (the check behind that failure) ----
 
 def test_the_presses_of_arm_only_are_seq_27_to_80():
     # A (calibrate) 27-44, B (arm) 63-80.
@@ -157,6 +512,27 @@ def test_a_press_is_lost_only_when_the_first_frame_is_well_after_the_last_press(
     assert not press_never_arrived([269, 28, 29], 80)           # 27 may have come between cycles
     assert not press_never_arrived([683, 20, 150], 80)          # a gap later: still arrived
     assert not press_never_arrived([5, 6, 7], 80)               # no previous stream
+
+
+# ---- the environment of a stack ----
+
+def test_each_child_environment_has_its_own_home_for_the_spawners_lock(monkeypatch):
+    monkeypatch.setattr(stack_helpers, '_LOGS', [])
+    monkeypatch.setattr(stack_helpers, 'TEMP_LOG_DIRS', [])
+    monkeypatch.delenv('PYTEST_XDIST_WORKER', raising=False)
+    monkeypatch.setenv('ROS_HOME', '/somewhere/shared')
+    try:
+        first = stack_helpers.child_environment(offset=1)
+        second = stack_helpers.child_environment(offset=1)
+        homes = [first['ROS_HOME'], second['ROS_HOME']]
+        assert homes[0] != homes[1] and '/somewhere/shared' not in homes
+        assert all(os.path.isdir(home) and not os.listdir(home) for home in homes)
+        # Removed with the session's other temporary directories, and not the log directory.
+        assert set(homes) <= set(stack_helpers.TEMP_LOG_DIRS)
+        assert first['ROS_LOG_DIR'] != first['ROS_HOME']
+    finally:
+        for path in stack_helpers.TEMP_LOG_DIRS:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 # ---- logs kept when a test fails ----

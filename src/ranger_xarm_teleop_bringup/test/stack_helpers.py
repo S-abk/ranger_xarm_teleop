@@ -20,6 +20,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -75,7 +76,9 @@ def band_domain(base: int, offset: int) -> int:
 
 KEEP_LOGS_ENV = 'TELEOP_TEST_KEEP_LOGS'
 _LOGS = []      # (test module path, file or directory)
-TEMP_LOG_DIRS = []   # the ROS_LOG_DIRs this session made; removed when it ends (conftest.py)
+# The ROS_LOG_DIR and ROS_HOME of each child environment; removed when the session ends
+# (conftest.py).
+TEMP_LOG_DIRS = []
 
 
 def _current_module() -> str:
@@ -119,7 +122,8 @@ def child_environment(offset: int) -> dict:
     The domain is ``offset`` places after the session's domain in the band 10-99, so that
     test modules, also run in parallel, do not see each other and never reach domains 0-9;
     discovery stays on this machine; an RViz that a launch starts anyway draws off screen,
-    where it aborts (and so fails the test) rather than open a window. A parallel worker
+    where it aborts (and so fails the test) rather than open a window; the controller
+    spawners' lock is this environment's own (``ROS_HOME``). A parallel worker
     (pytest-xdist) needs the session's domain to be set and in the band: it fails rather than
     derive its domain from a default.
     """
@@ -138,6 +142,12 @@ def child_environment(offset: int) -> dict:
     env['ROS_LOG_DIR'] = tempfile.mkdtemp(prefix=f'teleop_test_ros_log_{offset}_')
     register_log(env['ROS_LOG_DIR'])
     TEMP_LOG_DIRS.append(env['ROS_LOG_DIR'])
+    # The controller spawners take one lock file under ROS_HOME (~/.ros unless set), whatever
+    # the domain. With a home of its own, a spawner of this stack neither waits for nor holds
+    # up the spawners of another stack on this machine (a parallel worker's, or a stack
+    # started by hand), and a spawner that hangs blocks this stack only.
+    env['ROS_HOME'] = tempfile.mkdtemp(prefix=f'teleop_test_ros_home_{offset}_')
+    TEMP_LOG_DIRS.append(env['ROS_HOME'])
     return env
 
 
@@ -209,11 +219,44 @@ def kill_gz_partition(partition: str) -> int:
     return killed
 
 
+def prime(client, request, timeout=30.0, each=3.0):
+    """
+    Ask ``request`` until one answer arrives; return how often it was asked.
+
+    For a client or a server that is new. The middleware drops a service's answer when the
+    server has not yet matched the client's reply subscription: rmw_fastrtps waits 100 ms
+    for that match, then logs "failed to send response ... client will not receive response"
+    and the call never returns. The client cannot see from its side whether the server has
+    matched it (``wait_for_service`` shows the client's view only). One answered round trip
+    shows that it has, and a match stays. ``request`` must change nothing (a read, or a
+    request for what already holds); its answer is thrown away. Only it is ever asked again:
+    the call whose answer a test asserts on is made once, after it. Every lost answer is
+    printed; no answer within ``timeout`` fails.
+    """
+    assert client.wait_for_service(timeout_sec=timeout), f'no service {client.srv_name}'
+    end = time.monotonic() + timeout
+    asked = 0
+    while time.monotonic() < end:
+        asked += 1
+        future = client.call_async(request)
+        limit = min(end, time.monotonic() + each)
+        while not future.done() and time.monotonic() < limit:
+            time.sleep(0.01)
+        if future.done():
+            return asked
+        client.remove_pending_request(future)
+        print(f'{client.srv_name}: no answer to harmless request {asked} within {each} s '
+              '(the server has not matched this client yet?); asked again')
+    raise AssertionError(f'{client.srv_name} answered none of {asked} harmless requests within '
+                         f'{timeout} s')
+
+
 class Probe:
     """A node that watches the teleop stack and acts on it, spun in a background thread."""
 
     def __init__(self, env, moveit_controller='xarm6_traj_controller',
                  teleop_controller='teleop_arm_controller'):
+        self.domain = env['ROS_DOMAIN_ID']
         self.context = rclpy.Context()
         rclpy.init(context=self.context, domain_id=int(env['ROS_DOMAIN_ID']))
         self.node = rclpy.create_node('teleop_test_probe', context=self.context)
@@ -222,6 +265,7 @@ class Probe:
         self.joints = []            # (monotonic, [q1..q6])
         self.owner = None
         self.inputs = []            # monotonic arrival of every input status
+        self.input_stamps = []      # (monotonic arrival, header stamp s) of every input status
         self.stamped_joints = []    # (monotonic, header stamp, [q1..q6])
         self.targets = []           # (monotonic, (x, y, z)) of /teleop/target_pose
         self.description = None     # /robot_description text
@@ -264,10 +308,15 @@ class Probe:
                 self.spin_errors.append(repr(err))
 
     def close(self):
-        self.executor.shutdown(timeout_sec=2.0)
-        self.node.destroy_node()
-        rclpy.shutdown(context=self.context)
-        self.thread.join(3.0)
+        try:
+            player = _PLAYERS.pop(self.domain, None)
+            if player is not None:
+                player.close()
+        finally:
+            self.executor.shutdown(timeout_sec=2.0)
+            self.node.destroy_node()
+            rclpy.shutdown(context=self.context)
+            self.thread.join(3.0)
 
     def _on_state(self, msg):
         with self.lock:
@@ -292,8 +341,11 @@ class Probe:
             self.description = msg.data
 
     def _on_input(self, msg):
+        now = time.monotonic()
         with self.lock:
-            self.inputs.append(time.monotonic())
+            self.inputs.append(now)
+            self.input_stamps.append(
+                (now, msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9))
 
     def _on_owner(self, msg):
         with self.lock:
@@ -310,6 +362,32 @@ class Probe:
             time.sleep(0.05)
         raise AssertionError(f'timed out after {timeout} s waiting for {what}')
 
+    def wait_for_streams(self, timeout=30.0):
+        """Wait until this probe receives the teleop state, joint states and the owner."""
+        def missing():
+            with self.lock:
+                return [name for name, got in (('/teleop/state', self.states),
+                                               ('/joint_states', self.joints),
+                                               ('/teleop/mux/owner', self.owner)) if not got]
+        end = time.monotonic() + timeout
+        while missing() and time.monotonic() < end:
+            time.sleep(0.05)
+        assert not missing(), (f'the probe received nothing on {missing()} within {timeout} s '
+                               f'(spin errors: {self.spin_errors})')
+
+    def prime_clients(self):
+        """
+        Make sure the stack answers this probe's own clients (``prime``).
+
+        With requests that change nothing: the controller list, a disarm of a disarmed teleop
+        node, and the owner the mux already reports.
+        """
+        prime(self.list_client, ListControllers.Request())
+        prime(self.disarm_client, Trigger.Request())
+        owner = self.owner_value()
+        if owner in (ArmOwner.OWNER_MOVEIT, ArmOwner.OWNER_TELEOP):
+            prime(self.set_owner_client, SetArmOwner.Request(owner=owner), each=6.0)
+
     def call(self, client, request, timeout=15.0):
         assert client.wait_for_service(timeout_sec=timeout), f'no service {client.srv_name}'
         future = client.call_async(request)
@@ -321,6 +399,12 @@ class Probe:
     def state(self):
         with self.lock:
             return self.states[-1][1] if self.states else None
+
+    def state_age(self):
+        """Return how long ago the newest TeleopState arrived (s), None before the first."""
+        with self.lock:
+            newest = self.states[-1][0] if self.states else None
+        return None if newest is None else time.monotonic() - newest
 
     def assert_listening(self):
         """Fail unless a TeleopState arrived in the last half second."""
@@ -340,6 +424,11 @@ class Probe:
     def inputs_since(self, t):
         with self.lock:
             return [when for when in self.inputs if when >= t]
+
+    def input_stamps_since(self, t):
+        """Return ``(arrival, stamp)`` of the input statuses that arrived since ``t``."""
+        with self.lock:
+            return [pair for pair in self.input_stamps if pair[0] >= t]
 
     def joint_positions(self):
         with self.lock:
@@ -473,8 +562,13 @@ class Probe:
     def _apply_scene(self, scene, box, service):
         if box is not None:
             scene.world.collision_objects = [box]
-        client = self.node.create_client(service, '/apply_planning_scene')
-        assert client.wait_for_service(timeout_sec=10.0), 'no /apply_planning_scene'
+        client = getattr(self, '_scene_client', None)
+        if client is None:
+            from moveit_msgs.msg import PlanningScene
+            client = self._scene_client = self.node.create_client(service,
+                                                                  '/apply_planning_scene')
+            # A new client: an empty change first, until move_group answers it.
+            prime(client, service.Request(scene=PlanningScene(is_diff=True)), timeout=10.0)
         future = client.call_async(service.Request(scene=scene))
         self.wait_for(future.done, 10.0, 'the planning scene change')
         assert future.result().success, 'the planning scene change was refused'
@@ -503,13 +597,362 @@ class Probe:
         self.trajectory_pub.publish(msg)
 
 
+# ---- one input source per stack, matched and acknowledged before any test input ----
+#
+# A replay used to be a new process, with new publishers, every time. Its first frames were
+# then sometimes lost while the teleop node and the new publishers discovered each other:
+# ``replay_node`` waits for a subscriber on the status topic, which another node can be, and
+# start delays only make the loss rarer. The calibrate and arm presses are in a recording's
+# first second, so a test then saw no arming. Now a stack has one input source for its whole
+# life (``input_player.py``: the bridge's own code path, as ``replay_node``). Before any test
+# sends input, ``start_input`` waits for the two things that rule out loss to discovery:
+#
+# 1. matched: each publisher a frame is built from (status, joy, right pose, head pose) is
+#    matched by every subscription known on its topic, the teleop node's among them;
+# 2. acknowledged: the teleop node calibrated from the lead-in's calibrate press, which it
+#    can only do from a frame with all four parts (``TeleopState.calibrated`` under the
+#    lead-in's own XR session id).
+#
+# The lead-in is input no test asserts on: the frames of ``arm_only`` up to its arm press,
+# under a session id of their own, so a fixture's first frame changes the session and the
+# stack is not calibrated for it, as on a fresh stack. It is sent again and again until it is
+# acknowledged, and how many passes that took is printed.
+
+INPUT_PLAYER = os.path.join(HERE, 'input_player.py')
+INPUT_NODE = '/teleop_test_input'       # the player's node (input_player.NODE_NAME)
+TELEOP_NODE = 'teleop_servo'            # the node that takes the input
+LEAD_IN_SESSION = 1                     # the lead-in's XR session id: no fixture uses it
+QUIET_TIMEOUT_S = 2.0                   # a finished recording's input must have stopped by then
+_PLAYERS = {}                           # ROS domain -> InputPlayer of the stack on it
+
+
+class Replay:
+    """One recording being played by an ``InputPlayer``; stands in for a replay process."""
+
+    def __init__(self, player, ident, path, log_path):
+        self.player, self.ident, self.path, self.log_path = player, ident, path, log_path
+        self.started = time.monotonic()
+        self.proc = self                # ``replay.proc.returncode``, ``.poll()``: as a process
+        self._quiet = False             # the teleop node has seen this recording's input stop
+        if log_path is not None:
+            register_log(str(log_path))
+
+    def _events(self):
+        return self.player.events_of(self.ident)
+
+    def events(self):
+        """Return the events the player has reported about this recording so far."""
+        return self._events()
+
+    def _done(self):
+        return next((e for e in self._events() if e.get('event') == 'done'), None)
+
+    @property
+    def returncode(self):
+        """
+        Return None while playing, then 0, 1 or 2.
+
+        0: every record was sent (a looped recording: it was stopped, which is how it ends).
+        1: the recording could not be read or played, or the player has gone.
+        2: stopped before its last record, by ``stop`` or by the next recording.
+        """
+        done = self._done()
+        if done is None:
+            return None if self.player.running() else 1
+        if done.get('failed'):
+            return 1
+        return 2 if done.get('stopped') and not done.get('loop') else 0
+
+    @property
+    def passes(self):
+        """Return how many complete passes have been sent so far."""
+        return max((int(e.get('passes', 0)) for e in self._events()
+                    if e.get('event') in ('pass', 'done')), default=0)
+
+    def poll(self):
+        return self.returncode
+
+    def _ended(self):
+        """
+        Return the exit code once the recording has ended for the stack too, else None.
+
+        A recording sent to its last record has ended, for a test, when the teleop node sees
+        its input stop (``TeleopState.input_age`` beyond the gate's timeout). A replay process
+        took longer than that to exit, and tests read the stack's state right after waiting
+        for it. Fails if the node still reports fresh input ``QUIET_TIMEOUT_S`` later.
+        """
+        code = self.returncode
+        if code != 0 or self._quiet:
+            return code
+        done = self._done()
+        probe = self.player.probe
+        state = probe.state() if probe is not None else None
+        if (done.get('loop') or state is None
+                or not 0.0 <= state.input_age <= INPUT_TIMEOUT_S):
+            self._quiet = True
+            return code
+        if time.time() - done.get('t', time.time()) >= QUIET_TIMEOUT_S:
+            # The newest state the probe has: fresh input in it means something else sends
+            # input only if that state is itself new.
+            age = probe.state_age()
+            assert age is not None and age < 0.5, (
+                f'{self.path} was sent to its end over {QUIET_TIMEOUT_S} s ago and no teleop '
+                f'state has reached the probe for {0.0 if age is None else age:.1f} s (the last '
+                'one still showed fresh input): the teleop node or the probe has stopped')
+            raise AssertionError(
+                f'{self.path} was sent to its end over {QUIET_TIMEOUT_S} s ago and the teleop '
+                f'node still reports fresh input (age {state.input_age * 1000.0:.0f} ms, seq '
+                f'{state.input_seq}): something else is sending input')
+        return None
+
+    def wait(self, timeout):
+        """Return the exit code, or None when not ended (``_ended``) after ``timeout``."""
+        end = time.monotonic() + timeout
+        code = self._ended()
+        while code is None and time.monotonic() < end:
+            time.sleep(0.02)
+            code = self._ended()
+        if code is not None:
+            self._write_log()
+        return code
+
+    def output(self):
+        """Return what the player reported about this recording."""
+        lines = [json.dumps(e) for e in self._events()]
+        return f'{self.path}\n' + '\n'.join(lines) + '\n' + self.player.output()[-3000:]
+
+    def stop(self):
+        """
+        Stop the recording if it is still playing.
+
+        Waits for the player to report it stopped, not for the stack's input to go quiet
+        (``wait``): this runs in ``finally`` blocks, where a check that fails would replace
+        the failure of the test itself.
+        """
+        if self.returncode is None:
+            self.player.send(cmd='stop', id=self.ident)
+            end = time.monotonic() + 5.0
+            while self.returncode is None and time.monotonic() < end:
+                time.sleep(0.02)
+        self._write_log()
+
+    def _write_log(self):
+        if self.log_path is not None:
+            with open(self.log_path, 'w', encoding='utf-8') as handle:
+                handle.write(self.output())
+
+
+class InputPlayer:
+    """The input source of one stack: ``input_player.py`` as a child process."""
+
+    def __init__(self, env, log_path):
+        self.log_path = str(log_path)
+        register_log(self.log_path)
+        self.log = open(self.log_path, 'w', encoding='utf-8')
+        self.proc = subprocess.Popen(
+            [sys.executable, '-u', INPUT_PLAYER], env=env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=self.log, text=True, start_new_session=True)
+        self.lock = threading.Lock()
+        self.events = []
+        self.probe = None               # the stack's probe (start_input): what the node sees
+        self.acknowledged = False
+        self.matched = {}               # the "matched" report (topic -> counts)
+        self.lead_in_passes = None
+        self._next = 0
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+
+    def _read(self):
+        for line in self.proc.stdout:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                event = {'event': 'text', 'text': line.rstrip()}
+            with self.lock:
+                self.events.append(event)
+
+    def running(self):
+        return self.proc.poll() is None
+
+    def events_of(self, ident):
+        with self.lock:
+            return [e for e in self.events if e.get('id') == ident]
+
+    def output(self):
+        """Return the player's log so far."""
+        self.log.flush()
+        with open(self.log_path, encoding='utf-8', errors='replace') as handle:
+            return handle.read()
+
+    def send(self, **command):
+        assert self.running(), f'the input player has exited:\n{self.output()[-3000:]}'
+        self.proc.stdin.write(json.dumps(command) + '\n')
+        self.proc.stdin.flush()
+
+    def wait_event(self, name, timeout):
+        """Return the first event called ``name``; fail when none comes in ``timeout``."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            with self.lock:
+                found = next((e for e in self.events if e.get('event') == name), None)
+            if found is not None:
+                return found
+            assert self.running(), f'the input player has exited:\n{self.output()[-3000:]}'
+            time.sleep(0.02)
+        raise AssertionError(f'the input player reported no "{name}" within {timeout} s:\n'
+                             f'{self.output()[-3000:]}')
+
+    def play(self, path, start_delay=0.0, loop=False, source='', log_path=None):
+        """Play a recording; return its ``Replay``."""
+        self._next += 1
+        replay = Replay(self, self._next, path, log_path)
+        self.send(cmd='play', id=self._next, path=str(path), start_delay=float(start_delay),
+                  loop=bool(loop), source=source)
+        return replay
+
+    def close(self):
+        """Tell the player to leave; kill what is left. Never raises."""
+        try:
+            if self.running():
+                try:
+                    self.proc.stdin.write(json.dumps({'cmd': 'quit'}) + '\n')
+                    self.proc.stdin.flush()
+                    self.proc.stdin.close()
+                except (OSError, ValueError):
+                    pass
+                try:
+                    self.proc.wait(10.0)
+                except subprocess.TimeoutExpired:
+                    pass
+            if self.running():          # never a process group whose leader was reaped
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    self.proc.wait(5.0)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            self.log.close()
+
+
+def lead_in_file(directory):
+    """
+    Write the lead-in recording; return ``(path, records)``.
+
+    The frames of ``arm_only`` before its arm press (so with its calibrate press and nothing
+    else), under ``LEAD_IN_SESSION``.
+    """
+    lines, calibrate = [], 0
+    with open(os.path.join(SERVO_FIXTURES, 'arm_only.jsonl'), encoding='utf-8') as handle:
+        for line in handle:
+            record = json.loads(line)
+            msg = record.get('msg', {})
+            buttons = msg.get('controllers', {}).get('right', {}).get('buttons', [])
+            if len(buttons) > 5 and buttons[5].get('p'):
+                break                               # the arm press: not part of the lead-in
+            calibrate += bool(len(buttons) > 4 and buttons[4].get('p'))
+            msg['session_id'] = LEAD_IN_SESSION
+            lines.append(json.dumps(record))
+    assert calibrate and len(lines) > calibrate, (
+        'arm_only no longer starts with a calibrate press that ends before its arm press')
+    path = os.path.join(str(directory), 'lead_in.jsonl')
+    with open(path, 'w', encoding='utf-8', newline='\n') as handle:
+        handle.write('\n'.join(lines) + '\n')
+    return path, len(lines)
+
+
+def lead_in_acknowledged(states) -> bool:
+    """Return True when a teleop state reports the calibration made from the lead-in."""
+    return any(s.calibrated and s.calibration_session_id == LEAD_IN_SESSION for s in states)
+
+
+def start_input(probe, env, logs, match_timeout=60.0, acknowledge_timeout=30.0):
+    """
+    Start the stack's input source; return once the teleop node provably takes its input.
+
+    Call it in the module's fixture, when the stack is up and before anything else is sent:
+    ``replay`` refuses to play without it. It first waits until the probe itself receives the
+    stack's streams (teleop state, joint states, owner), which the tests read, and until the
+    stack answers the probe's service clients (``Probe.prime_clients``). Fails, with
+    what is known, when the publishers are not matched within ``match_timeout`` or the
+    lead-in is not acknowledged within ``acknowledge_timeout``.
+    """
+    assert env['ROS_DOMAIN_ID'] not in _PLAYERS, 'this stack already has an input player'
+    probe.wait_for_streams()
+    probe.prime_clients()
+    player = InputPlayer(env, os.path.join(str(logs), 'input_player.log'))
+    player.probe = probe
+    _PLAYERS[env['ROS_DOMAIN_ID']] = player
+    player.wait_event('up', 60.0)
+    player.send(cmd='match', consumer=TELEOP_NODE, timeout=match_timeout)
+    report = player.wait_event('matched', match_timeout + 10.0)
+    player.matched = report['topics']
+    assert report['ok'], (
+        f'the input publishers are not matched after {match_timeout} s; per topic [matched by '
+        f'the publisher, subscriptions known, /{TELEOP_NODE} among them]: {report["topics"]}')
+    path, records = lead_in_file(logs)
+    since = time.monotonic()
+    lead_in = player.play(path, loop=True, source='replay:lead_in',
+                          log_path=os.path.join(str(logs), 'lead_in.log'))
+    try:
+        probe.wait_for(lambda: (lead_in_acknowledged(probe.states_since(since))
+                                or not player.running()),
+                       acknowledge_timeout, 'the lead-in to be acknowledged')
+        assert lead_in_acknowledged(probe.states_since(since)), (
+            f'the input player exited during the lead-in:\n{player.output()[-3000:]}')
+        # Complete passes before the acknowledging state arrived, by the player's own times
+        # (not by when this thread came to look).
+        arrived = next(when for when, s in probe.timed_states_since(since)
+                       if lead_in_acknowledged([s]))
+        seen = time.time() - (time.monotonic() - arrived)
+        passes = sum(1 for e in lead_in.events() if e.get('event') == 'pass'
+                     and e.get('t', 0.0) <= seen)
+    except AssertionError as err:
+        if 'the input player exited' in str(err):
+            raise
+        state = probe.state()
+        seen = ('no teleop state' if state is None else
+                f'input_age {state.input_age:.3f} s, input_seq {state.input_seq}, calibrated '
+                f'{state.calibrated} (session {state.calibration_session_id})')
+        raise AssertionError(
+            f'the teleop node did not calibrate from the lead-in within {acknowledge_timeout} '
+            f's although the publishers were matched ({report["topics"]}). Its last state: '
+            f'{seen}. A fresh input_age with no calibration means the status arrives and the '
+            'joy, pose or head messages do not (see "calibration refused" and "incomplete" in '
+            'the teleop log).') from None
+    finally:
+        lead_in.stop()
+    player.lead_in_passes = passes
+    print(f'input player: matched {report["topics"]}; lead-in ({records} records) '
+          f'acknowledged in pass {passes + 1}, {time.monotonic() - since:.2f} s after it began'
+          + (f': {passes} pass(es) before it were not taken' if passes else ''))
+    # Quiet again before the first recording, as between two recordings.
+    probe.wait_for(lambda: not 0.0 <= probe.state().input_age <= 0.3, 10.0,
+                   'the input to go quiet after the lead-in')
+    player.acknowledged = True
+    return player
+
+
+def input_player(env):
+    """Return the stack's acknowledged input player; fail when the fixture started none."""
+    player = _PLAYERS.get(env['ROS_DOMAIN_ID'])
+    assert player is not None and player.acknowledged, (
+        'this stack has no acknowledged input player: call start_input(probe, env, logs) in '
+        'the fixture, before any replay')
+    return player
+
+
+def replay_file(env, path, log_path, start_delay=3.0):
+    """Play a JSONL recording on the stack's input player; return the ``Replay``."""
+    return input_player(env).play(path, start_delay=start_delay, log_path=log_path)
+
+
 def replay(env, fixture, log_path, start_delay=3.0):
-    """Start the replay node on a servo fixture; return the process."""
-    return Process(
-        ['ros2', 'run', 'ranger_xarm_teleop_bridge', 'replay_node', '--ros-args',
-         '-p', f'file:={os.path.join(SERVO_FIXTURES, fixture + ".jsonl")}',
-         '-p', 'wait_for_subscriber_s:=15.0', '-p', f'start_delay_s:={start_delay}'],
-        env, log_path)
+    """Play a servo fixture on the stack's input player; return the ``Replay``."""
+    return replay_file(env, os.path.join(SERVO_FIXTURES, fixture + '.jsonl'), log_path,
+                       start_delay)
 
 
 # Frames a teleop cycle (50 Hz) can be behind the newest frame it reports, with a 90 Hz
@@ -562,44 +1005,92 @@ def press_never_arrived(seqs, press_last: int, margin: int = PRESS_SEQ_MARGIN) -
     return seqs[start] > press_last + margin
 
 
-def arm_by_replay(probe, env, log_prefix, fixture='arm_only', attempts=3, start_delay=1.0):
+def arm_by_replay(probe, env, log_prefix, fixture='arm_only', start_delay=1.0, disarm=True):
     """
-    Calibrate and arm with ``fixture``; return ``(start, discarded attempts)``.
+    Calibrate and arm with ``fixture``, once; return ``(start, discarded attempts)``.
 
-    The calibrate and arm presses are in the recording's first second, while the replay's
-    new publisher is still being discovered. An attempt is repeated only when the teleop node
-    did not arm **and** the press demonstrably never reached it (``press_never_arrived``):
-    a press that arrived without arming is returned as it is, for the caller's assertions to
-    fail on. Every discarded attempt is printed and returned.
+    Nothing is repeated, so the second value is always empty (kept for the callers): the
+    stack's input player was matched and acknowledged before any test input
+    (``start_input``), so the presses in the recording's first second cannot be lost to
+    discovery. A press that arrived without arming is returned as it is, for the caller's
+    assertions to fail on: a refusal, a mux failure, a lost ownership answer and a bug in
+    arming all look like that. Should the teleop node have armed nothing **and** its own
+    ``TeleopState.input_seq`` show that no press can have reached it
+    (``press_never_arrived``), this fails at once and says so: the input failed, not the
+    stack, and the caller's assertion would name the wrong thing. ``disarm=False`` leaves
+    out the disarm request before the recording (the caller's stack is disarmed already).
     """
     first, last = press_frames(os.path.join(SERVO_FIXTURES, fixture + '.jsonl'))
-    discarded = []
-    start = time.monotonic()
-    for attempt in range(attempts):
+    if disarm:
         probe.disarm()
-        start = time.monotonic()
-        process = replay(env, fixture, f'{log_prefix}.{attempt}', start_delay=start_delay)
-        try:
-            assert process.wait(40.0) == 0, process.output()
-        finally:
-            process.stop()
-        states = probe.states_since(start)
-        if any(s.armed for s in states):
-            return start, discarded
-        seqs = [s.input_seq for s in states]
-        if not press_never_arrived(seqs, last) or attempt + 1 == attempts:
-            return start, discarded
+    start = time.monotonic()
+    process = replay(env, fixture, f'{log_prefix}.0', start_delay=start_delay)
+    try:
+        assert process.wait(40.0) == 0, process.output()
+    finally:
+        process.stop()
+    states = probe.states_since(start)
+    seqs = [s.input_seq for s in states]
+    if not any(s.armed for s in states) and press_never_arrived(seqs, last):
         changed = next((seq for seq in seqs if seq != seqs[0]), None) if seqs else None
-        discarded.append(f'attempt {attempt + 1}: the first frame the teleop node got was '
-                         f'seq {changed} (presses at seq {first}-{last}): the press never '
-                         'arrived')
-        print(f'discarded replay of {fixture}: {discarded[-1]}')
-    return start, discarded
+        raise AssertionError(
+            f'{fixture}: nothing was armed, and the first frame the teleop node reported was '
+            f'seq {changed} (presses at seq {first}-{last}): the presses never arrived, '
+            'although the input player was matched and acknowledged')
+    return start, []
 
 
-# Releases that mean "data arrived late", not "the operator or a limit stopped it".
-STALE_DATA = (TeleopState.HOLD_INPUT_STALE, TeleopState.HOLD_POSE_ABSENT,
-              TeleopState.HOLD_HEAD_ABSENT, TeleopState.HOLD_TOOL_POSE_STALE)
+# Releases on data that came too late: of the headset input, and of the joint states.
+STALE_INPUT = (TeleopState.HOLD_INPUT_STALE, TeleopState.HOLD_POSE_ABSENT,
+               TeleopState.HOLD_HEAD_ABSENT)
+STALE_DATA = STALE_INPUT + (TeleopState.HOLD_TOOL_POSE_STALE,)
+LATE_WINDOW_S = 0.5         # how far before a release the cause is looked for
+LATE_SLACK_S = 0.02         # one target cycle
+INPUT_TIMEOUT_S = 0.1       # the gate's input timeout
+TOOL_POSE_TIMEOUT_S = 0.1   # the gate's tool_pose_timeout_s
+STEADY_GAP_S = 0.05         # teleop states (50 Hz) arriving closer than this: the probe is awake
+
+
+def late_on_the_way(probe, release, when):
+    """
+    Return ``(late, text)``: whether a stale release's data was late outside the teleop node.
+
+    ``release`` is the first released TeleopState, ``when`` its arrival at the probe. Only
+    what the probe can show counts as late on the way:
+
+    * ``INPUT_STALE``: by the stamps the input source gave its status messages (its time of
+      sending), not by when they reached the probe: a probe that paused changes arrivals, not
+      stamps. Late when two frames in a row were sent at least as far apart as the gate saw
+      no input (``release.input_age``, less one cycle): the source itself paused.
+    * ``TOOL_POSE_STALE``: by the arrival of the joint states at the probe (their stamps are
+      the robot side's clock, which a slow simulator keeps even). Late when they left a gap of
+      at least the gate's timeout, less one cycle, while teleop states kept arriving at the
+      probe through that gap: neither the probe nor the teleop node was what paused.
+    * ``POSE_ABSENT``, ``HEAD_ABSENT``: never. A pose, head or joy message lost on the way and
+      one the teleop node took too late look the same from the probe, which takes none of
+      those topics.
+    """
+    reason = release.hold_reason
+    begin = when - LATE_WINDOW_S
+    if reason == TeleopState.HOLD_INPUT_STALE:
+        # Messages that arrived around the window (an arrival can be late; a stamp cannot).
+        stamps = [stamp for arrival, stamp in probe.input_stamps_since(begin - 0.3)
+                  if arrival <= when + 0.3]
+        gap = max((b - a for a, b in zip(stamps, stamps[1:])), default=0.0)
+        age = release.input_age if release.input_age > 0.0 else INPUT_TIMEOUT_S
+        needed = max(STEADY_GAP_S, age - LATE_SLACK_S)
+        return gap >= needed, (f'the input source sent two frames {gap * 1000.0:.0f} ms apart '
+                               f'(the gate saw no input for {age * 1000.0:.0f} ms)')
+    if reason == TeleopState.HOLD_TOOL_POSE_STALE:
+        joints = [begin] + [t for t, _ in probe.timed_joints_since(begin) if t <= when] + [when]
+        gap, a, b = max((y - x, x, y) for x, y in zip(joints, joints[1:]))
+        states = [a] + [t for t, _ in probe.timed_states_since(a) if t < b] + [b]
+        awake = max(y - x for x, y in zip(states, states[1:])) < STEADY_GAP_S
+        return gap >= TOOL_POSE_TIMEOUT_S - LATE_SLACK_S and awake, (
+            f'the joint states left a gap of {gap * 1000.0:.0f} ms at the probe, teleop states '
+            f'{"kept arriving" if awake else "did not arrive either"} meanwhile')
+    return False, ('the probe takes the status topic only: it cannot tell a pose, head or joy '
+                   'message lost on the way from one the teleop node took too late')
 
 
 def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, attempts=3,
@@ -607,12 +1098,20 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
     """
     Replay a fixture from a disarmed stack; return ``(start, discarded)``.
 
-    The tests that use this need the recording to reach the gate as a steady stream.
-    On a busy machine data is sometimes more than 100 ms late (replay, transport or
-    this node's own queue); the gate then releases on stale data, as it must, and the
-    run says nothing about what the test is after. A run is discarded and repeated
-    only when the gate itself reported such a release before ``expected_engaged_s`` of
-    engagement. Every discarded run is printed and returned, so it stays visible.
+    The tests that use this need the recording to reach the gate as a steady stream. On a
+    busy machine data is sometimes more than 100 ms late; the gate then releases on stale
+    data, as it must, and the run says nothing about what the test is after. A run is
+    discarded and repeated only when
+
+    * the gate itself reported such a release before ``expected_engaged_s`` of engagement,
+    * **and** the data was late outside the teleop node, as far as the probe can show
+      (``late_on_the_way``): the input source paused, or the robot side's joint states did.
+      No test here asserts on either.
+
+    Any other stale release is returned as it is, with a printed line, for the test to fail
+    on: the teleop node being late itself is the stack's behaviour. So is a release for any
+    other reason, and a run in which nothing engaged. Every discarded run is printed and
+    returned, so it stays visible.
     """
     discarded = []
     start = time.monotonic()
@@ -630,26 +1129,27 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
         states = probe.timed_states_since(start)
         engaged = [when for when, s in states if s.clutch_engaged]
         if not engaged:
-            # Nothing was armed at all: the opening button presses of the recording did
-            # not reach the teleop node (they are sent in the first second, while the
-            # new publisher is still being discovered).
-            if not any(s.armed for _, s in states) and attempt + 1 < attempts:
-                discarded.append(f'attempt {attempt + 1}: the arm button press never arrived')
-                print(f'discarded replay of {fixture}: {discarded[-1]}')
-                continue
+            # Nothing engaged: for the caller's assertions. (A press lost to discovery cannot
+            # be the reason: the input player was acknowledged before any test input.)
             return start, discarded
         first = engaged[0]
         release = next(((when, s) for when, s in states
                         if when > first and not s.clutch_engaged), None)
         early = release is not None and release[0] - first < expected_engaged_s
-        if early and release[1].hold_reason in STALE_DATA and attempt + 1 < attempts:
-            discarded.append(
-                f'attempt {attempt + 1}: released after {release[0] - first:.2f} s with '
-                f'hold_reason {release[1].hold_reason} (data late by '
-                f'{release[1].input_age * 1000.0:.0f} ms input age)')
-            print(f'discarded replay of {fixture}: {discarded[-1]}')
-            continue
-        return start, discarded
+        if not (early and release[1].hold_reason in STALE_DATA):
+            return start, discarded
+        late, how = late_on_the_way(probe, release[1], release[0])
+        what = (f'released after {release[0] - first:.2f} s with hold_reason '
+                f'{release[1].hold_reason}; {how}')
+        if not late:
+            print(f'replay of {fixture} not repeated: {what}: not shown late on its way, so '
+                  "it counts as the stack's own")
+            return start, discarded
+        if attempt + 1 == attempts:
+            print(f'replay of {fixture} not repeated again after {attempts} attempts: {what}')
+            return start, discarded
+        discarded.append(f'attempt {attempt + 1}: {what}: late on its way')
+        print(f'discarded replay of {fixture}: {discarded[-1]}')
     return start, discarded
 
 
@@ -768,8 +1268,9 @@ def assert_stack_nodes(probe, launch, expected, settle=2.0):
     """
     Assert that the probe's ROS domain holds this stack, this probe and nothing else.
 
-    Each pattern of ``expected`` must be matched by exactly its count of nodes and the probe
-    by one, and no node may be left over: a second stack, another test or any unrelated node
+    Each pattern of ``expected`` must be matched by exactly its count of nodes, the probe by
+    one and the stack's input player (when the fixture started one) by one, and no node may be
+    left over: a second stack, another test or any unrelated node
     fails. Nodes of launched processes that have exited are left out (``EXITING_NODES``);
     those of such a process still running are allowed.
     """
@@ -779,7 +1280,10 @@ def assert_stack_nodes(probe, launch, expected, settle=2.0):
     running = tuple(re.compile(p + r'\Z') for e in sorted(started - exited)
                     for p in EXITING_NODES.get(e, ()))
     wrong = []
-    for pattern, count in {**expected, re.escape('/' + probe.node.get_name()): 1}.items():
+    own = {re.escape('/' + probe.node.get_name()): 1}
+    if getattr(probe, 'domain', None) in _PLAYERS:
+        own[re.escape(INPUT_NODE)] = 1          # this stack's input player, and only one
+    for pattern, count in {**expected, **own}.items():
         match = re.compile(pattern + r'\Z')
         hits = [n for n in left if match.match(n)]
         if len(hits) != count:

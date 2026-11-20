@@ -35,8 +35,8 @@ import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from rcl_interfaces.srv import GetParameters
 
-from stack_helpers import (child_environment, kill_gz_partition, Probe, Process, READY,
-                           replay_with_clean_input, SHOULDER_START)
+from stack_helpers import (child_environment, kill_gz_partition, prime, Probe, Process, READY,
+                           replay_with_clean_input, SHOULDER_START, start_input)
 
 pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
                                 reason='set TELEOP_TEST_GAZEBO=1 to run the Gazebo tests')
@@ -69,6 +69,7 @@ def stack(tmp_path_factory):
                        and probe.state().measured_tool_pose_valid, 60.0, 'the teleop state')
         time.sleep(5.0)             # MoveIt Servo start-up and verification
         probe.move_to(READY, seconds=4.0)
+        start_input(probe, env, logs)
         yield probe, env, logs
     finally:
         probe.close()
@@ -93,6 +94,7 @@ def stamp_seconds(state) -> float:
 
 def use_sim_time(probe, node_name):
     client = probe.node.create_client(GetParameters, f'/{node_name}/get_parameters')
+    prime(client, GetParameters.Request(names=['use_sim_time']))    # a new client; a read
     result = probe.call(client, GetParameters.Request(names=['use_sim_time']), 20.0)
     return result.values[0].bool_value
 
