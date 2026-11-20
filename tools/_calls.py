@@ -108,8 +108,9 @@ class Calls:
         """
         Count the motion of the joints ``names`` from now (before a goal goes out).
 
-        Waits up to ``wait`` s for a joint state of the last 0.2 s with these joints, so that
-        the motion is counted from before the goal. Without one the report says so.
+        Waits up to ``wait`` s for a joint state of the last 0.2 s with these joints. The
+        motion is counted from the newest one of the last half second; when there is none,
+        the report says that no joint state from before the request was at hand.
         """
         def fresh() -> bool:
             return (bool(self.joints) and time.monotonic() - self.joints[-1][0] <= 0.2

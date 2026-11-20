@@ -31,8 +31,9 @@ import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from stack_helpers import (assert_stack_nodes, child_environment, join_stall, MOCK_STACK_NODES,
-                           pauses_around, Probe, Process, READY, replay, start_input)
+from stack_helpers import (assert_stack_nodes, child_environment, JOIN_LOOK_AHEAD_S,
+                           join_stall, keep_record, MOCK_STACK_NODES, pauses_around, Probe,
+                           Process, READY, replay, start_input)
 from trajectory_msgs.msg import JointTrajectory
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -132,8 +133,10 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
     Not asserted: that the engagement outlasts the second process joining the graph. A
     process that joins can stall an existing node for about a third of a second, and the gate
     then releases the clutch on stale data, as it must (interface contract: every process of
-    a session starts before arming). The test prints which of the two happened. A release
-    with any other cause fails it (``stack_helpers.join_stall``).
+    a session starts before arming). The test prints which of the two happened, and a join
+    stall is recorded with the test's logs where the logs of failed tests are kept
+    (``stack_helpers.keep_record``); a run without such a record outlasted the join. A
+    release with any other cause fails the test (``stack_helpers.join_stall``).
     """
     probe, env, logs, _ = stack
     probe.disarm()
@@ -173,10 +176,10 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
         verdict = wait_for_any(late, (REFUSED, STARTED), 20.0)
         if verdict_at is None:
             verdict_at = time.monotonic()
-        # The recording to its end and a second more: a pause that released the clutch can
+        # The recording to its end and a while more: a pause that released the clutch can
         # outlast the release, and is looked for on both sides of it.
         assert player.wait(30.0) == 0, player.output()
-        time.sleep(1.0)
+        time.sleep(JOIN_LOOK_AHEAD_S)
 
         # How the engagement ended. The grip is held for 6.0 s in the fixture.
         during = probe.timed_states_since(engaged_at - 0.5)
@@ -192,8 +195,10 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
             assert stalled, (
                 f'the clutch was released after {lasted:.2f} s with hold_reason '
                 f'{release.hold_reason}, and not by the stall of a joining process: {how}')
-            print(f'JOIN STALL: the clutch was released after {lasted:.2f} s with hold_reason '
-                  f'{release.hold_reason}: {how}')
+            record = (f'JOIN STALL: the clutch was released after {lasted:.2f} s with '
+                      f'hold_reason {release.hold_reason}: {how}')
+            print(record)
+            print('recorded in ' + (keep_record(record, 'join_stall') or 'this output only'))
 
         # The second recorder.
         assert verdict is not None, late.output()

@@ -115,6 +115,26 @@ def keep_logs(module: str, test: str, destination: str) -> str:
     return target
 
 
+def keep_record(text: str, label: str) -> str:
+    """
+    Keep the logs of the running test although it has not failed, with ``text`` beside them.
+
+    For an outcome that is worth reading afterwards and is no failure: a passing test's
+    output is not kept by anything else. Like the logs of a failed test, only when
+    TELEOP_TEST_KEEP_LOGS names a directory. Returns the new directory (its name ends in
+    ``label``; the text is in RECORD.txt), or '' when nothing is kept.
+    """
+    destination = os.environ.get(KEEP_LOGS_ENV)
+    if not destination:
+        return ''
+    current = os.environ.get('PYTEST_CURRENT_TEST', '')
+    test = current.split('::')[-1].split(' ')[0]
+    target = keep_logs(_current_module(), f'{test}__{label}', destination)
+    with open(os.path.join(target, 'RECORD.txt'), 'w', encoding='utf-8') as handle:
+        handle.write(text + '\n')
+    return target
+
+
 def child_environment(offset: int) -> dict:
     """
     Return an environment for child processes and this test's own ROS context.
@@ -1173,9 +1193,10 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
 # stack, with 10 stalls of the teleop node timed inside it and 10 of the controller's and the
 # input source's processes. A stalled node is stuck in a publish. The message it was
 # publishing comes out at the end of the stall, so the probe goes without that node's stream
-# for the length of the stall (334 to 349 ms for one sleep, 681 ms for two) while the other
-# streams keep arriving (never silent for more than 22 ms). The stamps do not show it the
-# same way: the late message was stamped before the stall. When the probe's own process
+# for the length of the stall (334 to 349 ms for one sleep, 681 ms for two) while another
+# stream kept arriving (never silent for more than 22 ms; a third was at times silent or
+# absent). The stamps do not show it the same way: the late message was stamped before the
+# stall. When the probe's own process
 # stalls, every stream is silent over the same stretch (264 to 270 ms seen) and then arrives
 # in a burst. Once, two nodes stalled over the same stretch while no third stream was
 # running: the rule below does not show that one.
@@ -1197,11 +1218,11 @@ JOIN_STALL_REASONS = tuple(JOIN_STALL_STREAMS)
 JOIN_STALL_MIN_S = 0.25     # one sleep is 0.333 s
 JOIN_STALL_MAX_S = 1.2      # three in a row are 1.0 s
 JOIN_WINDOW_S = 5.0         # a newcomer has been discovered up to 3 s after its start
-JOIN_LOOK_BACK_S = 1.5
-JOIN_LOOK_AHEAD_S = 1.0     # an input pause outlasts the release it causes
+JOIN_LOOK_AHEAD_S = 1.5     # a pause outlasts the release it causes: longer than the longest
 JOIN_ALIVE_S = 0.1          # a stream kept arriving when it was never silent for this long
 JOIN_EARLY_S = 0.05         # a pause has begun by the release, give or take this
 JOIN_AFTER_PAUSE_S = 0.5    # a release comes during the pause that causes it or this soon after
+JOIN_LOOK_BACK_S = JOIN_STALL_MAX_S + JOIN_AFTER_PAUSE_S + 0.3      # the longest, ended before
 
 
 def kept_arriving(arrivals, began, ended):

@@ -775,3 +775,18 @@ def test_pauses_are_looked_for_in_each_stream_around_the_release():
     assert pauses[SERVO] == (pytest.approx(0.02), [])
     stalled, text = stack_helpers.join_stall(7.5, 9.3, BY_INPUT, pauses)
     assert stalled and f'{INPUT} for 320 ms while' in text
+
+
+def test_a_record_of_a_test_that_did_not_fail_is_kept_with_its_logs(tmp_path, monkeypatch):
+    log = tmp_path / 'launch.log'
+    log.write_text('a line of the stack')
+    stack_helpers.register_log(str(log))
+    monkeypatch.delenv(stack_helpers.KEEP_LOGS_ENV, raising=False)
+    assert stack_helpers.keep_record('JOIN STALL: something', 'join_stall') == ''
+    monkeypatch.setenv(stack_helpers.KEEP_LOGS_ENV, str(tmp_path / 'kept'))
+    kept = stack_helpers.keep_record('JOIN STALL: something', 'join_stall')
+    assert os.path.basename(kept).endswith(
+        'test_a_record_of_a_test_that_did_not_fail_is_kept_with_its_logs__join_stall')
+    with open(os.path.join(kept, 'RECORD.txt'), encoding='utf-8') as handle:
+        assert handle.read() == 'JOIN STALL: something\n'
+    assert any(name.endswith('launch.log') for name in os.listdir(kept))
