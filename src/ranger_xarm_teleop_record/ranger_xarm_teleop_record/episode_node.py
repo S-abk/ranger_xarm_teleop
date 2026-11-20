@@ -874,9 +874,17 @@ class EpisodeNode(Node):
                 client, request = self.param_requests.pop(key, (None, None))
                 if request is not None:
                     client.remove_pending_request(request)
-                self.get_logger().warning(
-                    f'no answer from {target} to the request for its parameter {silent} '
-                    f'within {read.timeout_s:g} s; asking again')
+                # A node answers nothing while it starts (MoveIt Servo for up to 6 s): the
+                # first silence is information, a second one is worth a warning.
+                if read.restarts == 1:
+                    self.get_logger().info(
+                        f'no answer yet from {target} to the request for its parameter '
+                        f'{silent} after {read.timeout_s:g} s (it may still be starting); '
+                        'asking again')
+                else:
+                    self.get_logger().warning(
+                        f'no answer from {target} to the request for its parameter {silent} '
+                        f'within {read.timeout_s:g} s, {read.restarts} times now; asking again')
             self._ask_parameters(key, NAMES, ListParameters.Request())
 
     def _ask_parameters(self, key, step, request) -> None:
