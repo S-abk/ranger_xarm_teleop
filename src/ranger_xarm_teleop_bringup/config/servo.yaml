@@ -19,7 +19,10 @@ is_primary_planning_scene_monitor: false    # move_group owns the planning scene
 monitored_planning_scene_topic: /monitored_planning_scene
 joint_topic: /joint_states
 check_collisions: true              # G-6 layer 1; the teleop node refuses to run without it
-collision_check_rate: 25.0
+# 50 Hz, once per target: at 25 Hz the 10 mm self-collision band below was crossed in one or
+# two checks at teleop's speeds and now and then in none, so the arm was halted without the
+# slow-down before it.
+collision_check_rate: 50.0
 self_collision_proximity_threshold: 0.01
 scene_collision_proximity_threshold: 0.02
 # Not applied to joint-jog commands; the teleop node's solver handles singularities.
