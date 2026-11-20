@@ -84,6 +84,7 @@ from ranger_xarm_teleop_bridge.bridge_node import (HEAD_POSE_TOPIC, JOY_TOPIC,
                                                    POSE_TOPICS, STATUS_QOS, STATUS_TOPIC)
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, InputStatus, TeleopState
 from ranger_xarm_teleop_interfaces.srv import GetJointPath, SetArmOwner
+from ranger_xarm_teleop_servo import calls
 from ranger_xarm_teleop_servo import gripper as grip
 from ranger_xarm_teleop_servo import keepout as ko
 from ranger_xarm_teleop_servo import params as gate_params
@@ -152,6 +153,13 @@ INPUT_GAP_WINDOW_S = 0.2    # the longest gap between input callbacks is kept th
 OWNER_TIMEOUT_S = 0.5       # mux state older than this counts as "no owner"
 SERVICE_TIMEOUT_S = 1.0     # a Servo or mux call without an answer is abandoned
 VERIFY_PERIOD_S = 1.0       # how often MoveIt Servo's caps and collision checking are re-read
+DESCRIPTION_TIMEOUT_S = 2.0     # a request for Servo's description without an answer is repeated
+# The parameter service of MoveIt Servo is read by other nodes too, some of them in bursts,
+# and a client's reply queue holds the replies to all of them (calls.py).
+PARAMETER_CLIENT_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                                  durability=DurabilityPolicy.VOLATILE,
+                                  history=HistoryPolicy.KEEP_LAST,
+                                  depth=calls.PARAMETER_REPLY_DEPTH)
 REQUEST_RETRY_S = 1.0       # pause between ownership requests after a refusal
 
 # MoveIt Servo interface states.
@@ -435,12 +443,15 @@ class TeleopNode(Node):
         self.keepout_floor = math.inf       # clearance the next cycle may not fall below
         self.servo_description_compared = False
         self.servo_pairs_checked = False    # rigid self-collision pairs reported once
+        # Both are asked again until MoveIt Servo answers. While the first is wanted the
+        # solver is not ready: the keep-out model has not been compared with what Servo checks.
+        self.description_read = calls.Reread('its robot description', DESCRIPTION_TIMEOUT_S)
+        self.pairs_read = calls.Reread('its robot description and SRDF', DESCRIPTION_TIMEOUT_S)
         self.servo_rigid_pairs: Optional[list] = None   # None: not derived (yet)
         self.path = PathRecorder()
         self._idle_count = 0
         self._idle_clearance = None
         self._recording = False
-        self.servo_description_pending = False
         # Joint states and MoveIt Servo's output arrive at the controller rate. A second
         # node on its own executor thread receives both, so they never queue in front of
         # the headset input in this node's executor. Each callback stores one tuple (a
@@ -542,9 +553,11 @@ class TeleopNode(Node):
 
         self.pause_client = self.create_client(SetBool, f'{servo}/pause_servo')
         self.type_client = self.create_client(ServoCommandType, f'{servo}/switch_command_type')
-        self.servo_params_client = self.create_client(GetParameters, f'{servo}/get_parameters')
+        self.servo_params_client = self.create_client(GetParameters, f'{servo}/get_parameters',
+                                                      qos_profile=PARAMETER_CLIENT_QOS)
         self.servo_description_client = self.create_client(GetParameters,
-                                                           f'{servo}/get_parameters')
+                                                           f'{servo}/get_parameters',
+                                                           qos_profile=PARAMETER_CLIENT_QOS)
         self.owner_client = self.create_client(SetArmOwner, SET_OWNER_SERVICE)
 
         self.create_service(Trigger, DISARM_SERVICE, self._on_disarm)
@@ -966,7 +979,7 @@ class TeleopNode(Node):
         Servo's commanded state must agree with the measured one.
         """
         ready = (self.arm is not None and self.keepout is not None and not self.solver_fault
-                 and not self.keepout_fault and not self.servo_description_pending)
+                 and not self.keepout_fault and not self.description_read.wanted)
         if not self.state.engaged or self.first_command_at is None:
             return ready, True
         reference = self.reference(now)
@@ -1165,6 +1178,7 @@ class TeleopNode(Node):
             self.gripper_cycle(now, owner, joints, stamp, tool_age)
             marks.append(('gripper', self.mono()))
         self.publish_calibration(stamp)
+        self.watch_servo_reads(now)
         self.manage_servo(now, output.want_servo_active)
         marks.append(('servo calls', self.mono()))
         self.manage_ownership(now, owner)
@@ -1674,7 +1688,7 @@ class TeleopNode(Node):
 
     def check_servo_rigid_pairs(self) -> None:
         """
-        Ask MoveIt Servo once for its description and SRDF; log the rigid pairs it checks.
+        Ask MoveIt Servo for its description and SRDF; log the rigid pairs it checks, once.
 
         A pair with no joint of the servoed group between its links keeps its distance
         however the arm moves, yet MoveIt Servo slows every joint while it is within the
@@ -1683,71 +1697,103 @@ class TeleopNode(Node):
         disabled where MoveIt reads its collision matrix. Nothing is taken out of any check
         here: Servo follows move_group's collision matrix, not this node.
         """
-        if self.servo_pairs_checked or not self.servo_description_client.service_is_ready():
+        if self.servo_pairs_checked:
             return
         self.servo_pairs_checked = True
-        future = self.servo_description_client.call_async(GetParameters.Request(
-            names=['robot_description', 'robot_description_semantic',
-                   'moveit_servo.move_group_name']))
+        self.pairs_read.start()
+        self.watch_servo_reads(self.mono())
 
-        def answered(done) -> None:
-            log = self.get_logger()
-            try:
-                values = done.result().values
-            except Exception as err:  # noqa: B902 - reported; nothing depends on it
-                log.warning(f'MoveIt Servo description and SRDF not read: {err}')
-                self.servo_pairs_checked = False
-                return
-            texts = [v.string_value for v in values] if len(values) == 3 else []
-            if not texts or not all(texts):
-                log.warning('MoveIt Servo reports no robot_description, '
-                            'robot_description_semantic or move_group_name; its '
-                            'self-collision pairs were not checked')
-                return
-            try:
-                pairs = rigid_pairs.rigid_pairs(*texts)
-            except rigid_pairs.DescriptionError as err:
-                log.warning(f"MoveIt Servo's self-collision pairs were not checked: {err}")
-                return
-            self.servo_rigid_pairs = pairs
-            if not pairs:
-                log.info(f'MoveIt Servo: no enabled self-collision pair without a joint of '
-                         f'{texts[2]!r} between its links')
-                return
-            log.warning(
-                f'MoveIt Servo checks {len(pairs)} self-collision pairs with no joint of '
-                f'{texts[2]!r} between the two links: arm motion cannot change their '
-                'distance, yet Servo slows every joint while one is within its '
-                'self-collision threshold (for example with the gripper closed). Disable '
-                "them in the SRDF move_group reads (Servo follows move_group's collision "
-                'matrix):\n' + '\n'.join(rigid_pairs.srdf_lines(pairs)))
-        future.add_done_callback(answered)
+    def _pairs_answered(self, done) -> None:
+        log = self.get_logger()
+        try:
+            values = done.result().values
+        except Exception as err:  # noqa: B902 - reported; nothing depends on it
+            log.warning(f'MoveIt Servo description and SRDF not read: {err}')
+            self.servo_pairs_checked = False
+            return
+        texts = [v.string_value for v in values] if len(values) == 3 else []
+        if not texts or not all(texts):
+            log.warning('MoveIt Servo reports no robot_description, '
+                        'robot_description_semantic or move_group_name; its '
+                        'self-collision pairs were not checked')
+            return
+        try:
+            pairs = rigid_pairs.rigid_pairs(*texts)
+        except rigid_pairs.DescriptionError as err:
+            log.warning(f"MoveIt Servo's self-collision pairs were not checked: {err}")
+            return
+        self.servo_rigid_pairs = pairs
+        if not pairs:
+            log.info(f'MoveIt Servo: no enabled self-collision pair without a joint of '
+                     f'{texts[2]!r} between its links')
+            return
+        log.warning(
+            f'MoveIt Servo checks {len(pairs)} self-collision pairs with no joint of '
+            f'{texts[2]!r} between the two links: arm motion cannot change their '
+            'distance, yet Servo slows every joint while one is within its '
+            'self-collision threshold (for example with the gripper closed). Disable '
+            "them in the SRDF move_group reads (Servo follows move_group's collision "
+            'matrix):\n' + '\n'.join(rigid_pairs.srdf_lines(pairs)))
 
     def compare_servo_description(self) -> None:
-        """Ask MoveIt Servo once for its robot description and compare it with the model's."""
-        if (self.servo_description_compared or self.keepout is None
-                or not self.servo_description_client.service_is_ready()):
+        """
+        Ask MoveIt Servo for its robot description and compare it with the model's, once.
+
+        Until it has answered the solver is not ready (``solver_checks``): teleop does not
+        engage on a keep-out model that was never compared with what Servo checks.
+        """
+        if self.servo_description_compared or self.keepout is None:
             return
         self.servo_description_compared = True
-        self.servo_description_pending = True
-        future = self.servo_description_client.call_async(
-            GetParameters.Request(names=['robot_description']))
+        self.description_read.start()
+        self.watch_servo_reads(self.mono())
 
-        def answered(done) -> None:
-            self.servo_description_pending = False
-            try:
-                values = done.result().values
-            except Exception as err:  # noqa: B902 - reported; Servo is verified otherwise
-                self.get_logger().warning(f'MoveIt Servo robot description not read: {err}')
-                self.servo_description_compared = False
-                return
-            text = values[0].string_value if len(values) == 1 else ''
-            if not text:
-                self.get_logger().warning('MoveIt Servo reports no robot_description; the '
-                                          'link keep-out model was not compared with it')
-            elif text != self.urdf:
-                self._compare_description(text, "MoveIt Servo's robot description")
-        future.add_done_callback(answered)
+    def _description_answered(self, done) -> None:
+        try:
+            values = done.result().values
+        except Exception as err:  # noqa: B902 - reported; Servo is verified otherwise
+            self.get_logger().warning(f'MoveIt Servo robot description not read: {err}')
+            self.servo_description_compared = False
+            return
+        text = values[0].string_value if len(values) == 1 else ''
+        if not text:
+            self.get_logger().warning('MoveIt Servo reports no robot_description; the '
+                                      'link keep-out model was not compared with it')
+        elif text != self.urdf:
+            self._compare_description(text, "MoveIt Servo's robot description")
+
+    def watch_servo_reads(self, now: float) -> None:
+        """
+        Send the description requests that are due; ask again where no answer came.
+
+        A reply can be lost without this node being told (``calls.py``), so neither request
+        waits for ever: after DESCRIPTION_TIMEOUT_S the request is given up, that is logged,
+        and the same read is sent again. Called every cycle.
+        """
+        client = self.servo_description_client
+        for read, names, use, effect in (
+                (self.description_read, ['robot_description'], self._description_answered,
+                 '; teleop stays disabled until it answers'),
+                (self.pairs_read, ['robot_description', 'robot_description_semantic',
+                                   'moveit_servo.move_group_name'], self._pairs_answered, '')):
+            given_up = read.lost(now)
+            if given_up is not None:
+                client.remove_pending_request(given_up)     # a late answer is not delivered
+                self.get_logger().warning(
+                    f'MoveIt Servo did not answer the request for {read.what} within '
+                    f'{read.timeout_s:g} s (asked {read.attempts} time'
+                    f'{"" if read.attempts == 1 else "s"}); asking again{effect}')
+            if not read.due():
+                continue
+            if not client.service_is_ready():
+                self.get_logger().warning(
+                    f"waiting for MoveIt Servo's parameter service to ask for {read.what}"
+                    f'{effect}', throttle_duration_sec=5.0)
+                continue
+            future = client.call_async(GetParameters.Request(names=list(names)))
+            read.sent(future, now)
+            future.add_done_callback(
+                lambda done, read=read, use=use: read.answered(done) and use(done))
 
     def _servo_mismatch(self, values) -> str:
         """
