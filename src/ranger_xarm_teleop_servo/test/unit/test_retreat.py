@@ -105,7 +105,7 @@ def test_more_clearance_asked_goes_further_back(robot):
 def test_no_recorded_path_moves_nothing_and_says_what_to_do(robot):
     plan = _plan(robot, np.zeros(0), np.zeros((0, 6)), READY)
     assert not plan.ok and plan.postures is None
-    assert 'no recorded path' in plan.message and 'Nothing moved' in plan.message
+    assert 'no recorded path' in plan.message and 'No motion goal sent' in plan.message
     assert 'Next:' in plan.message
 
 
@@ -132,7 +132,7 @@ def test_no_clear_point_within_the_bounds_moves_nothing_and_gives_the_best(robot
     times, postures, halted = _into_contact(arm, model, extra, READY, -0.30)
     plan = _plan(robot, times, postures, halted, max_tool_travel=0.003)
     assert not plan.ok and plan.postures is None
-    assert 'the best clearance is' in plan.message and 'Nothing moved' in plan.message
+    assert 'the best clearance is' in plan.message and 'No motion goal sent' in plan.message
     assert 'Next:' in plan.message
 
 
