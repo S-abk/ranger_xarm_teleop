@@ -1162,6 +1162,82 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
     return start, discarded
 
 
+# ---- a process that joins the graph during an engagement ----
+#
+# A process that joins can stall an existing node for about a third of a second: the
+# middleware sleeps 333 ms, up to three times, while a node opens the newcomer's shared-memory
+# port (interface contract, "Service and action calls": every process of a session starts
+# before arming). The gate then releases the clutch on stale data, as it must.
+
+JOIN_STALL_REASONS = (TeleopState.HOLD_INPUT_STALE, TeleopState.HOLD_TOOL_POSE_STALE,
+                      TeleopState.HOLD_SERVO_NOT_READY)
+JOIN_STALL_MIN_S = 0.25     # one sleep is 0.333 s
+JOIN_STALL_MAX_S = 1.2      # three in a row are 1.0 s
+JOIN_WINDOW_S = 8.0         # a newcomer has been discovered up to 3 s after its start
+JOIN_LOOK_BACK_S = 1.5
+JOIN_LOOK_AHEAD_S = 1.0     # an input pause outlasts the release it causes
+
+
+def pauses_around(probe, when, servo_output=()):
+    """
+    Return the longest pause of each stream the probe takes around the time ``when``.
+
+    The input by the stamps its source gave (its time of sending), the others by their
+    arrival at the probe. A pause is the time between two messages, so a stream that simply
+    ended is not one. Call this at least JOIN_LOOK_AHEAD_S after ``when``.
+    """
+    begin, end = when - JOIN_LOOK_BACK_S, when + JOIN_LOOK_AHEAD_S
+
+    def longest(times):
+        return max((b - a for a, b in zip(times, times[1:])), default=0.0)
+
+    return {
+        'the input source sent no frame': longest(
+            [stamp for arrival, stamp in probe.input_stamps_since(begin - 0.3)
+             if arrival <= end + 0.3]),
+        'no teleop state reached the probe': longest(
+            [t for t, _ in probe.timed_states_since(begin) if t <= end]),
+        'no joint state reached the probe': longest(
+            [t for t, _ in probe.timed_joints_since(begin) if t <= end]),
+        "none of MoveIt Servo's output reached the probe": longest(
+            [t for t in servo_output if begin <= t <= end]),
+    }
+
+
+def join_stall(joined_at, when, reason, pauses):
+    """
+    Return ``(True, text)`` when a release is the stall that a joining process causes.
+
+    ``joined_at`` is when the process was started, ``when`` and ``reason`` the release and
+    its ``hold_reason``, ``pauses`` the result of ``pauses_around``. All three are needed:
+
+    * the release came after the process was started, within JOIN_WINDOW_S;
+    * its reason is one a stalled node causes: stale input, a stale tool pose, or MoveIt
+      Servo's output not following. Never a missing pose, a halt or anything else;
+    * a stream shows a pause of stall length around the release.
+
+    Anything else is ``(False, why not)``.
+    """
+    after = when - joined_at
+    if not 0.0 <= after <= JOIN_WINDOW_S:
+        return False, (f'it came {abs(after):.2f} s {"after" if after > 0.0 else "before"} the '
+                       f'process was started, not within {JOIN_WINDOW_S:g} s after it')
+    if reason not in JOIN_STALL_REASONS:
+        return False, (f'hold_reason {reason} is not what a stalled node causes (stale input '
+                       f'{TeleopState.HOLD_INPUT_STALE}, stale tool pose '
+                       f'{TeleopState.HOLD_TOOL_POSE_STALE}, Servo output stopped '
+                       f'{TeleopState.HOLD_SERVO_NOT_READY})')
+    listed = ', '.join(f'{name} for {gap * 1000.0:.0f} ms' for name, gap in pauses.items())
+    stalled = {name: gap for name, gap in pauses.items()
+               if JOIN_STALL_MIN_S <= gap <= JOIN_STALL_MAX_S}
+    if not stalled:
+        return False, (f'no stream shows a pause of stall length ({JOIN_STALL_MIN_S:g} to '
+                       f'{JOIN_STALL_MAX_S:g} s) around it; the longest: {listed}')
+    name = max(stalled, key=stalled.get)
+    return True, (f'{after:.2f} s after the process was started {name} for '
+                  f'{stalled[name] * 1000.0:.0f} ms')
+
+
 def commanded_period_speed(samples):
     """
     Return the largest joint speed in ``samples`` ((stamp in s, positions)) of mock execution.

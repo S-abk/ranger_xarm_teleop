@@ -602,3 +602,80 @@ def test_mock_execution_speed_needs_three_states_and_skips_a_repeated_stamp():
     assert stack_helpers.commanded_period_speed([(0.0, [0.0]), (0.01, [0.5])]) == 0.0
     repeated = [(0.0, [0.0]), (0.0, [0.0]), (0.01, [0.5]), (0.02, [0.5 + 0.019])]
     assert stack_helpers.commanded_period_speed(repeated) == pytest.approx(1.9)
+
+
+# ---- a release when a process joins: the stall and nothing else ----
+
+BY_INPUT = TeleopState.HOLD_INPUT_STALE
+BY_POSE = TeleopState.HOLD_TOOL_POSE_STALE
+BY_SERVO = TeleopState.HOLD_SERVO_NOT_READY
+QUIET = {'the input source sent no frame': 0.012, 'no teleop state reached the probe': 0.021,
+         'no joint state reached the probe': 0.008,
+         "none of MoveIt Servo's output reached the probe": 0.020}
+
+
+def test_a_stale_release_after_the_join_with_a_pause_of_stall_length_is_the_join_stall():
+    # The three forms seen: the input source paused, the teleop node, the robot side.
+    for reason, stream, gap in (
+            (BY_INPUT, 'the input source sent no frame', 0.322),
+            (BY_INPUT, 'no teleop state reached the probe', 0.341),
+            (BY_SERVO, 'no teleop state reached the probe', 0.334),
+            (BY_POSE, 'no joint state reached the probe', 0.333),
+            (BY_SERVO, "none of MoveIt Servo's output reached the probe", 0.66),
+            (BY_INPUT, 'the input source sent no frame', 1.0)):       # three sleeps in a row
+        stalled, text = stack_helpers.join_stall(100.0, 102.4, reason, {**QUIET, stream: gap})
+        assert stalled, text
+        assert '2.40 s after the process was started' in text and stream in text
+        assert f'{gap * 1000.0:.0f} ms' in text
+
+
+@pytest.mark.parametrize('reason', [
+    TeleopState.HOLD_POSE_ABSENT, TeleopState.HOLD_HEAD_ABSENT, TeleopState.HOLD_SERVO_HALTED,
+    TeleopState.HOLD_CLUTCH_RELEASED, TeleopState.HOLD_NOT_OWNER, TeleopState.HOLD_SOLVER,
+    TeleopState.HOLD_INPUT_JUMP, TeleopState.HOLD_SEQ_BACKWARDS, TeleopState.HOLD_NOT_ARMED])
+def test_a_release_for_any_other_reason_is_not_the_join_stall(reason):
+    pauses = {**QUIET, 'the input source sent no frame': 0.33}       # even with a pause
+    stalled, text = stack_helpers.join_stall(100.0, 102.4, reason, pauses)
+    assert not stalled and f'hold_reason {reason} is not what a stalled node causes' in text
+
+
+def test_a_stale_release_before_the_join_or_long_after_it_is_not_the_join_stall():
+    pauses = {**QUIET, 'the input source sent no frame': 0.33}
+    stalled, text = stack_helpers.join_stall(100.0, 99.6, BY_INPUT, pauses)
+    assert not stalled and '0.40 s before the process was started' in text
+    late = 100.0 + stack_helpers.JOIN_WINDOW_S + 0.5
+    stalled, text = stack_helpers.join_stall(100.0, late, BY_INPUT, pauses)
+    assert not stalled and 'after the process was started, not within' in text
+
+
+def test_a_stale_release_without_a_pause_of_stall_length_is_not_the_join_stall():
+    # Nothing paused, a pause too short for a stall, and one too long for it.
+    for pauses in (QUIET, {**QUIET, 'the input source sent no frame': 0.12},
+                   {**QUIET, 'no teleop state reached the probe': 0.24},
+                   {**QUIET, 'no joint state reached the probe': 1.5},
+                   {**QUIET, 'the input source sent no frame': 3.0}):
+        stalled, text = stack_helpers.join_stall(100.0, 102.4, BY_INPUT, pauses)
+        assert not stalled and 'no stream shows a pause of stall length' in text
+        assert 'the input source sent no frame for' in text      # what was seen is listed
+
+
+def test_pauses_are_between_two_messages_by_send_stamp_or_arrival():
+    class _Probe:
+
+        def input_stamps_since(self, t):
+            # Arrivals bunched (the probe paused); the stamps show the source's own pause.
+            return [(a, s) for a, s in ((9.00, 50.00), (9.01, 50.01), (9.50, 50.33),
+                                        (9.51, 50.34), (9.52, 50.35)) if a >= t]
+
+        def timed_states_since(self, t):
+            return [(x, None) for x in (9.00, 9.02, 9.04, 9.40, 9.42) if x >= t]
+
+        def timed_joints_since(self, t):
+            return [(x, None) for x in (9.000, 9.007, 9.014) if x >= t]       # then it ends
+
+    pauses = stack_helpers.pauses_around(_Probe(), 9.5, servo_output=[7.0, 9.1, 9.12, 12.0])
+    assert pauses['the input source sent no frame'] == pytest.approx(0.32)
+    assert pauses['no teleop state reached the probe'] == pytest.approx(0.36)
+    # A stream that ended is not a pause.
+    assert pauses['no joint state reached the probe'] == pytest.approx(0.007)
+    assert pauses["none of MoveIt Servo's output reached the probe"] == pytest.approx(0.02)
