@@ -180,5 +180,5 @@ def status_text(statuses) -> str:
 
 def unanswered_goal(what: str, seconds: float, statuses, cancel, motion: Motion) -> str:
     """Return the report for a request about a goal that got no answer."""
-    return (f'no answer to {what} within {seconds:g} s, so its state is UNKNOWN: '
+    return (f'no answer to {what} within {seconds:g} s, so its state is not known: '
             f'{status_text(statuses)}; {cancel_text(cancel)}; {motion.text()}')

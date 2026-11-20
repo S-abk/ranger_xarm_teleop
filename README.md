@@ -538,6 +538,12 @@ at most, without planning. It moves nothing when there is no path, the arm has m
 the path goes deeper into contact on the way back or no point within the bounds is clear, and
 says why and what to do. Simulation only, like `move_arm.py`.
 
+All three tools send their motion goal once. A reply can be lost on the way, so when no answer
+comes, to the goal or to the request for its result, the goal counts as unknown, not as
+rejected: the tool cancels every goal of that controller and prints how the controller listed
+the goal, what the cancel achieved and what the joints did (`UNKNOWN`, exit status 1). Look at
+the arm before running the tool again.
+
 (simulation only, like `tools/move_arm.py`, which prints why a goal was rejected). Without
 `--controller`, `move_arm.py` asks the command mux which controller is MoveIt's (failing that,
 it takes the one arm trajectory controller other than teleop's); it never sends to teleop's

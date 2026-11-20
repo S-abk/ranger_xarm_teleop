@@ -149,7 +149,7 @@ def test_a_joint_that_went_and_came_back_counts_as_moved():
 def test_the_report_of_an_unanswered_goal_says_what_was_seen_and_never_guesses():
     at_rest = calls.motion_seen(rows(*[(k * 0.1, 0.5, -0.2) for k in range(31)]), NAMES, 1.0, 3.0)
     text = calls.unanswered_goal('the goal', 10.0, [], (0, 0), at_rest)
-    assert 'UNKNOWN' in text and 'never listed the goal' in text
+    assert 'its state is not known' in text and 'never listed the goal' in text
     assert 'no goal to cancel' in text and 'did not move' in text
     moving = calls.motion_seen(rows(*[(k * 0.1, 0.5 + 0.01 * k, -0.2) for k in range(31)]),
                                NAMES, 1.0, 3.0)
