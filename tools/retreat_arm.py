@@ -70,6 +70,7 @@ from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  
 
 LEAVES_PATH = 0.02          # rad: the arm this far from the path stops the motion
 STALE_JOINTS_S = 0.5        # joint states older than this stop the motion
+STATE_WAIT_S = 5.0          # how long the first teleop state is waited for
 TELEOP_NODE = '/teleop_servo'
 DEFAULT_MIN_ARMING_CONDITIONING = DEFAULTS['min_arming_conditioning']
 
@@ -181,8 +182,12 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
                   'of them has no value')
             return 2
         if seen['margin'] is None:
-            print('MISSING, no motion goal sent: no /teleop/state arrived, which carries the '
-                  'keep-out margin')
+            # This tool has only just started: the first teleop state may still be on its way.
+            print('waiting for /teleop/state, which carries the keep-out margin', flush=True)
+            spin(STATE_WAIT_S, lambda: seen['margin'] is not None)
+        if seen['margin'] is None:
+            print(f'MISSING, no motion goal sent: no /teleop/state arrived within '
+                  f'{STATE_WAIT_S:g} s, which carries the keep-out margin')
             return 2
         v = values.values
         base, tip = v[0].string_value, v[1].string_value
