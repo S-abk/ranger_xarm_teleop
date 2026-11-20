@@ -34,7 +34,7 @@ rejection is printed with its reason; ``tools/recover_arm.py`` disarms and then 
 Exit status 0 only when the goal was accepted and succeeded.
 
 The goal is sent once. Without an answer to it, or to the request for its result, its
-state is unknown, not rejected: every goal of that controller is cancelled, and what the
+state is unknown, not rejected: the controller is asked to cancel it, and what the
 controller listed and what the joints did is printed (exit status 1).
 """
 
@@ -73,7 +73,7 @@ def mux_controllers(calls: Calls, client):
     """Return the command mux's (moveit, teleop, controller manager) names, or Nones."""
     from rcl_interfaces.srv import GetParameters
     names = ['moveit_controller', 'teleop_controller', 'controller_manager']
-    answer = calls.read(client, GetParameters.Request(names=names), 2.0, quiet=True)
+    answer = calls.read(client, GetParameters.Request(names=names), 2.0)
     if answer is None or len(answer.values) != len(names):
         return None, None, None
     values = [v.string_value or None for v in answer.values]
@@ -83,7 +83,7 @@ def mux_controllers(calls: Calls, client):
 def loaded_controllers(calls: Calls, client):
     """Return (name, type, state, required command interfaces) per controller, or None."""
     from controller_manager_msgs.srv import ListControllers
-    answer = calls.read(client, ListControllers.Request(), 3.0, quiet=True)
+    answer = calls.read(client, ListControllers.Request(), 3.0)
     if answer is None:
         return None
     return [(c.name, c.type, c.state, list(c.required_command_interfaces))
@@ -149,7 +149,8 @@ def main() -> int:
         print(f'controller: {name}' + ('' if args.controller else
                                        ' (from the command mux)' if moveit else
                                        " (the only arm trajectory controller besides teleop's)"))
-        action = Goal(calls, FollowJointTrajectory, f'/{name}/follow_joint_trajectory')
+        action = Goal(calls, FollowJointTrajectory, f'/{name}/follow_joint_trajectory',
+                      ARM_JOINTS)
         if not action.ready(10.0):
             if action.client.server_is_ready():
                 print(f'nothing sent: the action server /{name}/follow_joint_trajectory did '
@@ -167,18 +168,17 @@ def main() -> int:
                                      nanosec=int((args.seconds - seconds) * 1e9)))]
         answer = action.send(goal)
         if answer == 'unknown':
-            print('goal UNKNOWN: ' + action.unanswered('the goal', GOAL_ANSWER_S, ARM_JOINTS))
+            print('goal UNKNOWN: ' + action.unanswered('the goal', GOAL_ANSWER_S))
             return 1
         if answer == 'rejected':
             calls.spin(2.0, lambda: bool(owner))    # the mux reports it several times a second
             print(f'goal REJECTED: {rejection_reason(owner[-1] if owner else None)}; '
-                  + calls.watch(action.sent_at, ARM_JOINTS, limit=0.0).text())
+                  + calls.watch(limit=0.0).text())
             return 1
         wait = args.seconds + 30.0
         done, why = action.result(wait)
         if done is None:
-            print('goal UNKNOWN: ' + action.unanswered("the request for the goal's result", wait,
-                                                       ARM_JOINTS))
+            print('goal UNKNOWN: ' + action.unanswered("the request for the goal's result", wait))
             return 1
         ok = done.result.error_code == 0 and done.status == 4
         print('goal succeeded' if ok else f'goal FAILED: {done}')

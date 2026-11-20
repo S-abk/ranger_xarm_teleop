@@ -27,10 +27,10 @@ that point's time. MODE says which answer is lost:
     goal_moves    the goal is accepted and executed; the answer to it is never sent
     goal_ignored  the goal request is lost: no answer, nothing listed, nothing moves
     result_lost   accepted and executed; the result is never sent, nor is the answer to a
-                  request to cancel every goal
+                  request to cancel that goal
 
-A request to cancel a goal that does not exist is always answered (the tools try the cancel
-path with one before they send a goal). Every request is printed.
+A request to cancel a goal the controller never had is always answered (the tools try the
+cancel path with one before they send a goal). Every request is printed.
 """
 
 import sys
@@ -114,22 +114,25 @@ def main() -> int:  # noqa: C901 - one small state machine
         return response
 
     def on_cancel(request, response):
-        every = not any(request.goal_info.goal_id.uuid)
+        wanted = bytes(request.goal_info.goal_id.uuid)
         goal = state['goal']
-        active = goal is not None and goal['status'] == GoalStatus.STATUS_EXECUTING
-        if every and mode == 'result_lost':
-            say('cancel request: every goal, never answered')
+        mine = goal is not None and bytes(goal['id'].uuid) == wanted
+        if not mine:
+            # (A request without an id would mean every goal; the tools never send one.)
+            response.return_code = CancelGoal.Response.ERROR_UNKNOWN_GOAL_ID
+            say('cancel request: every goal' if not any(wanted) else
+                'cancel request: a goal the controller never had')
+        elif mode == 'result_lost':
+            say('cancel request: the goal, never answered')
             return response
-        if every and active:
+        elif goal['status'] == GoalStatus.STATUS_EXECUTING:
             list_status(GoalStatus.STATUS_CANCELING)
             list_status(GoalStatus.STATUS_CANCELED)
             response.goals_canceling = [GoalInfo(goal_id=goal['id'], stamp=goal['stamp'])]
-            say(f'cancel request: every goal, cancelled at {state["q"][0]:.3f} rad')
-        elif every:
-            say('cancel request: every goal, none active')
+            say(f'cancel request: the goal, cancelled at {state["q"][0]:.3f} rad')
         else:
-            response.return_code = CancelGoal.Response.ERROR_UNKNOWN_GOAL_ID
-            say('cancel request: a goal that does not exist')
+            response.return_code = CancelGoal.Response.ERROR_GOAL_TERMINATED
+            say('cancel request: the goal, which had ended')
         state['later'].append((answer_cancel, response))
         return response
 

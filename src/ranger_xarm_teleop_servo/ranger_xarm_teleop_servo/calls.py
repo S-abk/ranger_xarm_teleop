@@ -101,84 +101,129 @@ class Reread:
 # ---- a motion goal without an answer ----
 #
 # A goal is never sent twice, and a missing answer is not a rejection: the controller may be
-# moving. The caller cancels, watches the goal's status and the joints, and reports what it
-# saw. "Nothing moved" is said only when the joints were watched and did not move.
+# moving. The caller cancels its own goal, watches the goal's status and the joints, and
+# reports what it saw. "The joints did not move" is said only when they were watched from
+# before the goal went out and did not move.
 
 GOAL_STATUS = {0: 'unknown', 1: 'accepted', 2: 'executing', 3: 'cancelling', 4: 'succeeded',
                5: 'cancelled', 6: 'aborted'}        # action_msgs/msg/GoalStatus
-GOAL_ACTIVE = (1, 2, 3)
 STILL_S = 1.0               # joints are still when none changed by STILL_RAD over this long
 STILL_RAD = 0.001
 CANCEL_NO_ERROR = 0         # action_msgs/srv/CancelGoal return codes
 CANCEL_REASONS = {1: 'the server rejected the cancel request',
-                  2: 'the server knows no such goal',
+                  2: 'the server knows no such goal (the goal never reached it)',
                   3: 'the goal had already ended'}
 
 
 class Motion:
-    """What the joint states showed between two moments: how far, and whether it ended."""
+    """
+    What the joint states showed since a mark: how far, and whether it has ended.
+
+    ``from_before`` is False when no joint state from before the mark was at hand: the
+    motion is then counted from the first one after it, and may be larger.
+    """
 
     def __init__(self, known: bool, moved: float = 0.0, still: bool = False,
-                 watched_s: float = 0.0) -> None:
-        self.known, self.moved, self.still, self.watched_s = known, moved, still, watched_s
+                 watched_s: float = 0.0, from_before: bool = True) -> None:
+        self.known, self.moved, self.still = known, moved, still
+        self.watched_s, self.from_before = watched_s, from_before
 
     def text(self) -> str:
         """Say it in words for a report line."""
         if not self.known:
             return 'no joint states arrived, so whether the arm moved is not known'
+        end = 'are still now' if self.still else 'ARE STILL MOVING'
+        if not self.from_before:
+            return (f'the joints moved by {self.moved:.3f} rad or more (no joint state from '
+                    f'before the request was at hand) and {end}')
         if self.moved < STILL_RAD and self.still:
             return (f'the joints did not move (largest change {self.moved:.4f} rad in '
                     f'{self.watched_s:.1f} s)')
-        end = 'are still now' if self.still else 'ARE STILL MOVING'
         return f'the joints moved by up to {self.moved:.3f} rad and {end}'
 
 
-def motion_seen(samples, names, since: float, now: float, still_s: float = STILL_S,
-                still_rad: float = STILL_RAD) -> Motion:
+class JointWatch:
     """
-    Return the motion in ``samples`` ((time, {joint: position}), oldest first) since ``since``.
+    The joints since a mark: the largest excursion of any of them, and whether they rest.
 
-    The reference is the last sample at or before ``since`` (else the first after it).
-    ``still`` needs samples that cover the last ``still_s`` up to ``now``: joint states that
-    stopped arriving do not show an arm at rest.
+    Fed with every joint state. The excursion is kept as a running maximum against the
+    positions at the mark, so it does not depend on how many joint states are kept; only
+    the last few seconds are, to judge rest.
     """
-    rows = [(t, [positions[n] for n in names]) for t, positions in samples
-            if all(n in positions for n in names)]
-    if not rows:
-        return Motion(False)
-    before = [row for row in rows if row[0] <= since]
-    reference = before[-1] if before else rows[0]
-    after = [row for row in rows if row[0] >= reference[0]]
-    moved = max(max(abs(a - b) for a, b in zip(q, reference[1])) for _, q in after)
-    recent = [q for t, q in rows if t >= now - still_s]
-    covered = (rows[-1][0] >= now - 0.5 * still_s and rows[0][0] <= now - still_s
-               and len(recent) >= 2)
-    spread = max((max(q[j] for q in recent) - min(q[j] for q in recent)
-                  for j in range(len(names))), default=0.0) if recent else 0.0
-    return Motion(True, moved, covered and spread < still_rad, now - reference[0])
+
+    def __init__(self, names, still_s: float = STILL_S, still_rad: float = STILL_RAD) -> None:
+        self.names = list(names)
+        self.still_s, self.still_rad = still_s, still_rad
+        self.recent = []            # (time, positions) of the last 2 * still_s
+        self.reference = None       # positions at the mark
+        self.marked_at = None
+        self.from_before = False
+        self.moved = 0.0
+
+    def sample(self, when: float, positions) -> None:
+        """Take one joint state (a mapping of joint name to position)."""
+        if not all(name in positions for name in self.names):
+            return
+        q = [float(positions[name]) for name in self.names]
+        self.recent.append((when, q))
+        while self.recent and self.recent[0][0] < when - 2.0 * self.still_s:
+            del self.recent[0]
+        if self.marked_at is None:
+            return
+        if self.reference is None:
+            self.reference = q      # the first one after the mark: motion before it is unseen
+        self.moved = max(self.moved, max(abs(a - b) for a, b in zip(q, self.reference)))
+
+    def mark(self, when: float, fresh_s: float = 0.5) -> None:
+        """Start counting from now: the reference is the newest joint state, if it is fresh."""
+        self.marked_at, self.moved = when, 0.0
+        fresh = bool(self.recent) and when - self.recent[-1][0] <= fresh_s
+        self.reference = list(self.recent[-1][1]) if fresh else None
+        self.from_before = fresh
+
+    def motion(self, now: float) -> Motion:
+        """Return what was seen since the mark. Rest needs joint states up to ``now``."""
+        if self.marked_at is None or self.reference is None:
+            return Motion(False)
+        recent = [q for when, q in self.recent if when >= now - self.still_s]
+        covered = (len(recent) >= 2 and self.recent[-1][0] >= now - 0.5 * self.still_s
+                   and self.recent[0][0] <= now - self.still_s)
+        spread = max(max(q[j] for q in recent) - min(q[j] for q in recent)
+                     for j in range(len(self.names))) if recent else 0.0
+        return Motion(True, self.moved, covered and spread < self.still_rad,
+                      now - self.marked_at, self.from_before)
 
 
 def cancel_text(answer) -> str:
-    """Say what a cancel request achieved (``answer``: return code and goals, or None)."""
+    """Say what the request to cancel the goal achieved (return code and goals, or None)."""
     if answer is None:
         return 'the cancel request was NOT ANSWERED'
     code, cancelling = answer
-    if code != CANCEL_NO_ERROR:
-        return f'cancel refused: {CANCEL_REASONS.get(code, f"return code {code}")}'
-    if cancelling == 0:
-        return 'the server had no goal to cancel'
-    return f'the server is cancelling {cancelling} goal{"" if cancelling == 1 else "s"}'
+    if code == CANCEL_NO_ERROR:
+        return ('the server is cancelling the goal' if cancelling else
+                'the server had no such goal to cancel')
+    if code in (2, 3):
+        return CANCEL_REASONS[code]
+    return f'not cancelled: {CANCEL_REASONS.get(code, f"return code {code}")}'
 
 
-def status_text(statuses) -> str:
-    """Say what the action server's status topic showed of the goal, in the order seen."""
-    if not statuses:
-        return 'the server never listed the goal'
-    return 'the server listed the goal as ' + ', then '.join(
-        str(GOAL_STATUS.get(status, status)) for status in statuses)
+def status_text(statuses, any_status: bool = True) -> str:
+    """
+    Say what the action server's status topic showed of the goal, in the order seen.
+
+    ``any_status`` is False when no status message arrived at all: then nothing is known
+    about what the server lists.
+    """
+    if statuses:
+        return 'the server listed the goal as ' + ', then '.join(
+            str(GOAL_STATUS.get(status, status)) for status in statuses)
+    if not any_status:
+        return 'no status message of the server arrived, so what it lists is not known'
+    return 'the server did not list the goal'
 
 
-def unanswered_goal(what: str, seconds: float, statuses, cancel, motion: Motion) -> str:
+def unanswered_goal(what: str, seconds: float, statuses, cancel, motion: Motion,
+                    any_status: bool = True) -> str:
     """Return the report for a request about a goal that got no answer."""
     return (f'no answer to {what} within {seconds:g} s, so its state is not known: '
-            f'{status_text(statuses)}; {cancel_text(cancel)}; {motion.text()}')
+            f'{status_text(statuses, any_status)}; {cancel_text(cancel)}; {motion.text()}')

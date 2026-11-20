@@ -37,14 +37,13 @@ uses teleop's controller. Nothing moves when there is no path, the arm is not at
 the path goes deeper into contact on the way back, or no point within the bounds is clear.
 
 **Simulation only**, like ``tools/move_arm.py`` (exit status 3 otherwise). Exit status 0:
-moved and clear, or already clear; 5: refused, nothing sent; 4: not handed back to MoveIt,
-nothing sent; 1: the motion failed, was stopped, or its state is unknown; 2: something is
-missing, nothing sent.
+moved and clear, or already clear; 5: refused, no motion goal sent; 4: not handed back to
+MoveIt, no motion goal sent; 1: the motion failed, was stopped, or its state is unknown; 2:
+something is missing, no motion goal sent.
 
 Every read is asked again when no answer comes. The goal is sent once: without an answer to
-it, or to the request for its result, its state is unknown, not rejected. Every goal of the
-controller is then cancelled, and what the controller listed and what the joints did is
-printed.
+it, or to the request for its result, its state is unknown, not rejected. The controller is
+then asked to cancel it, and what the controller listed and what the joints did is printed.
 """
 
 import argparse
@@ -160,7 +159,7 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         else:
             print('disarm: no /teleop/disarm service (teleop node not running?)')
         if not spin(args.wait, lambda: may_recover(*fresh())[0]):
-            print(f'NOT HANDED BACK, nothing sent: {may_recover(*fresh())[1]} after '
+            print(f'NOT HANDED BACK, no motion goal sent: {may_recover(*fresh())[1]} after '
                   f'{args.wait:.0f} s. If the arm is still moving, wait and run this again.')
             return 4
         print('MoveIt owns the arm, teleop is disarmed')
@@ -171,17 +170,18 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
                  'linear_speed_cap_m_s', 'angular_speed_cap_rad_s']
         values = calls.read(parameters, GetParameters.Request(names=names))
         if values is None:
-            print('MISSING, nothing sent: ' + (
+            print('MISSING, no motion goal sent: ' + (
                 f'no {TELEOP_NODE}/get_parameters service (teleop node not running?)'
                 if calls.silent == NO_SERVICE else
                 'the teleop node did not answer the request for its settings'))
             return 2
         if len(values.values) != len(names):
-            print(f'MISSING, nothing sent: the teleop node answered with {len(values.values)} '
-                  f'of its {len(names)} settings ({", ".join(names)}): one of them has no value')
+            print('MISSING, no motion goal sent: the teleop node answered with '
+                  f'{len(values.values)} of its {len(names)} settings ({", ".join(names)}): one '
+                  'of them has no value')
             return 2
         if seen['margin'] is None:
-            print('MISSING, nothing sent: no /teleop/state arrived, which carries the '
+            print('MISSING, no motion goal sent: no /teleop/state arrived, which carries the '
                   'keep-out margin')
             return 2
         v = values.values
@@ -198,7 +198,7 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         wanted = max(margin, args.clearance)
         reply = calls.read(path_client, GetJointPath.Request())
         if reply is None:
-            print('MISSING, nothing sent: ' + (
+            print('MISSING, no motion goal sent: ' + (
                 'no /teleop/joint_path service (teleop node not running?)'
                 if calls.silent == NO_SERVICE else
                 'the teleop node did not answer the request for its recorded path'))
@@ -218,14 +218,14 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
                                   angular_speed_cap=v[6].double_value)
         spin(2.0, lambda: seen['joints'] is not None)
         if seen['joints'] is None:
-            print('MISSING, nothing sent: no /joint_states')
+            print('MISSING, no motion goal sent: no /joint_states')
             return 2
         positions = dict(seen['joints'])
         try:
             measured = np.array([positions[name] for name in arm.joint_names])
             extra = model.extra_values(positions)
         except (KeyError, ko.ModelError) as err:
-            print(f'MISSING, nothing sent: joint state without {err}')
+            print(f'MISSING, no motion goal sent: joint state without {err}')
             return 2
 
         def valid(q) -> bool:
@@ -258,13 +258,14 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         moveit, teleop, controllers = controllers_of(calls, mux_client, controllers_client)
         name, why = choose_arm_controller(controllers, moveit, teleop)
         if name is None or name == (teleop or TELEOP_CONTROLLER):
-            print(f'MISSING, nothing sent: no MoveIt arm controller ({why or name})')
+            print(f'MISSING, no motion goal sent: no MoveIt arm controller ({why or name})')
             return 2
         # The controller's name is known only now. Its cancel path is tried with a harmless
         # request before any goal goes out.
-        action = Goal(calls, FollowJointTrajectory, f'/{name}/follow_joint_trajectory')
+        action = Goal(calls, FollowJointTrajectory, f'/{name}/follow_joint_trajectory',
+                      list(arm.joint_names))
         if not action.ready(10.0):
-            print('MISSING, nothing sent: ' + (
+            print('MISSING, no motion goal sent: ' + (
                 f'the action server /{name}/follow_joint_trajectory did not answer on its '
                 'cancel path, so a motion could not be stopped'
                 if action.client.server_is_ready() else
@@ -286,16 +287,14 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         spin(2.0, lambda: may_recover(*fresh())[0])
         allowed, why = may_recover(*fresh())
         if not allowed:
-            print(f'NOT HANDED BACK, nothing sent: {why}')
+            print(f'NOT HANDED BACK, no motion goal sent: {why}')
             return 4
-        joint_names = list(arm.joint_names)
         answer = action.send(goal)
         if answer == 'unknown':
-            print('UNKNOWN: ' + action.unanswered('the goal', GOAL_ANSWER_S, joint_names))
+            print('UNKNOWN: ' + action.unanswered('the goal', GOAL_ANSWER_S))
             return 1
         if answer == 'rejected':
-            print('FAILED: the controller rejected the goal; '
-                  + calls.watch(action.sent_at, joint_names, limit=0.0).text())
+            print('FAILED: the controller rejected the goal; ' + calls.watch(limit=0.0).text())
             return 1
 
         def leaves() -> str:
@@ -317,11 +316,10 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         except KeyboardInterrupt:
             done, stopped = None, 'interrupted'
         if stopped == 'unknown':
-            print('UNKNOWN: ' + action.unanswered("the request for the goal's result", wait,
-                                                  joint_names))
+            print('UNKNOWN: ' + action.unanswered("the request for the goal's result", wait))
             return 1
         if stopped:
-            cancel, motion = action.stop(joint_names)
+            cancel, motion = action.stop()
             print(f'STOPPED: {stopped}; {rules.cancel_text(cancel)}; {motion.text()}')
             return 1
         spin(1.0)

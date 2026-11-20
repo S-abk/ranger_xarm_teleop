@@ -107,63 +107,103 @@ def test_parameter_clients_keep_more_replies_than_the_default_of_ten():
 NAMES = ('j1', 'j2')
 
 
-def rows(*points):
-    return [(t, {'j1': a, 'j2': b, 'finger': 0.0}) for t, a, b in points]
+def watch(points, mark_at=None, names=NAMES):
+    """Return a JointWatch fed with (time, j1, j2) points, marked at ``mark_at`` in between."""
+    seen = calls.JointWatch(names)
+    for t, a, b in points:
+        if mark_at is not None and seen.marked_at is None and t > mark_at:
+            seen.mark(mark_at)
+        seen.sample(t, {'j1': a, 'j2': b, 'finger': 0.0})
+    if mark_at is not None and seen.marked_at is None:
+        seen.mark(mark_at)
+    return seen
 
 
 def test_an_arm_that_did_not_move_is_reported_so_only_when_it_was_watched_at_rest():
-    samples = rows(*[(k * 0.1, 0.5, -0.2) for k in range(31)])          # 3 s at rest
-    motion = calls.motion_seen(samples, NAMES, since=1.0, now=3.0)
-    assert motion.known and motion.still and motion.moved == 0.0
-    assert 'did not move' in motion.text()
-    assert calls.motion_seen([], NAMES, since=1.0, now=3.0).text().startswith(
-        'no joint states arrived')
-    assert 'not known' in calls.motion_seen(rows((0.0, 0.5, 0.0)), ('j1', 'j9'), 0.0, 1.0).text()
+    motion = watch([(k * 0.1, 0.5, -0.2) for k in range(31)], mark_at=1.0).motion(3.0)
+    assert motion.known and motion.still and motion.from_before and motion.moved == 0.0
+    assert 'did not move' in motion.text() and '2.0 s' in motion.text()
+    assert calls.JointWatch(NAMES).motion(3.0).text().startswith('no joint states arrived')
+    other = watch([(0.0, 0.5, 0.0), (0.5, 0.5, 0.0)], mark_at=0.2, names=('j1', 'j9'))
+    assert 'not known' in other.motion(1.0).text()      # the joints asked about never came
 
 
 def test_joint_states_that_stopped_arriving_do_not_show_an_arm_at_rest():
-    samples = rows(*[(k * 0.1, 0.5, -0.2) for k in range(11)])          # the last one at 1.0 s
-    motion = calls.motion_seen(samples, NAMES, since=0.5, now=3.0)
+    motion = watch([(k * 0.1, 0.5, -0.2) for k in range(11)], mark_at=0.5).motion(3.0)
     assert motion.known and not motion.still
-    assert 'did not move' not in motion.text()
+    assert 'did not move' not in motion.text() and 'STILL MOVING' in motion.text()
 
 
 def test_motion_since_the_goal_is_reported_with_whether_it_has_ended():
-    moving = rows(*[(k * 0.1, 0.5 + 0.01 * k, -0.2) for k in range(31)])
-    motion = calls.motion_seen(moving, NAMES, since=1.0, now=3.0)
-    assert not motion.still and abs(motion.moved - 0.20) < 1e-9          # from the sample at 1.0 s
+    moving = [(k * 0.1, 0.5 + 0.01 * k, -0.2) for k in range(31)]
+    motion = watch(moving, mark_at=1.0).motion(3.0)
+    assert not motion.still and abs(motion.moved - 0.20) < 1e-9      # from the state at 1.0 s
     assert 'moved by up to 0.200 rad' in motion.text() and 'STILL MOVING' in motion.text()
-    stopped = moving + rows(*[(3.0 + k * 0.1, 0.8, -0.2) for k in range(1, 16)])
-    motion = calls.motion_seen(stopped, NAMES, since=1.0, now=4.5)
+    stopped = moving + [(3.0 + k * 0.1, 0.8, -0.2) for k in range(1, 16)]
+    motion = watch(stopped, mark_at=1.0).motion(4.5)
     assert motion.still and abs(motion.moved - 0.20) < 1e-9
     assert 'are still now' in motion.text() and 'did not move' not in motion.text()
 
 
 def test_a_joint_that_went_and_came_back_counts_as_moved():
-    there_and_back = rows((0.0, 0.5, 0.0), (0.5, 0.9, 0.0), (1.0, 0.5, 0.0), (1.5, 0.5, 0.0),
-                          (2.0, 0.5, 0.0), (2.4, 0.5, 0.0))
-    motion = calls.motion_seen(there_and_back, NAMES, since=0.0, now=2.5)
+    there_and_back = [(0.0, 0.5, 0.0), (0.5, 0.9, 0.0)] + [
+        (1.0 + k * 0.1, 0.5, 0.0) for k in range(16)]
+    motion = watch(there_and_back, mark_at=0.0).motion(2.5)
     assert abs(motion.moved - 0.4) < 1e-9 and motion.still
+    assert 'did not move' not in motion.text()
+
+
+def test_motion_is_counted_however_long_ago_the_goal_was_sent():
+    # Ten minutes of joint states at 150 Hz after the mark; the arm moved in the first second.
+    seen = calls.JointWatch(NAMES)
+    seen.sample(0.0, {'j1': 0.0, 'j2': 0.0})
+    seen.mark(0.0)
+    for k in range(1, 90001):
+        seen.sample(k / 150.0, {'j1': min(0.3, k / 150.0 * 0.3), 'j2': 0.0})
+    assert len(seen.recent) < 400                   # only the last two seconds are kept
+    motion = seen.motion(600.0)
+    assert abs(motion.moved - 0.3) < 1e-9 and motion.still
+    assert 'did not move' not in motion.text()      # the motion is not forgotten
+
+
+def test_without_a_joint_state_from_before_the_goal_nothing_is_said_about_no_motion():
+    late = calls.JointWatch(NAMES)
+    late.mark(10.0)                                 # no joint state yet
+    for k in range(30):
+        late.sample(10.5 + k * 0.1, {'j1': 0.5, 'j2': 0.0})
+    motion = late.motion(13.4)
+    assert motion.known and not motion.from_before and motion.still
+    assert 'did not move' not in motion.text()
+    assert 'no joint state from before the request was at hand' in motion.text()
+    stale = calls.JointWatch(NAMES)
+    stale.sample(0.0, {'j1': 0.5, 'j2': 0.0})
+    stale.mark(10.0)                                # the newest joint state is 10 s old
+    assert not stale.from_before
 
 
 def test_the_report_of_an_unanswered_goal_says_what_was_seen_and_never_guesses():
-    at_rest = calls.motion_seen(rows(*[(k * 0.1, 0.5, -0.2) for k in range(31)]), NAMES, 1.0, 3.0)
-    text = calls.unanswered_goal('the goal', 10.0, [], (0, 0), at_rest)
-    assert 'its state is not known' in text and 'never listed the goal' in text
-    assert 'no goal to cancel' in text and 'did not move' in text
-    moving = calls.motion_seen(rows(*[(k * 0.1, 0.5 + 0.01 * k, -0.2) for k in range(31)]),
-                               NAMES, 1.0, 3.0)
+    at_rest = watch([(k * 0.1, 0.5, -0.2) for k in range(31)], mark_at=1.0).motion(3.0)
+    text = calls.unanswered_goal('the goal', 10.0, [], (2, 0), at_rest)
+    assert 'its state is not known' in text and 'the server did not list the goal' in text
+    assert 'the goal never reached it' in text and 'did not move' in text
+    moving = watch([(k * 0.1, 0.5 + 0.01 * k, -0.2) for k in range(31)], mark_at=1.0).motion(3.0)
     text = calls.unanswered_goal('the goal', 10.0, [1, 2], None, moving)
     assert 'listed the goal as accepted, then executing;' in text and 'NOT ANSWERED' in text
     assert 'STILL MOVING' in text and 'did not move' not in text and 'nothing moved' not in text
     blind = calls.unanswered_goal('the goal', 10.0, [2, 3, 5], (0, 1), calls.Motion(False))
     assert 'executing, then cancelling, then cancelled;' in blind
-    assert 'cancelling 1 goal;' in blind and 'not known' in blind
+    assert 'the server is cancelling the goal;' in blind and 'not known' in blind
     assert 'did not move' not in blind and 'nothing moved' not in blind
+
+
+def test_no_status_message_at_all_is_not_a_goal_the_server_did_not_list():
+    quiet = calls.status_text([], any_status=False)
+    assert 'no status message' in quiet and 'not known' in quiet
+    assert calls.status_text([], any_status=True) == 'the server did not list the goal'
 
 
 def test_a_refused_cancel_is_reported_with_its_reason():
     assert 'no such goal' in calls.cancel_text((2, 0))
     assert 'already ended' in calls.cancel_text((3, 0))
     assert 'return code 9' in calls.cancel_text((9, 0))
-    assert calls.cancel_text((0, 2)).endswith('cancelling 2 goals')
+    assert calls.cancel_text((0, 0)) == 'the server had no such goal to cancel'

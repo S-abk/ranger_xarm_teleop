@@ -1173,7 +1173,7 @@ JOIN_STALL_REASONS = (TeleopState.HOLD_INPUT_STALE, TeleopState.HOLD_TOOL_POSE_S
                       TeleopState.HOLD_SERVO_NOT_READY)
 JOIN_STALL_MIN_S = 0.25     # one sleep is 0.333 s
 JOIN_STALL_MAX_S = 1.2      # three in a row are 1.0 s
-JOIN_WINDOW_S = 8.0         # a newcomer has been discovered up to 3 s after its start
+JOIN_WINDOW_S = 5.0         # a newcomer has been discovered up to 3 s after its start
 JOIN_LOOK_BACK_S = 1.5
 JOIN_LOOK_AHEAD_S = 1.0     # an input pause outlasts the release it causes
 
@@ -1182,25 +1182,32 @@ def pauses_around(probe, when, servo_output=()):
     """
     Return the longest pause of each stream the probe takes around the time ``when``.
 
-    The input by the stamps its source gave (its time of sending), the others by their
-    arrival at the probe. A pause is the time between two messages, so a stream that simply
-    ended is not one. Call this at least JOIN_LOOK_AHEAD_S after ``when``.
+    Every pause is measured by the stamps the sender gave its messages, between two messages
+    in a row that reached the probe around ``when``. So a pause is the sender's: a probe that
+    paused itself changes when messages arrive, not their stamps, and a stream that simply
+    ended is no pause. ``servo_output`` is ``(arrival, stamp)`` of MoveIt Servo's output.
+    Call this at least JOIN_LOOK_AHEAD_S after ``when``.
     """
     begin, end = when - JOIN_LOOK_BACK_S, when + JOIN_LOOK_AHEAD_S
 
-    def longest(times):
-        return max((b - a for a, b in zip(times, times[1:])), default=0.0)
+    def secs(stamp):
+        return stamp.sec + stamp.nanosec * 1e-9
 
+    def longest(stamps):
+        return max((b - a for a, b in zip(stamps, stamps[1:])), default=0.0)
+
+    with probe.lock:
+        joints = [secs(stamp) for arrival, stamp, _ in probe.stamped_joints
+                  if begin <= arrival <= end]
     return {
         'the input source sent no frame': longest(
             [stamp for arrival, stamp in probe.input_stamps_since(begin - 0.3)
              if arrival <= end + 0.3]),
-        'no teleop state reached the probe': longest(
-            [t for t, _ in probe.timed_states_since(begin) if t <= end]),
-        'no joint state reached the probe': longest(
-            [t for t, _ in probe.timed_joints_since(begin) if t <= end]),
-        "none of MoveIt Servo's output reached the probe": longest(
-            [t for t in servo_output if begin <= t <= end]),
+        'the teleop node published no state': longest(
+            [secs(s.header.stamp) for t, s in probe.timed_states_since(begin) if t <= end]),
+        'the controller published no joint state': longest(joints),
+        'MoveIt Servo published no output': longest(
+            [stamp for arrival, stamp in servo_output if begin <= arrival <= end]),
     }
 
 
@@ -1211,10 +1218,12 @@ def join_stall(joined_at, when, reason, pauses):
     ``joined_at`` is when the process was started, ``when`` and ``reason`` the release and
     its ``hold_reason``, ``pauses`` the result of ``pauses_around``. All three are needed:
 
-    * the release came after the process was started, within JOIN_WINDOW_S;
+    * the release came after the process was started, within JOIN_WINDOW_S (in a test that
+      starts the process a second into a six second engagement that is all the rest of it:
+      the two conditions below are what tells a stall from anything else);
     * its reason is one a stalled node causes: stale input, a stale tool pose, or MoveIt
       Servo's output not following. Never a missing pose, a halt or anything else;
-    * a stream shows a pause of stall length around the release.
+    * a sender paused for the length of a stall around the release, by its own stamps.
 
     Anything else is ``(False, why not)``.
     """
@@ -1254,7 +1263,8 @@ def commanded_period_speed(samples):
     stamps, and ``Probe.joint_speeds_since`` is the right measure there.
 
     No state is left out. A joint state that never reached the probe makes one step two
-    periods long over a divisor of one, so it reads twice the speed: too high, never too low.
+    periods long over a divisor of one period: that step reads twice the speed (the step
+    after it reads half), so the largest reading is too high and the bound fails.
     """
     best = 0.0
     for (s0, _), (s1, q1), (_, q2) in zip(samples, samples[1:], samples[2:]):

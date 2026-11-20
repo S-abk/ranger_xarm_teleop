@@ -33,7 +33,7 @@ simulator (exit status 3). Exit status 0 only when the arm reached the posture; 
 the arm was not handed back to MoveIt (no motion goal sent).
 
 The goal is sent once. Without an answer to it, or to the request for its result, its
-state is unknown, not rejected: every goal of move_group is cancelled, and what move_group
+state is unknown, not rejected: move_group is asked to cancel it, and what move_group
 listed and what the joints did is printed (exit status 1).
 """
 
@@ -103,7 +103,7 @@ def main() -> int:
         node.create_subscription(ArmOwner, '/teleop/mux/owner', on_owner, 1)   # newest only
         node.create_subscription(TeleopState, '/teleop/state', on_state, 1)   # newest only
         disarm = node.create_client(Trigger, args.disarm_service)
-        move = Goal(calls, MoveGroup, '/move_action')
+        move = Goal(calls, MoveGroup, '/move_action', ARM_JOINTS)
         spin(10.0, lambda: seen['description'] is not None)
         try:
             require_simulator(seen['description'] or '')
@@ -127,14 +127,14 @@ def main() -> int:
             return may_recover(*fresh())[0]
 
         if not spin(args.wait, handed_back):
-            print(f'NOT RECOVERED, nothing sent: {may_recover(*fresh())[1]} after '
+            print(f'NOT RECOVERED, no motion goal sent: {may_recover(*fresh())[1]} after '
                   f'{args.wait:.0f} s. If the arm is still moving, wait and run this again.')
             return 4
         print('MoveIt owns the arm')
 
         # 3. Plan and execute through move_group.
         if not move.ready(10.0):
-            print('NOT RECOVERED, nothing sent: '
+            print('NOT RECOVERED, no motion goal sent: '
                   + ('move_group did not answer on the cancel path of /move_action, so a '
                      'motion could not be stopped' if move.client.server_is_ready() else
                      'no move_group action server (/move_action)'))
@@ -159,20 +159,20 @@ def main() -> int:
         spin(2.0, handed_back)
         allowed, why = may_recover(*fresh())
         if not allowed:
-            print(f'NOT RECOVERED, nothing sent: {why}')
+            print(f'NOT RECOVERED, no motion goal sent: {why}')
             return 4
         answer = move.send(goal)
         if answer == 'unknown':
-            print('NOT RECOVERED: ' + move.unanswered('the goal', GOAL_ANSWER_S, ARM_JOINTS))
+            print('NOT RECOVERED: ' + move.unanswered('the goal', GOAL_ANSWER_S))
             return 1
         if answer == 'rejected':
             print('NOT RECOVERED: move_group rejected the goal; '
-                  + calls.watch(move.sent_at, ARM_JOINTS, limit=0.0).text())
+                  + calls.watch(limit=0.0).text())
             return 1
         done, why = move.result(120.0)
         if done is None:
             print('NOT RECOVERED: ' + move.unanswered("the request for the goal's result",
-                                                      120.0, ARM_JOINTS))
+                                                      120.0))
             return 1
         code = done.result.error_code.val
         if code == MoveItErrorCodes.SUCCESS:

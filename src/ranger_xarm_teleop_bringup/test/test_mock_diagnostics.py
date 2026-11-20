@@ -137,10 +137,12 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
     """
     probe, env, logs, _ = stack
     probe.disarm()
-    servo_output = []           # arrivals of MoveIt Servo's output, a fourth stream to judge by
+    servo_output = []           # (arrival, stamp) of MoveIt Servo's output, a fourth stream
     watch = probe.node.create_subscription(
         JointTrajectory, '/teleop_arm_controller/joint_trajectory',
-        lambda _: servo_output.append(time.monotonic()), qos_profile_sensor_data)
+        lambda msg: servo_output.append((time.monotonic(), msg.header.stamp.sec
+                                         + msg.header.stamp.nanosec * 1e-9)),
+        qos_profile_sensor_data)
     recorder, path = start_recorder(env, logs, 'circle')
     late = None
     player = replay(env, 'clutch_circle', str(logs / 'replay_circle.log'))    # grip held 6 s
@@ -212,7 +214,11 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
                 f'clutch was released: {late.output()}')
             os.killpg(late.proc.pid, signal.SIGINT)
             assert late.wait(15.0) == 0, late.output()
-            assert os.path.exists(logs / 'late.jsonl')
+            # By its own file too: the first state it recorded shows a released clutch.
+            with open(logs / 'late.jsonl', encoding='utf-8') as handle:
+                recorded = [json.loads(line) for line in handle]
+            first = next(row for row in recorded if row['k'] == 'state')
+            assert not first['engaged'], 'the second recorder started while the clutch was engaged'
             print('the second recorder started after the join stall had released the clutch')
 
         # The first recorder: asked to stop a second into the engagement, it went on to the
@@ -292,7 +298,7 @@ def test_recovery_moves_nothing_while_teleop_keeps_the_arm(stack):
         assert process.wait(60.0) == 4, process.output()
     finally:
         process.stop()
-    assert 'NOT RECOVERED, nothing sent' in process.output()
+    assert 'NOT RECOVERED, no motion goal sent' in process.output()
     assert 'owner: TELEOP' in process.output()
     time.sleep(0.5)
     assert probe.max_joint_change(start, before) < 1e-6

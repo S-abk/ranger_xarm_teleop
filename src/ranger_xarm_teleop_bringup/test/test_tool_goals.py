@@ -65,15 +65,15 @@ def test_an_answered_goal_moves_the_arm_and_succeeds(env, tmp_path):
     assert code == 0, tool
     assert 'goal succeeded' in tool and 'UNKNOWN' not in tool
     # The cancel path was tried first, with a request that cancels nothing.
-    assert controller.index('a goal that does not exist') < controller.index('accepted')
-    assert 'goal reached' in controller and 'every goal' not in controller
+    assert controller.index('a goal the controller never had') < controller.index('accepted')
+    assert 'goal reached' in controller and 'cancel request: the goal' not in controller
 
 
 def test_a_rejected_goal_is_reported_with_what_the_joints_did(env, tmp_path):
     code, tool, controller = run(env, tmp_path, 'reject', 1.0)
     assert code == 1, tool
     assert 'goal REJECTED' in tool and 'the joints did not move' in tool
-    assert 'UNKNOWN' not in tool and 'every goal' not in controller
+    assert 'UNKNOWN' not in tool and 'cancel request: the goal' not in controller
 
 
 def test_a_goal_without_an_answer_is_unknown_and_the_motion_is_cancelled(env, tmp_path):
@@ -86,14 +86,15 @@ def test_a_goal_without_an_answer_is_unknown_and_the_motion_is_cancelled(env, tm
     # (The status topic keeps the newest status only, so a step in between may be missing.)
     assert re.search(r'the server listed the goal as (accepted, then )?executing'
                      r'(, then cancelling)?, then cancelled;', tool), tool
-    assert 'the server is cancelling 1 goal' in tool
+    assert 'the server is cancelling the goal;' in tool
     moved = re.search(r'the joints moved by up to (\d+\.\d+) rad and are still now', tool)
     assert moved, tool
     # A third of the way at most: 0.3 rad in 30 s, cancelled after the 10 s wait.
     assert 0.05 < float(moved.group(1)) < 0.15
-    stopped = re.search(r'every goal, cancelled at (\d+\.\d+) rad', controller)
+    stopped = re.search(r'cancel request: the goal, cancelled at (\d+\.\d+) rad', controller)
     assert stopped and float(stopped.group(1)) == pytest.approx(float(moved.group(1)), abs=0.01)
     assert 'goal reached' not in controller             # it never ran on to the target
+    assert 'every goal' not in controller               # only the tool's own goal was named
 
 
 def test_a_goal_request_that_was_lost_is_unknown_and_nothing_is_claimed_unseen(env, tmp_path):
@@ -102,10 +103,11 @@ def test_a_goal_request_that_was_lost_is_unknown_and_nothing_is_claimed_unseen(e
     assert code == 1, tool
     assert 'goal UNKNOWN: no answer to the goal within 10 s' in tool, tool
     assert 'REJECTED' not in tool
-    assert 'the server never listed the goal' in tool
-    assert 'the server had no goal to cancel' in tool
+    assert 'the server did not list the goal' in tool
+    assert 'the server knows no such goal (the goal never reached it)' in tool
     assert re.search(r'the joints did not move \(largest change 0\.0000 rad in \d+\.\d s\)', tool)
-    assert 'cancel request: every goal, none active' in controller
+    # The tool's one real cancel request came after the one that tries the path.
+    assert controller.count('cancel request: a goal the controller never had') == 2
 
 
 def test_a_lost_result_and_an_unanswered_cancel_are_reported_as_such(env, tmp_path):
@@ -118,4 +120,6 @@ def test_a_lost_result_and_an_unanswered_cancel_are_reported_as_such(env, tmp_pa
                      r'succeeded;', tool), tool
     assert 'the cancel request was NOT ANSWERED' in tool
     assert re.search(r'the joints moved by up to 0\.300 rad and are still now', tool), tool
-    assert controller.count('cancel request: every goal, never answered') == 3
+    # The cancel names the tool's own goal, so asking three times cancels nothing else.
+    assert controller.count('cancel request: the goal, never answered') == 3
+    assert 'every goal' not in controller

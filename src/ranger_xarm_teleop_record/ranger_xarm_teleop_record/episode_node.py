@@ -890,23 +890,41 @@ class EpisodeNode(Node):
             return                                      # a request that was given up
         del self.param_requests[key]
         read = self.param_reads[key]
+        target = self.param_clients[key][0]
+
+        def again(why: str) -> None:
+            # The read starts again from the names at the next tick of the timer.
+            self.get_logger().info(f'the parameters of {target} are not read yet ({why}); '
+                                   'asking again')
+
         if future.exception() is not None or future.result() is None:
-            read.failed()                               # asked again from the timer
+            read.failed()
+            again(f'the request for its parameter {step} failed')
             return
         now = time.monotonic()
         result = future.result()
         if step == NAMES:
             names = read.listed(result.result.names, now)
-            if names is not None:
+            if names is None:
+                again(f'it lists {len(result.result.names)} so far')
+            else:
                 self._ask_parameters(key, TYPES, GetParameterTypes.Request(names=names))
         elif step == TYPES:
+            asked = len(read.asked)
             having = read.typed(result.types, now)
             if having:
                 self._ask_parameters(key, VALUES, GetParameters.Request(names=having))
             elif read.done:
                 self._got(key, {}, read.unset)
-        elif read.valued(result.values):
-            self._got(key, {n: _param_value(v) for n, v in read.values.items()}, read.unset)
+            else:
+                again(f'{len(result.types)} types came back for {asked} names')
+        else:
+            asked = len(read.asked)
+            if read.valued(result.values):
+                self._got(key, {n: _param_value(v) for n, v in read.values.items()},
+                          read.unset)
+            else:
+                again(f'{len(result.values)} values came back for {asked} names')
 
     def _got(self, key, values, unset) -> None:
         if key == 'servo_node':

@@ -18,9 +18,10 @@ A reply can be lost without the caller being told. So in these tools:
 
 * clients are made when the tool starts, not right before a call;
 * a read has a timeout and is asked again, and the tool says that it is waiting;
-* a motion goal is sent once. Without an answer its state is unknown: the tool cancels every
-  goal of that action server, watches the goal's status and the joints, and reports what it
-  saw. It says that the joints did not move only when it watched them not moving.
+* a motion goal is sent once. Without an answer its state is unknown: the tool asks the
+  server to cancel that goal (its own, by its id, so that asking again cancels nothing
+  else), watches the goal's status and the joints, and reports what it saw. It says that
+  the joints did not move only when it watched them from before the goal went out.
 """
 
 from collections import deque
@@ -47,7 +48,8 @@ class Calls:
         import rclpy
         from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
         self.node, self._rclpy = node, rclpy
-        self.joints = deque(maxlen=20000)       # (time, {joint: position}), oldest first
+        self.joints = deque(maxlen=1000)        # the newest (time, {joint: position})
+        self.watched = None                     # the joints since the last mark
         self.silent = ''                        # why the last read returned None
         self._parameter_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE,
@@ -57,7 +59,10 @@ class Calls:
             node.create_subscription(JointState, '/joint_states', self._on_joints, 50)
 
     def _on_joints(self, msg) -> None:
-        self.joints.append((time.monotonic(), dict(zip(msg.name, msg.position))))
+        sample = (time.monotonic(), dict(zip(msg.name, msg.position)))
+        self.joints.append(sample)
+        if self.watched is not None:
+            self.watched.sample(*sample)
 
     def spin(self, seconds: float, until=lambda: False) -> bool:
         """Process messages for ``seconds`` or until ``until()``; return ``until()``."""
@@ -98,27 +103,36 @@ class Calls:
         self.silent = NO_ANSWER
         return None
 
-    def motion(self, since: float, names) -> 'rules.Motion':
-        """Return what the joint states showed since ``since`` (a monotonic time)."""
-        return rules.motion_seen(list(self.joints), names, since, time.monotonic())
+    def mark(self, names) -> None:
+        """Count the motion of the joints ``names`` from now (before a goal goes out)."""
+        self.watched = rules.JointWatch(names)
+        for sample in list(self.joints):
+            self.watched.sample(*sample)
+        self.watched.mark(time.monotonic())
 
-    def watch(self, since: float, names, at_least: float = rules.STILL_S + 0.2,
+    def motion(self) -> 'rules.Motion':
+        """Return what the joint states showed since the mark."""
+        if self.watched is None:
+            return rules.Motion(False)
+        return self.watched.motion(time.monotonic())
+
+    def watch(self, at_least: float = rules.STILL_S + 0.2,
               limit: float = SETTLE_S) -> 'rules.Motion':
         """Watch the joints until they are still (at most ``limit`` s); return what they did."""
         self.spin(at_least)
-        self.spin(limit, lambda: self.motion(since, names).still)
-        return self.motion(since, names)
+        self.spin(limit, lambda: self.motion().still)
+        return self.motion()
 
 
 class Goal:
-    """One action server: its goal, status and cancel paths, all made at start-up."""
+    """One action server: its goal, status and cancel paths, all made together."""
 
-    def __init__(self, calls: Calls, action_type, name: str) -> None:
+    def __init__(self, calls: Calls, action_type, name: str, joints) -> None:
         from action_msgs.msg import GoalStatusArray
         from action_msgs.srv import CancelGoal
         from rclpy.action import ActionClient
         from rclpy.qos import qos_profile_action_status_default
-        self.calls, self.name = calls, name
+        self.calls, self.name, self.joints = calls, name, list(joints)
         self._cancel_type = CancelGoal
         self.client = ActionClient(calls.node, action_type, name)
         self.cancel_client = calls.node.create_client(CancelGoal, f'{name}/_action/cancel_goal')
@@ -126,10 +140,12 @@ class Goal:
         self.handle = None
         self.sent_at = 0.0
         self.statuses = []          # of this tool's goal, in the order the server listed them
+        self.any_status = False     # a status message of the server arrived at all
         calls.node.create_subscription(GoalStatusArray, f'{name}/_action/status',
                                        self._on_status, qos_profile_action_status_default)
 
     def _on_status(self, msg) -> None:
+        self.any_status = True
         if self.goal_id is None:
             return
         mine = bytes(self.goal_id.uuid)
@@ -138,6 +154,20 @@ class Goal:
                     not self.statuses or self.statuses[-1] != entry.status):
                 self.statuses.append(int(entry.status))
 
+    def _cancel(self, goal_id, seconds: float, attempts: int):
+        """Ask to cancel the goal ``goal_id``; return the answer, or None without one."""
+        request = self._cancel_type.Request()
+        request.goal_info.goal_id = goal_id
+        for attempt in range(1, attempts + 1):
+            future = self.cancel_client.call_async(request)
+            if self.calls.spin(seconds, future.done):
+                return future.result()
+            self.cancel_client.remove_pending_request(future)
+            print(f'no answer from {self.cancel_client.srv_name} within {seconds:g} s'
+                  + ('; asking again' if attempt < attempts else f' ({attempts} requests)'),
+                  flush=True)
+        return None
+
     def ready(self, seconds: float) -> bool:
         """
         Wait for the server, then do one harmless round trip on its cancel path.
@@ -145,19 +175,23 @@ class Goal:
         The request names a goal that does not exist, so nothing is cancelled. It shows that
         the path the tool may need to stop a motion carries a request and its answer.
         """
+        from unique_identifier_msgs.msg import UUID
         end = time.monotonic() + seconds
         if not self.calls.spin(seconds, self.client.server_is_ready):
             return False
-        request = self._cancel_type.Request()
-        request.goal_info.goal_id.uuid = list(uuid.uuid4().bytes)
-        left = max(1.0, end - time.monotonic())
-        return self.calls.read(self.cancel_client, request, seconds=min(READ_S, left)) is not None
+        if not self.calls.spin(max(1.0, end - time.monotonic()),
+                               self.cancel_client.service_is_ready):
+            return False
+        nothing = UUID(uuid=list(uuid.uuid4().bytes))
+        return self._cancel(nothing, min(READ_S, max(1.0, end - time.monotonic())),
+                            READ_ATTEMPTS) is not None
 
     def send(self, goal, seconds: float = GOAL_ANSWER_S) -> str:
         """Send the goal once; return 'accepted', 'rejected' or 'unknown' (no answer)."""
         from unique_identifier_msgs.msg import UUID
         self.goal_id = UUID(uuid=list(uuid.uuid4().bytes))
         self.statuses = []
+        self.calls.mark(self.joints)        # motion is counted from before the goal goes out
         self.sent_at = time.monotonic()
         sent = self.client.send_goal_async(goal, goal_uuid=self.goal_id)
         if not self.calls.spin(seconds, sent.done):
@@ -183,19 +217,23 @@ class Goal:
                 return None, 'unknown'
         return future.result(), ''
 
-    def cancel_all(self):
-        """Ask the server to cancel every goal; return (return code, goals) or None."""
-        answer = self.calls.read(self.cancel_client, self._cancel_type.Request(), seconds=2.0)
+    def cancel(self):
+        """
+        Ask the server to cancel this tool's goal; return (return code, goals) or None.
+
+        Only the goal this tool sent is named. So asking again after a missing answer can
+        cancel nothing else: once the goal is cancelled, the answer is that it has ended.
+        """
+        answer = self._cancel(self.goal_id, 2.0, READ_ATTEMPTS)
         return None if answer is None else (int(answer.return_code), len(answer.goals_canceling))
 
-    def stop(self, names):
-        """Cancel every goal and watch the joints come to rest; return (cancel, motion)."""
-        cancel = self.cancel_all()
-        return cancel, self.calls.watch(self.sent_at, names)
+    def stop(self):
+        """Cancel the goal and watch the joints come to rest; return (cancel, motion)."""
+        cancel = self.cancel()
+        return cancel, self.calls.watch()
 
-    def unanswered(self, what: str, seconds: float, names) -> str:
+    def unanswered(self, what: str, seconds: float) -> str:
         """Cancel, watch, and return the report for a request that got no answer."""
-        listed = list(self.statuses)        # as the server listed the goal before the cancel
-        cancel, motion = self.stop(names)
-        return rules.unanswered_goal(what, seconds, listed + self.statuses[len(listed):],
-                                     cancel, motion)
+        cancel, motion = self.stop()
+        return rules.unanswered_goal(what, seconds, list(self.statuses), cancel, motion,
+                                     self.any_status)
