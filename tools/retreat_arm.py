@@ -65,7 +65,7 @@ from ranger_xarm_teleop_servo import retreat  # noqa: E402
 from ranger_xarm_teleop_servo import solver as dls  # noqa: E402
 from ranger_xarm_teleop_servo.params import DEFAULTS  # noqa: E402
 from ranger_xarm_teleop_servo.session import (choose_arm_controller, may_recover,  # noqa: E402
-                                              STATE_FRESH_S, TELEOP_CONTROLLER)
+                                              recovery_case, STATE_FRESH_S, TELEOP_CONTROLLER)
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
 
 LEAVES_PATH = 0.02          # rad: the arm this far from the path stops the motion
@@ -123,6 +123,14 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         seen.update(armed=bool(msg.armed), state_at=time.monotonic(),
                     margin=float(msg.keepout_margin))
 
+    def teleop_running() -> bool:
+        """Return whether a teleop node is there: its service, its state topic, or heard."""
+        return (seen['margin'] is not None or disarm.service_is_ready()
+                or node.count_publishers('/teleop/state') > 0)
+
+    def allowed():
+        return may_recover(*fresh(), teleop_running())
+
     try:
         # Every client is made here, before the first wait, so that its server has long
         # matched it when it is used.
@@ -159,11 +167,12 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
                                 'no answer; reading the state back'))
         else:
             print('disarm: no /teleop/disarm service (teleop node not running?)')
-        if not spin(args.wait, lambda: may_recover(*fresh())[0]):
-            print(f'NOT HANDED BACK, no motion goal sent: {may_recover(*fresh())[1]} after '
+        # With a teleop node running, "not armed" must have been heard, freshly.
+        if not spin(args.wait, lambda: allowed()[0]):
+            print(f'NOT HANDED BACK, no motion goal sent: {allowed()[1]} after '
                   f'{args.wait:.0f} s. If the arm is still moving, wait and run this again.')
             return 4
-        print('MoveIt owns the arm, teleop is disarmed')
+        print(f'MoveIt owns the arm, {recovery_case(fresh()[1])}')
 
         # 2. The teleop node's settings and its recorded path.
         names = ['base_frame', 'servo_tip_frame', 'link_keepout_cell_m',
@@ -289,9 +298,9 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
                 time_from_start=Duration(sec=seconds, nanosec=int((t - seconds) * 1e9))))
         # Once more, right before sending. Waiting for the action server processed no
         # reports, so they may have gone stale meanwhile: wait for fresh ones first.
-        spin(2.0, lambda: may_recover(*fresh())[0])
-        allowed, why = may_recover(*fresh())
-        if not allowed:
+        spin(2.0, lambda: allowed()[0])
+        may, why = allowed()
+        if not may:
             print(f'NOT HANDED BACK, no motion goal sent: {why}')
             return 4
         answer = action.send(goal)

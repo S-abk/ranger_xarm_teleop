@@ -545,6 +545,11 @@ other goal is touched) and prints how the controller listed the goal, what the c
 and what the joints did since before the goal went out (`UNKNOWN`, exit status 1). Look at the
 arm before running the tool again.
 
+Before any goal, `recover_arm.py` and `retreat_arm.py` need a fresh report that teleop is not
+armed whenever a teleop node is running; without one they send nothing and say that it is not
+known. `recover_arm.py` also works with no teleop node at all, and says which of the two cases
+it is in. Both stop their motion if teleop is armed during it.
+
 (simulation only, like `tools/move_arm.py`, which prints why a goal was rejected). Without
 `--controller`, `move_arm.py` asks the command mux which controller is MoveIt's (failing that,
 it takes the one arm trajectory controller other than teleop's); it never sends to teleop's

@@ -22,9 +22,12 @@ One command for "the arm halted, get it back to a posture with room to move":
 1. asks the teleop node to disarm (``/teleop/disarm``), which hands the arm back to MoveIt
    through the command mux once the arm is still;
 2. waits until the command mux reports MoveIt as the owner and the teleop node reports
-   disarmed;
+   that it is not armed. With a teleop node running that report must have been heard,
+   freshly; with no teleop node at all the owner's report is enough, and the tool says
+   which of the two it is;
 3. asks move_group to plan (with collision checking) and execute a motion to the posture
-   (default: the ready posture of ``tools/move_arm.py``).
+   (default: the ready posture of ``tools/move_arm.py``), and stops the motion if teleop
+   is armed during it.
 
 It never switches controllers and never asks the mux for ownership itself, and it sends
 no motion goal unless step 2 succeeded. **Simulation only**, like ``tools/move_arm.py``:
@@ -48,8 +51,10 @@ sys.path.insert(0, os.path.join(REPO, 'src', 'ranger_xarm_teleop_servo'))
 sys.path.insert(0, TOOLS)
 
 from _calls import Calls, Goal, GOAL_ANSWER_S  # noqa: E402
+from ranger_xarm_teleop_servo import calls as rules  # noqa: E402
 from ranger_xarm_teleop_servo.session import ARM_JOINTS, may_recover  # noqa: E402
-from ranger_xarm_teleop_servo.session import READY_POSTURE, STATE_FRESH_S  # noqa: E402
+from ranger_xarm_teleop_servo.session import READY_POSTURE, recovery_case  # noqa: E402
+from ranger_xarm_teleop_servo.session import STATE_FRESH_S  # noqa: E402
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
 
 
@@ -122,15 +127,24 @@ def main() -> int:
         else:
             print(f'disarm: no {args.disarm_service} service (teleop node not running?)')
 
-        # 2. MoveIt must own the arm and teleop must be disarmed, by fresh reports.
+        # 2. MoveIt must own the arm and teleop must not be armed, by fresh reports. With
+        # a teleop node running, "not armed" must have been heard; with none at all (its
+        # service and its state topic absent, nothing heard) a recovery still works.
+        def teleop_running() -> bool:
+            return (seen['state_at'] > 0.0 or disarm.service_is_ready()
+                    or node.count_publishers('/teleop/state') > 0)
+
+        def allowed():
+            return may_recover(*fresh(), teleop_running())
+
         def handed_back() -> bool:
-            return may_recover(*fresh())[0]
+            return allowed()[0]
 
         if not spin(args.wait, handed_back):
-            print(f'NOT RECOVERED, no motion goal sent: {may_recover(*fresh())[1]} after '
+            print(f'NOT RECOVERED, no motion goal sent: {allowed()[1]} after '
                   f'{args.wait:.0f} s. If the arm is still moving, wait and run this again.')
             return 4
-        print('MoveIt owns the arm')
+        print(f'MoveIt owns the arm, {recovery_case(fresh()[1])}')
 
         # 3. Plan and execute through move_group.
         if not move.ready(10.0):
@@ -157,8 +171,8 @@ def main() -> int:
         # Once more, right before sending. Waiting for the action server processed no
         # reports, so they may have gone stale meanwhile: wait for fresh ones first.
         spin(2.0, handed_back)
-        allowed, why = may_recover(*fresh())
-        if not allowed:
+        may, why = allowed()
+        if not may:
             print(f'NOT RECOVERED, no motion goal sent: {why}')
             return 4
         answer = move.send(goal)
@@ -169,10 +183,17 @@ def main() -> int:
             print('NOT RECOVERED: move_group rejected the goal; '
                   + calls.watch(limit=0.0).text())
             return 1
-        done, why = move.result(120.0)
-        if done is None:
+        # Teleop armed during the motion stops it: the operator has taken the arm back.
+        done, why = move.result(
+            120.0, stop=lambda: 'teleop was armed during the motion' if fresh()[1] else '')
+        if why == 'unknown':
             print('NOT RECOVERED: ' + move.unanswered("the request for the goal's result",
                                                       120.0))
+            return 1
+        if why:
+            cancel, motion = move.stop()
+            print(f'NOT RECOVERED, STOPPED: {why}; {rules.cancel_text(cancel)}; '
+                  f'{motion.text()}')
             return 1
         code = done.result.error_code.val
         if code == MoveItErrorCodes.SUCCESS:

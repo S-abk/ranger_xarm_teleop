@@ -55,6 +55,22 @@ def test_recovery_moves_only_when_moveit_owns_the_arm_and_teleop_is_disarmed():
     assert not allowed and 'armed' in why
 
 
+def test_with_a_teleop_node_running_a_recovery_needs_to_have_heard_not_armed():
+    # Not armed, heard: allowed. Nothing fresh heard of a running teleop node: not known.
+    assert session.may_recover(session.OWNER_MOVEIT, False, teleop_running=True) == (True, '')
+    allowed, why = session.may_recover(session.OWNER_MOVEIT, None, teleop_running=True)
+    assert not allowed and 'whether teleop is armed is not known' in why
+    allowed, why = session.may_recover(session.OWNER_MOVEIT, True, teleop_running=True)
+    assert not allowed and why == 'teleop is still armed'
+    # The owner comes first, as before.
+    allowed, why = session.may_recover(session.OWNER_TELEOP, False, teleop_running=True)
+    assert not allowed and 'TELEOP' in why
+    # With no teleop node at all a recovery still works, and the tool can say which case.
+    assert session.may_recover(session.OWNER_MOVEIT, None, teleop_running=False) == (True, '')
+    assert session.recovery_case(None) == 'no teleop node is running'
+    assert session.recovery_case(False) == 'teleop reports that it is not armed'
+
+
 def test_rejection_reason_names_the_owner_and_the_way_out():
     text = session.rejection_reason(session.OWNER_TELEOP)
     assert 'teleop owns the arm' in text and 'disarm first' in text
