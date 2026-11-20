@@ -31,6 +31,10 @@ that point's time. MODE says which answer is lost:
 
 A request to cancel a goal the controller never had is always answered (the tools try the
 cancel path with one before they send a goal). Every request is printed.
+
+Unlike a real action server, the stand-in keeps a finished goal for ever. A real one forgets
+it some seconds after its end and then answers a cancel request for it as for a goal it never
+had; what the tools say to that answer is tested without ROS (``test_calls.py``).
 """
 
 import sys

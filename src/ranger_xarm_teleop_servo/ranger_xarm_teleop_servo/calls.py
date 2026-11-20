@@ -110,9 +110,15 @@ GOAL_STATUS = {0: 'unknown', 1: 'accepted', 2: 'executing', 3: 'cancelling', 4: 
 STILL_S = 1.0               # joints are still when none changed by STILL_RAD over this long
 STILL_RAD = 0.001
 CANCEL_NO_ERROR = 0         # action_msgs/srv/CancelGoal return codes
+# What a return code shows, and no more. An unknown id does not show that the goal never
+# reached the server: a server forgets a goal some seconds after it ended (10 s by default),
+# and a goal request still on its way is unknown until it arrives. A goal that is already being
+# cancelled is answered like one that has ended.
 CANCEL_REASONS = {1: 'the server rejected the cancel request',
-                  2: 'the server knows no such goal (the goal never reached it)',
-                  3: 'the goal had already ended'}
+                  2: ('the server knew no goal with this id when asked to cancel it (the goal '
+                      'never reached it, or had ended and been forgotten)'),
+                  3: ('the server answered that the goal can no longer be cancelled (it has '
+                      'ended, or is already being cancelled)')}
 
 
 class Motion:
@@ -120,26 +126,32 @@ class Motion:
     What the joint states showed since a mark: how far, and whether it has ended.
 
     ``from_before`` is False when no joint state from before the mark was at hand: the
-    motion is then counted from the first one after it, and may be larger.
+    motion is then counted from the first one after it, and may be larger. ``stale_s`` is
+    the age of the newest joint state when joint states have stopped arriving, else None:
+    what the joints do now is then not known, neither that they rest nor that they move.
     """
 
     def __init__(self, known: bool, moved: float = 0.0, still: bool = False,
-                 watched_s: float = 0.0, from_before: bool = True) -> None:
+                 watched_s: float = 0.0, from_before: bool = True, stale_s=None) -> None:
         self.known, self.moved, self.still = known, moved, still
-        self.watched_s, self.from_before = watched_s, from_before
+        self.watched_s, self.from_before, self.stale_s = watched_s, from_before, stale_s
 
     def text(self) -> str:
         """Say it in words for a report line."""
         if not self.known:
-            return 'no joint states arrived, so whether the arm moved is not known'
-        end = 'are still now' if self.still else 'ARE STILL MOVING'
-        if not self.from_before:
-            return (f'the joints moved by {self.moved:.3f} rad or more (no joint state from '
-                    f'before the request was at hand) and {end}')
-        if self.moved < STILL_RAD and self.still:
+            return ("no joint state with all of the arm's joints arrived, so whether the arm "
+                    'moved is not known')
+        amount = (f'up to {self.moved:.3f} rad' if self.from_before else
+                  f'{self.moved:.3f} rad or more (no joint state from before the request was '
+                  'at hand)')
+        if self.stale_s is not None:
+            return (f'the joints had moved by {amount} when the joint states stopped arriving '
+                    f'{self.stale_s:.1f} s ago: what they do now is not known')
+        if self.from_before and self.moved < STILL_RAD and self.still:
             return (f'the joints did not move (largest change {self.moved:.4f} rad in '
                     f'{self.watched_s:.1f} s)')
-        return f'the joints moved by up to {self.moved:.3f} rad and {end}'
+        return f'the joints moved by {amount} and ' + (
+            'are still now' if self.still else 'ARE STILL MOVING')
 
 
 class JointWatch:
@@ -185,13 +197,14 @@ class JointWatch:
         """Return what was seen since the mark. Rest needs joint states up to ``now``."""
         if self.marked_at is None or self.reference is None:
             return Motion(False)
+        age = now - self.recent[-1][0]
+        stale = age > 0.5 * self.still_s        # joint states have stopped arriving
         recent = [q for when, q in self.recent if when >= now - self.still_s]
-        covered = (len(recent) >= 2 and self.recent[-1][0] >= now - 0.5 * self.still_s
-                   and self.recent[0][0] <= now - self.still_s)
+        covered = len(recent) >= 2 and not stale and self.recent[0][0] <= now - self.still_s
         spread = max(max(q[j] for q in recent) - min(q[j] for q in recent)
                      for j in range(len(self.names))) if recent else 0.0
         return Motion(True, self.moved, covered and spread < self.still_rad,
-                      now - self.marked_at, self.from_before)
+                      now - self.marked_at, self.from_before, age if stale else None)
 
 
 def cancel_text(answer) -> str:
@@ -201,7 +214,7 @@ def cancel_text(answer) -> str:
     code, cancelling = answer
     if code == CANCEL_NO_ERROR:
         return ('the server is cancelling the goal' if cancelling else
-                'the server had no such goal to cancel')
+                'the server accepted the cancel request and named no goal that it cancels')
     if code in (2, 3):
         return CANCEL_REASONS[code]
     return f'not cancelled: {CANCEL_REASONS.get(code, f"return code {code}")}'

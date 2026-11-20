@@ -103,11 +103,18 @@ def test_a_goal_request_that_was_lost_is_unknown_and_nothing_is_claimed_unseen(e
     assert code == 1, tool
     assert 'goal UNKNOWN: no answer to the goal within 10 s' in tool, tool
     assert 'REJECTED' not in tool
-    assert 'the server did not list the goal' in tool
-    assert 'the server knows no such goal (the goal never reached it)' in tool
+    # The stand-in has had no goal, so like a fresh action server it has published no status
+    # at all: the tool may not say that the goal is not listed, only that it saw no list.
+    assert 'no status message of the server arrived, so what it lists is not known' in tool
+    assert 'did not list the goal' not in tool
+    # What the cancel's answer shows, without a cause the tool cannot know.
+    assert 'the server knew no goal with this id when asked to cancel it' in tool
     assert re.search(r'the joints did not move \(largest change 0\.0000 rad in \d+\.\d s\)', tool)
-    # The tool's one real cancel request came after the one that tries the path.
-    assert controller.count('cancel request: a goal the controller never had') == 2
+    # The tool asked to cancel its goal after the request that tries the path (each may have
+    # been asked more than once, if an answer was slow).
+    lost = controller.index(': request lost')
+    unknown = 'cancel request: a goal the controller never had'
+    assert unknown in controller[:lost] and unknown in controller[lost:], controller
 
 
 def test_a_lost_result_and_an_unanswered_cancel_are_reported_as_such(env, tmp_path):

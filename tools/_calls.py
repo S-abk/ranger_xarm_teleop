@@ -222,7 +222,8 @@ class Goal:
         Ask the server to cancel this tool's goal; return (return code, goals) or None.
 
         Only the goal this tool sent is named. So asking again after a missing answer can
-        cancel nothing else: once the goal is cancelled, the answer is that it has ended.
+        cancel nothing else: a goal that is already being cancelled, or has ended, is answered
+        as no longer cancellable, and one the server has forgotten as unknown.
         """
         answer = self._cancel(self.goal_id, 2.0, READ_ATTEMPTS)
         return None if answer is None else (int(answer.return_code), len(answer.goals_canceling))

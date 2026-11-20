@@ -123,15 +123,29 @@ def test_an_arm_that_did_not_move_is_reported_so_only_when_it_was_watched_at_res
     motion = watch([(k * 0.1, 0.5, -0.2) for k in range(31)], mark_at=1.0).motion(3.0)
     assert motion.known and motion.still and motion.from_before and motion.moved == 0.0
     assert 'did not move' in motion.text() and '2.0 s' in motion.text()
-    assert calls.JointWatch(NAMES).motion(3.0).text().startswith('no joint states arrived')
+    nothing = calls.JointWatch(NAMES).motion(3.0).text()
+    assert nothing.startswith("no joint state with all of the arm's joints arrived")
+    # Joint states came, but none with the joints asked about: the same is said, and not
+    # that no joint state arrived.
     other = watch([(0.0, 0.5, 0.0), (0.5, 0.5, 0.0)], mark_at=0.2, names=('j1', 'j9'))
-    assert 'not known' in other.motion(1.0).text()      # the joints asked about never came
+    assert other.motion(1.0).text() == nothing and 'not known' in nothing
 
 
 def test_joint_states_that_stopped_arriving_do_not_show_an_arm_at_rest():
     motion = watch([(k * 0.1, 0.5, -0.2) for k in range(11)], mark_at=0.5).motion(3.0)
-    assert motion.known and not motion.still
-    assert 'did not move' not in motion.text() and 'STILL MOVING' in motion.text()
+    assert motion.known and not motion.still and abs(motion.stale_s - 2.0) < 1e-9
+    text = motion.text()
+    # Neither at rest nor moving: nobody saw what the joints did after the last joint state.
+    assert 'did not move' not in text and 'STILL MOVING' not in text and 'still now' not in text
+    assert 'had moved by up to 0.000 rad when the joint states stopped arriving 2.0 s ago' in text
+    assert 'what they do now is not known' in text
+    # The same for an arm that was moving when they stopped.
+    moving = watch([(k * 0.1, 0.5 + 0.01 * k, -0.2) for k in range(11)], mark_at=0.5).motion(3.0)
+    assert 'had moved by up to 0.050 rad when the joint states stopped' in moving.text()
+    assert 'STILL MOVING' not in moving.text()
+    # Joint states up to the report are not stale.
+    fresh = watch([(k * 0.1, 0.5, -0.2) for k in range(31)], mark_at=1.0).motion(3.2)
+    assert fresh.stale_s is None and fresh.still
 
 
 def test_motion_since_the_goal_is_reported_with_whether_it_has_ended():
@@ -185,7 +199,7 @@ def test_the_report_of_an_unanswered_goal_says_what_was_seen_and_never_guesses()
     at_rest = watch([(k * 0.1, 0.5, -0.2) for k in range(31)], mark_at=1.0).motion(3.0)
     text = calls.unanswered_goal('the goal', 10.0, [], (2, 0), at_rest)
     assert 'its state is not known' in text and 'the server did not list the goal' in text
-    assert 'the goal never reached it' in text and 'did not move' in text
+    assert 'knew no goal with this id when asked to cancel it' in text and 'did not move' in text
     moving = watch([(k * 0.1, 0.5 + 0.01 * k, -0.2) for k in range(31)], mark_at=1.0).motion(3.0)
     text = calls.unanswered_goal('the goal', 10.0, [1, 2], None, moving)
     assert 'listed the goal as accepted, then executing;' in text and 'NOT ANSWERED' in text
@@ -203,7 +217,25 @@ def test_no_status_message_at_all_is_not_a_goal_the_server_did_not_list():
 
 
 def test_a_refused_cancel_is_reported_with_its_reason():
-    assert 'no such goal' in calls.cancel_text((2, 0))
-    assert 'already ended' in calls.cancel_text((3, 0))
     assert 'return code 9' in calls.cancel_text((9, 0))
-    assert calls.cancel_text((0, 0)) == 'the server had no such goal to cancel'
+    assert 'rejected the cancel request' in calls.cancel_text((1, 0))
+    assert 'named no goal that it cancels' in calls.cancel_text((0, 0))
+
+
+def test_a_cancel_answer_is_reported_as_what_it_shows_and_no_more():
+    # An unknown id: the goal never arrived, or it ended and the server forgot it (a server
+    # keeps a finished goal for some seconds only), or it is still on its way. Not one of
+    # them is claimed.
+    unknown = calls.cancel_text((2, 0))
+    assert unknown.startswith('the server knew no goal with this id when asked to cancel it')
+    assert 'never reached it, or had ended and been forgotten' in unknown
+    # A goal whose result was lost, cancelled after the server forgot it: no contradiction
+    # between what was listed and what the cancel is said to show.
+    still = watch([(k * 0.1, 0.5, -0.2) for k in range(31)], mark_at=1.0).motion(3.0)
+    text = calls.unanswered_goal("the request for the goal's result", 30.0, [2, 4], (2, 0), still)
+    assert 'listed the goal as executing, then succeeded; the server knew no goal' in text
+    assert 'never reached it;' not in text
+    # A goal already being cancelled (a second request after a late answer) is answered like
+    # one that has ended: the text says both.
+    past = calls.cancel_text((3, 0))
+    assert 'can no longer be cancelled' in past and 'already being cancelled' in past

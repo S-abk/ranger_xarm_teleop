@@ -29,7 +29,7 @@ import time
 from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from stack_helpers import (assert_stack_nodes, child_environment, join_stall, MOCK_STACK_NODES,
                            pauses_around, Probe, Process, READY, replay, start_input)
@@ -138,11 +138,13 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
     probe, env, logs, _ = stack
     probe.disarm()
     servo_output = []           # (arrival, stamp) of MoveIt Servo's output, a fourth stream
+    # A second of it is kept, so that a pause of this process loses none of it: a gap in its
+    # stamps is then MoveIt Servo's own pause (``stack_helpers.sender_pauses``).
     watch = probe.node.create_subscription(
         JointTrajectory, '/teleop_arm_controller/joint_trajectory',
         lambda msg: servo_output.append((time.monotonic(), msg.header.stamp.sec
                                          + msg.header.stamp.nanosec * 1e-9)),
-        qos_profile_sensor_data)
+        QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT))
     recorder, path = start_recorder(env, logs, 'circle')
     late = None
     player = replay(env, 'clutch_circle', str(logs / 'replay_circle.log'))    # grip held 6 s
@@ -217,7 +219,8 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
             # By its own file too: the first state it recorded shows a released clutch.
             with open(logs / 'late.jsonl', encoding='utf-8') as handle:
                 recorded = [json.loads(line) for line in handle]
-            first = next(row for row in recorded if row['k'] == 'state')
+            first = next((row for row in recorded if row['k'] == 'state'), None)
+            assert first is not None, 'the second recorder recorded no teleop state'
             assert not first['engaged'], 'the second recorder started while the clutch was engaged'
             print('the second recorder started after the join stall had released the clutch')
 

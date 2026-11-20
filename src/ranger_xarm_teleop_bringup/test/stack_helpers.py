@@ -1169,45 +1169,74 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
 # port (interface contract, "Service and action calls": every process of a session starts
 # before arming). The gate then releases the clutch on stale data, as it must.
 
-JOIN_STALL_REASONS = (TeleopState.HOLD_INPUT_STALE, TeleopState.HOLD_TOOL_POSE_STALE,
-                      TeleopState.HOLD_SERVO_NOT_READY)
+INPUT_PAUSE = 'the input source sent no frame'
+TELEOP_PAUSE = 'the teleop node published no state'
+JOINT_PAUSE = 'the controller published no joint state'
+SERVO_PAUSE = 'MoveIt Servo published no output'
+# The streams whose pause causes each reason. A stall of the teleop node itself can cause any
+# of them, and a controller that reports nothing also stops MoveIt Servo's output.
+JOIN_STALL_STREAMS = {
+    TeleopState.HOLD_INPUT_STALE: (INPUT_PAUSE, TELEOP_PAUSE),
+    TeleopState.HOLD_TOOL_POSE_STALE: (JOINT_PAUSE, TELEOP_PAUSE),
+    TeleopState.HOLD_SERVO_NOT_READY: (SERVO_PAUSE, JOINT_PAUSE, TELEOP_PAUSE),
+}
+JOIN_STALL_REASONS = tuple(JOIN_STALL_STREAMS)
 JOIN_STALL_MIN_S = 0.25     # one sleep is 0.333 s
 JOIN_STALL_MAX_S = 1.2      # three in a row are 1.0 s
 JOIN_WINDOW_S = 5.0         # a newcomer has been discovered up to 3 s after its start
 JOIN_LOOK_BACK_S = 1.5
 JOIN_LOOK_AHEAD_S = 1.0     # an input pause outlasts the release it causes
+JOIN_ARRIVAL_SLACK_S = 0.05     # how far arrival may differ from the stamps across a pause
+JOIN_AFTER_PAUSE_S = 0.5    # a release comes during the pause that causes it or this soon after
+
+
+def sender_pauses(pairs):
+    """
+    Return the longest stamp difference in ``pairs`` and its pauses of stall length.
+
+    ``pairs`` is ``(arrival, stamp)`` of one stream's messages in the order the probe took
+    them. A pause is two messages in a row whose stamps, given by their sender, are
+    JOIN_STALL_MIN_S to JOIN_STALL_MAX_S apart: ``(length, began, ended, taken)``, with the
+    arrival of the two and ``taken`` between them.
+
+    The stamps alone do not show that the sender paused: a probe that paused itself and lost
+    messages meanwhile sees the same gap in the stamps. Then it took the two messages further
+    apart than they were stamped (it kept the newest ones) or closer together (it kept the
+    oldest). ``join_stall`` therefore counts a pause only when ``taken`` agrees with
+    ``length``, which needs the probe to keep at least a tenth of a second of each stream.
+    """
+    longest, found = 0.0, []
+    for (a1, s1), (a2, s2) in zip(pairs, pairs[1:]):
+        longest = max(longest, s2 - s1)
+        if JOIN_STALL_MIN_S <= s2 - s1 <= JOIN_STALL_MAX_S:
+            found.append((s2 - s1, a1, a2, a2 - a1))
+    return longest, found
 
 
 def pauses_around(probe, when, servo_output=()):
     """
-    Return the longest pause of each stream the probe takes around the time ``when``.
+    Return ``sender_pauses`` of each stream the probe takes, around the time ``when``.
 
-    Every pause is measured by the stamps the sender gave its messages, between two messages
-    in a row that reached the probe around ``when``. So a pause is the sender's: a probe that
-    paused itself changes when messages arrive, not their stamps, and a stream that simply
-    ended is no pause. ``servo_output`` is ``(arrival, stamp)`` of MoveIt Servo's output.
-    Call this at least JOIN_LOOK_AHEAD_S after ``when``.
+    ``servo_output`` is ``(arrival, stamp)`` of MoveIt Servo's output. A stream that simply
+    ended is no pause. Call this at least JOIN_LOOK_AHEAD_S after ``when``.
     """
     begin, end = when - JOIN_LOOK_BACK_S, when + JOIN_LOOK_AHEAD_S
 
     def secs(stamp):
         return stamp.sec + stamp.nanosec * 1e-9
 
-    def longest(stamps):
-        return max((b - a for a, b in zip(stamps, stamps[1:])), default=0.0)
-
     with probe.lock:
-        joints = [secs(stamp) for arrival, stamp, _ in probe.stamped_joints
+        joints = [(arrival, secs(stamp)) for arrival, stamp, _ in probe.stamped_joints
                   if begin <= arrival <= end]
     return {
-        'the input source sent no frame': longest(
-            [stamp for arrival, stamp in probe.input_stamps_since(begin - 0.3)
+        INPUT_PAUSE: sender_pauses(
+            [(arrival, stamp) for arrival, stamp in probe.input_stamps_since(begin - 0.3)
              if arrival <= end + 0.3]),
-        'the teleop node published no state': longest(
-            [secs(s.header.stamp) for t, s in probe.timed_states_since(begin) if t <= end]),
-        'the controller published no joint state': longest(joints),
-        'MoveIt Servo published no output': longest(
-            [stamp for arrival, stamp in servo_output if begin <= arrival <= end]),
+        TELEOP_PAUSE: sender_pauses(
+            [(t, secs(s.header.stamp)) for t, s in probe.timed_states_since(begin) if t <= end]),
+        JOINT_PAUSE: sender_pauses(joints),
+        SERVO_PAUSE: sender_pauses(
+            [(arrival, stamp) for arrival, stamp in servo_output if begin <= arrival <= end]),
     }
 
 
@@ -1216,35 +1245,60 @@ def join_stall(joined_at, when, reason, pauses):
     Return ``(True, text)`` when a release is the stall that a joining process causes.
 
     ``joined_at`` is when the process was started, ``when`` and ``reason`` the release and
-    its ``hold_reason``, ``pauses`` the result of ``pauses_around``. All three are needed:
+    its ``hold_reason``, ``pauses`` the result of ``pauses_around``. All of this is needed:
 
-    * the release came after the process was started, within JOIN_WINDOW_S (in a test that
-      starts the process a second into a six second engagement that is all the rest of it:
-      the two conditions below are what tells a stall from anything else);
+    * the release came after the process was started, within JOIN_WINDOW_S;
     * its reason is one a stalled node causes: stale input, a stale tool pose, or MoveIt
       Servo's output not following. Never a missing pose, a halt or anything else;
-    * a sender paused for the length of a stall around the release, by its own stamps.
+    * a stream whose pause causes that reason (JOIN_STALL_STREAMS) paused for the length of
+      a stall by its sender's stamps;
+    * the probe took the two messages around the pause as far apart as they were stamped,
+      so the pause is the sender's and not the probe's own (``sender_pauses``);
+    * the pause had begun when the clutch was released and had not ended more than
+      JOIN_AFTER_PAUSE_S before.
 
-    Anything else is ``(False, why not)``.
+    Anything else is ``(False, why not)``. This is the strict side: a stall of a node whose
+    streams the probe does not take, or one during which the probe stalled as well, is not
+    shown and fails the test that asks.
     """
     after = when - joined_at
     if not 0.0 <= after <= JOIN_WINDOW_S:
         return False, (f'it came {abs(after):.2f} s {"after" if after > 0.0 else "before"} the '
                        f'process was started, not within {JOIN_WINDOW_S:g} s after it')
-    if reason not in JOIN_STALL_REASONS:
+    if reason not in JOIN_STALL_STREAMS:
         return False, (f'hold_reason {reason} is not what a stalled node causes (stale input '
                        f'{TeleopState.HOLD_INPUT_STALE}, stale tool pose '
                        f'{TeleopState.HOLD_TOOL_POSE_STALE}, Servo output stopped '
                        f'{TeleopState.HOLD_SERVO_NOT_READY})')
-    listed = ', '.join(f'{name} for {gap * 1000.0:.0f} ms' for name, gap in pauses.items())
-    stalled = {name: gap for name, gap in pauses.items()
-               if JOIN_STALL_MIN_S <= gap <= JOIN_STALL_MAX_S}
-    if not stalled:
-        return False, (f'no stream shows a pause of stall length ({JOIN_STALL_MIN_S:g} to '
-                       f'{JOIN_STALL_MAX_S:g} s) around it; the longest: {listed}')
-    name = max(stalled, key=stalled.get)
+    shown, not_shown = [], []
+    for name, (_, found) in pauses.items():
+        for length, began, ended, taken in found:
+            what = f'{name} for {length * 1000.0:.0f} ms'
+            if name not in JOIN_STALL_STREAMS[reason]:
+                not_shown.append(f'{what}, which does not cause hold_reason {reason}')
+            elif abs(taken - length) > JOIN_ARRIVAL_SLACK_S:
+                not_shown.append(
+                    f'{what} by its stamps, but the probe took the two messages '
+                    f'{taken * 1000.0:.0f} ms apart, so the probe paused or lost messages '
+                    "itself and the pause is not shown to be the sender's")
+            elif began > when + JOIN_ARRIVAL_SLACK_S:
+                not_shown.append(f'{what}, but only from {began - when:.2f} s after the release')
+            elif when > ended + JOIN_AFTER_PAUSE_S:
+                not_shown.append(
+                    f'{what}, which had ended {when - ended:.2f} s before the release')
+            else:
+                shown.append((length, name))
+    if not shown:
+        listed = ', '.join(f'{name} for {longest * 1000.0:.0f} ms'
+                           for name, (longest, _) in pauses.items())
+        return False, (
+            f'no pause of stall length ({JOIN_STALL_MIN_S:g} to {JOIN_STALL_MAX_S:g} s) that '
+            'causes this release is shown around it'
+            + ('; seen: ' + '; '.join(not_shown) if not_shown else '')
+            + f'; the longest of each stream: {listed}')
+    length, name = max(shown)
     return True, (f'{after:.2f} s after the process was started {name} for '
-                  f'{stalled[name] * 1000.0:.0f} ms')
+                  f'{length * 1000.0:.0f} ms')
 
 
 def commanded_period_speed(samples):

@@ -153,7 +153,7 @@ def main() -> int:
                       ARM_JOINTS)
         if not action.ready(10.0):
             if action.client.server_is_ready():
-                print(f'nothing sent: the action server /{name}/follow_joint_trajectory did '
+                print(f'no goal sent: the action server /{name}/follow_joint_trajectory did '
                       'not answer on its cancel path, so a motion could not be stopped')
             else:
                 print(f'no action server /{name}/follow_joint_trajectory. Loaded controllers:')
