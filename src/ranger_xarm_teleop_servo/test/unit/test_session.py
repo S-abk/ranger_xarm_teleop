@@ -44,14 +44,15 @@ def test_recording_never_stops_while_the_clutch_is_engaged():
 
 
 def test_recovery_moves_only_when_moveit_owns_the_arm_and_teleop_is_disarmed():
-    assert session.may_recover(session.OWNER_MOVEIT, False) == (True, '')
-    assert session.may_recover(session.OWNER_MOVEIT, None) == (True, '')    # no teleop node
+    assert session.may_recover(session.OWNER_MOVEIT, False, True) == (True, '')
+    assert session.may_recover(session.OWNER_MOVEIT, None, False) == (True, '')  # no teleop node
     for owner, name in ((session.OWNER_TELEOP, 'TELEOP'), (session.OWNER_NONE, 'NONE'),
                         (session.OWNER_SWITCHING, 'SWITCHING'), (None, 'not reported')):
         for armed in (True, False, None):
-            allowed, why = session.may_recover(owner, armed)
-            assert not allowed and name in why
-    allowed, why = session.may_recover(session.OWNER_MOVEIT, True)
+            for running in (True, False):
+                allowed, why = session.may_recover(owner, armed, running)
+                assert not allowed and name in why
+    allowed, why = session.may_recover(session.OWNER_MOVEIT, True, True)
     assert not allowed and 'armed' in why
 
 

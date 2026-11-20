@@ -123,13 +123,9 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         seen.update(armed=bool(msg.armed), state_at=time.monotonic(),
                     margin=float(msg.keepout_margin))
 
-    def teleop_running() -> bool:
-        """Return whether a teleop node is there: its service, its state topic, or heard."""
-        return (seen['margin'] is not None or disarm.service_is_ready()
-                or node.count_publishers('/teleop/state') > 0)
-
     def allowed():
-        return may_recover(*fresh(), teleop_running())
+        # This tool needs a teleop node (its recorded path): "not armed" must be heard.
+        return may_recover(*fresh(), True)
 
     try:
         # Every client is made here, before the first wait, so that its server has long
@@ -167,12 +163,14 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
                                 'no answer; reading the state back'))
         else:
             print('disarm: no /teleop/disarm service (teleop node not running?)')
-        # With a teleop node running, "not armed" must have been heard, freshly.
-        if not spin(args.wait, lambda: allowed()[0]):
-            print(f'NOT HANDED BACK, no motion goal sent: {allowed()[1]} after '
+        # "Not armed" must have been heard from the teleop node, freshly.
+        spin(args.wait, lambda: allowed()[0])
+        may, why = allowed()
+        if not may:
+            print(f'NOT HANDED BACK, no motion goal sent: {why} after '
                   f'{args.wait:.0f} s. If the arm is still moving, wait and run this again.')
             return 4
-        print(f'MoveIt owns the arm, {recovery_case(fresh()[1])}')
+        print(f'MoveIt owns the arm, {recovery_case(False)}')
 
         # 2. The teleop node's settings and its recorded path.
         names = ['base_frame', 'servo_tip_frame', 'link_keepout_cell_m',

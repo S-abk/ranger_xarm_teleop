@@ -107,8 +107,12 @@ def describe_controllers(controllers: Optional[Sequence[Tuple[str, str, str, Seq
     return '\n'.join(lines)
 
 
+NO_TELEOP_AFTER_S = 5.0     # a tool takes a teleop node to be absent only this long after
+#                             its own start: a node that is there may not have shown yet
+
+
 def may_recover(owner: Optional[int], armed: Optional[bool],
-                teleop_running: bool = False) -> Tuple[bool, str]:
+                teleop_running: bool) -> Tuple[bool, str]:
     """
     Allow a recovery motion only when MoveIt owns the arm and teleop is known not to be armed.
 

@@ -65,6 +65,7 @@ def test_with_no_teleop_node_at_all_a_recovery_works_and_says_so(env, tmp_path):
     assert code == 0, tool
     assert 'disarm: no /teleop/disarm service' in tool
     assert 'MoveIt owns the arm, no teleop node is running' in tool
+    assert 'still looking' not in tool
     assert 'not armed' not in tool and 'disarmed' not in tool      # nothing of it was heard
     assert 'recovered: the arm is at' in tool and 'goal reached' in fake
 
@@ -78,12 +79,32 @@ def test_with_a_teleop_node_the_tool_moves_after_hearing_that_it_is_not_armed(en
 
 
 def test_a_teleop_node_that_reports_nothing_gets_no_goal(env, tmp_path):
-    """The service and the state topic are there, a state never comes: armed or not is unknown."""
+    """The service and the state topic are there, no state comes: armed or not is unknown."""
     code, tool, fake = run(env, tmp_path, 'silent', 1.0, '--wait', '3')
     assert code == 4, tool
-    """The service and the state topic are there, no state comes: armed or not is unknown."""
+    assert 'NOT RECOVERED, no motion goal sent: a teleop node is running and no fresh' in tool
     assert 'whether teleop is armed is not known' in tool
     assert 'MoveIt owns the arm' not in tool
+    assert 'goal accepted' not in fake
+
+
+def test_a_state_topic_alone_shows_a_teleop_node(env, tmp_path):
+    """The disarm service asked for does not exist; the state topic has a publisher."""
+    code, tool, fake = run(env, tmp_path, 'silent', 1.0, '--wait', '3',
+                           '--disarm-service', '/no_such/disarm')
+    assert code == 4, tool
+    assert 'disarm: no /no_such/disarm service' in tool
+    assert 'whether teleop is armed is not known' in tool
+    assert 'no teleop node is running' not in tool and 'goal accepted' not in fake
+
+
+def test_teleop_armed_right_before_the_goal_gets_no_goal(env, tmp_path):
+    """Not armed at the first look, armed once the tool has tried the cancel path."""
+    code, tool, fake = run(env, tmp_path, 'arms_early', 1.0)
+    assert code == 4, tool
+    assert 'MoveIt owns the arm, teleop reports that it is not armed' in tool
+    assert 'NOT RECOVERED, no motion goal sent: MoveIt does not own the arm (owner: TELEOP)' \
+        in tool
     assert 'goal accepted' not in fake
 
 

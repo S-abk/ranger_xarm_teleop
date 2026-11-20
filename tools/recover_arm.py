@@ -53,8 +53,8 @@ sys.path.insert(0, TOOLS)
 from _calls import Calls, Goal, GOAL_ANSWER_S  # noqa: E402
 from ranger_xarm_teleop_servo import calls as rules  # noqa: E402
 from ranger_xarm_teleop_servo.session import ARM_JOINTS, may_recover  # noqa: E402
-from ranger_xarm_teleop_servo.session import READY_POSTURE, recovery_case  # noqa: E402
-from ranger_xarm_teleop_servo.session import STATE_FRESH_S  # noqa: E402
+from ranger_xarm_teleop_servo.session import NO_TELEOP_AFTER_S, READY_POSTURE  # noqa: E402
+from ranger_xarm_teleop_servo.session import recovery_case, STATE_FRESH_S  # noqa: E402
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
 
 
@@ -82,6 +82,7 @@ def main() -> int:
 
     rclpy.init()
     node = rclpy.create_node('recover_arm')
+    started = time.monotonic()
     seen = {'description': None, 'owner': None, 'owner_at': -1e9, 'armed': None,
             'state_at': -1e9}
 
@@ -128,23 +129,34 @@ def main() -> int:
             print(f'disarm: no {args.disarm_service} service (teleop node not running?)')
 
         # 2. MoveIt must own the arm and teleop must not be armed, by fresh reports. With
-        # a teleop node running, "not armed" must have been heard; with none at all (its
-        # service and its state topic absent, nothing heard) a recovery still works.
+        # a teleop node running, "not armed" must have been heard. With none at all (its
+        # service and its state topic absent, nothing heard) a recovery still works; that
+        # is believed only some seconds after this tool started, because a teleop node
+        # that is there may not have shown itself yet.
         def teleop_running() -> bool:
             return (seen['state_at'] > 0.0 or disarm.service_is_ready()
                     or node.count_publishers('/teleop/state') > 0)
 
         def allowed():
-            return may_recover(*fresh(), teleop_running())
+            """Return (allowed, why not, the case it is allowed in)."""
+            owner, armed = fresh()
+            running = teleop_running()
+            if not running and time.monotonic() - started < NO_TELEOP_AFTER_S:
+                return False, 'still looking for a teleop node', ''
+            may, why = may_recover(owner, armed, running)
+            return may, why, recovery_case(armed)
 
         def handed_back() -> bool:
             return allowed()[0]
 
-        if not spin(args.wait, handed_back):
-            print(f'NOT RECOVERED, no motion goal sent: {allowed()[1]} after '
-                  f'{args.wait:.0f} s. If the arm is still moving, wait and run this again.')
+        waited = max(args.wait, NO_TELEOP_AFTER_S)
+        spin(waited, handed_back)
+        may, why, case = allowed()
+        if not may:
+            print(f'NOT RECOVERED, no motion goal sent: {why} after '
+                  f'{waited:.0f} s. If the arm is still moving, wait and run this again.')
             return 4
-        print(f'MoveIt owns the arm, {recovery_case(fresh()[1])}')
+        print(f'MoveIt owns the arm, {case}')
 
         # 3. Plan and execute through move_group.
         if not move.ready(10.0):
@@ -171,7 +183,7 @@ def main() -> int:
         # Once more, right before sending. Waiting for the action server processed no
         # reports, so they may have gone stale meanwhile: wait for fresh ones first.
         spin(2.0, handed_back)
-        may, why = allowed()
+        may, why, _ = allowed()
         if not may:
             print(f'NOT RECOVERED, no motion goal sent: {why}')
             return 4

@@ -26,6 +26,12 @@ TELEOP says what there is of a teleop node:
     disarmed  the service, and a state that says "not armed", 20 times a second
     silent    the service and the state topic, but no state is ever published
     arms      as ``disarmed``, and "armed" from one second after a goal was accepted
+    arms_early  as ``disarmed``, and "armed" from the first request on the action's cancel
+              path (the tool tries that path before it sends a goal); that request is
+              answered 0.4 s later, when the reports have gone out
+
+"Armed" is reported as the teleop node does: together with teleop as the owner, in the
+state and in the mux's report.
 
 Every request is printed.
 """
@@ -110,6 +116,10 @@ def main() -> int:  # noqa: C901 - one small state machine
         if goal is None or bytes(goal['id'].uuid) != wanted:
             response.return_code = CancelGoal.Response.ERROR_UNKNOWN_GOAL_ID
             say('cancel request: a goal the server never had')
+            if teleop == 'arms_early' and 'tried' not in state:
+                state['tried'] = time.monotonic()
+                state['held'] = (response, time.monotonic() + 0.4)
+                return response
         elif goal['status'] == GoalStatus.STATUS_EXECUTING:
             list_status(GoalStatus.STATUS_CANCELING)
             list_status(GoalStatus.STATUS_CANCELED)
@@ -130,6 +140,8 @@ def main() -> int:  # noqa: C901 - one small state machine
 
     def tick() -> None:
         ticks[0] += 1
+        if 'held' in state and time.monotonic() >= state['held'][1]:
+            answer_cancel(state.pop('held')[0])
         later, state['later'] = state['later'], []
         for send, response in later:
             send(response)
@@ -153,12 +165,14 @@ def main() -> int:  # noqa: C901 - one small state machine
         stamp = node.get_clock().now().to_msg()
         joints.publish(JointState(header=Header(stamp=stamp), name=JOINTS,
                                   position=[float(v) for v in state['q']]))
+        armed = ((teleop == 'arms' and goal is not None
+                  and time.monotonic() - goal['start'] > 1.0)
+                 or (teleop == 'arms_early' and 'tried' in state))
+        owns = ArmOwner.OWNER_TELEOP if armed else ArmOwner.OWNER_MOVEIT
         if ticks[0] % 5 == 0:
-            owner.publish(ArmOwner(owner=ArmOwner.OWNER_MOVEIT))
-        if teleop in ('disarmed', 'arms') and ticks[0] % 2 == 0:
-            armed = (teleop == 'arms' and goal is not None
-                     and time.monotonic() - goal['start'] > 1.0)
-            message = TeleopState(armed=armed, owner=ArmOwner.OWNER_MOVEIT)
+            owner.publish(ArmOwner(owner=owns))
+        if teleop in ('disarmed', 'arms', 'arms_early') and ticks[0] % 2 == 0:
+            message = TeleopState(armed=armed, owner=owns)
             message.header.stamp = stamp
             teleop_state.publish(message)
 
