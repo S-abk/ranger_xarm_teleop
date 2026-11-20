@@ -460,6 +460,15 @@ class Probe:
                 best = max(best, max(abs(a - b) for a, b in zip(q1, q0)) / dt)
         return best
 
+    def joint_speeds_in_mock_execution_since(self, t):
+        """Return the largest joint speed since ``t`` as mock execution moves (rad/s)."""
+        with self.lock:
+            rows = [(when, stamp.sec + stamp.nanosec * 1e-9, q)
+                    for when, stamp, q in self.stamped_joints]
+        first = next((i for i, row in enumerate(rows) if row[0] >= t), len(rows))
+        # One state before ``t`` as well: the first step's period ends at the first state.
+        return commanded_period_speed([(stamp, q) for _, stamp, q in rows[max(0, first - 1):]])
+
     def max_joint_change(self, since, reference):
         return max((max(abs(a - b) for a, b in zip(q, reference))
                     for q in self.joints_since(since)), default=0.0)
@@ -1151,6 +1160,32 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
         discarded.append(f'attempt {attempt + 1}: {what}: late on its way')
         print(f'discarded replay of {fixture}: {discarded[-1]}')
     return start, discarded
+
+
+def commanded_period_speed(samples):
+    """
+    Return the largest joint speed in ``samples`` ((stamp in s, positions)) of mock execution.
+
+    Mock execution has no dynamics: at each controller update the hardware reports the
+    position commanded at the update before, stamped now. The step between two joint states
+    was therefore made during the period that ended at the first of them, and its speed is
+    the step over that period: the previous stamp difference, not the step's own.
+
+    The two differ here because the controller's period is uneven without real-time
+    scheduling (6.2 to 7.1 ms around 6.67, at times a doubled one). Dividing a step by its
+    own stamp difference reads the true speed times the ratio of two neighbouring periods,
+    up to a tenth too high or too low. Under Gazebo the positions are measured at their
+    stamps, and ``Probe.joint_speeds_since`` is the right measure there.
+
+    No state is left out. A joint state that never reached the probe makes one step two
+    periods long over a divisor of one, so it reads twice the speed: too high, never too low.
+    """
+    best = 0.0
+    for (s0, _), (s1, q1), (_, q2) in zip(samples, samples[1:], samples[2:]):
+        period = s1 - s0
+        if period > 1e-4:
+            best = max(best, max(abs(a - b) for a, b in zip(q2, q1)) / period)
+    return best
 
 
 # ---- tool speed with the gripper open and closed (gripper_fix) ----

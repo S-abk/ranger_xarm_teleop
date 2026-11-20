@@ -556,3 +556,49 @@ def test_keep_logs_copies_what_the_module_registered(tmp_path, monkeypatch):
                   for d, _, files in os.walk(target) for f in files)
     assert kept == ['00_launch.log', os.path.join('01_ros_log', 'run1', 'teleop_node.log')]
     assert os.path.basename(target).endswith('test_mock_x.py__test_a')
+
+
+def _mock_reports(periods, speed, start=0.0):
+    """Return joint states as mock execution reports them: each update, the command before."""
+    stamps, commands = [start], [0.0]
+    for period in periods:
+        stamps.append(stamps[-1] + period)
+        commands.append(commands[-1] + speed * period)      # commanded over this period
+    # The state stamped at update k carries the command of update k - 1.
+    return [(stamps[k], [commands[k - 1], 0.0]) for k in range(1, len(stamps))]
+
+
+def _own_stamp_speed(samples):
+    return max(abs(q1[0] - q0[0]) / (s1 - s0) for (s0, q0), (s1, q1) in zip(samples, samples[1:]))
+
+
+def test_mock_execution_speed_is_each_step_over_the_period_it_was_commanded_in():
+    # A steady 1.9 rad/s with the uneven periods measured on the mock stack (ms), one doubled.
+    periods = [p * 1e-3 for p in (6.67, 7.04, 6.37, 6.25, 7.08, 13.7, 1.95, 6.67, 6.66, 6.9)]
+    samples = _mock_reports(periods, 1.9)
+    assert stack_helpers.commanded_period_speed(samples) == pytest.approx(1.9, abs=1e-9)
+    # The same states by each step's own stamp difference: the ratio of neighbouring periods.
+    assert _own_stamp_speed(samples) > 2.05
+
+
+def test_mock_execution_speed_still_shows_a_real_overshoot():
+    # Ten updates at 1.9 rad/s, then twenty at 2.3 rad/s, at an even period.
+    stamps, commands = [0.0], [0.0]
+    for k in range(30):
+        stamps.append(stamps[-1] + 6.67e-3)
+        commands.append(commands[-1] + (1.9 if k < 10 else 2.3) * 6.67e-3)
+    samples = [(stamps[k], [commands[k - 1], 0.0]) for k in range(1, len(stamps))]
+    assert stack_helpers.commanded_period_speed(samples) == pytest.approx(2.3, abs=1e-9)
+
+
+def test_mock_execution_speed_reads_too_high_never_too_low_when_a_state_is_missing():
+    samples = _mock_reports([6.67e-3] * 20, 1.9)
+    del samples[8]                              # one joint state never reached the probe
+    assert stack_helpers.commanded_period_speed(samples) > 2.0 * 1.9 - 1e-6
+
+
+def test_mock_execution_speed_needs_three_states_and_skips_a_repeated_stamp():
+    assert stack_helpers.commanded_period_speed([]) == 0.0
+    assert stack_helpers.commanded_period_speed([(0.0, [0.0]), (0.01, [0.5])]) == 0.0
+    repeated = [(0.0, [0.0]), (0.0, [0.0]), (0.01, [0.5]), (0.02, [0.5 + 0.019])]
+    assert stack_helpers.commanded_period_speed(repeated) == pytest.approx(1.9)
