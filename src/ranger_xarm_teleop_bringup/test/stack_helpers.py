@@ -76,7 +76,9 @@ def band_domain(base: int, offset: int) -> int:
 
 KEEP_LOGS_ENV = 'TELEOP_TEST_KEEP_LOGS'
 _LOGS = []      # (test module path, file or directory)
-TEMP_LOG_DIRS = []   # the ROS_LOG_DIRs this session made; removed when it ends (conftest.py)
+# The ROS_LOG_DIR and ROS_HOME of each child environment; removed when the session ends
+# (conftest.py).
+TEMP_LOG_DIRS = []
 
 
 def _current_module() -> str:
@@ -120,7 +122,8 @@ def child_environment(offset: int) -> dict:
     The domain is ``offset`` places after the session's domain in the band 10-99, so that
     test modules, also run in parallel, do not see each other and never reach domains 0-9;
     discovery stays on this machine; an RViz that a launch starts anyway draws off screen,
-    where it aborts (and so fails the test) rather than open a window. A parallel worker
+    where it aborts (and so fails the test) rather than open a window; the controller
+    spawners' lock is this environment's own (``ROS_HOME``). A parallel worker
     (pytest-xdist) needs the session's domain to be set and in the band: it fails rather than
     derive its domain from a default.
     """
@@ -139,6 +142,12 @@ def child_environment(offset: int) -> dict:
     env['ROS_LOG_DIR'] = tempfile.mkdtemp(prefix=f'teleop_test_ros_log_{offset}_')
     register_log(env['ROS_LOG_DIR'])
     TEMP_LOG_DIRS.append(env['ROS_LOG_DIR'])
+    # The controller spawners take one lock file under ROS_HOME (~/.ros unless set), whatever
+    # the domain. With a home of its own, a spawner of this stack neither waits for nor holds
+    # up the spawners of another stack on this machine (a parallel worker's, or a stack
+    # started by hand), and a spawner that hangs blocks this stack only.
+    env['ROS_HOME'] = tempfile.mkdtemp(prefix=f'teleop_test_ros_home_{offset}_')
+    TEMP_LOG_DIRS.append(env['ROS_HOME'])
     return env
 
 

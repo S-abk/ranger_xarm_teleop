@@ -15,6 +15,7 @@
 
 import json
 import os
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -481,6 +482,27 @@ def test_a_press_is_lost_only_when_the_first_frame_is_well_after_the_last_press(
     assert not press_never_arrived([269, 28, 29], 80)           # 27 may have come between cycles
     assert not press_never_arrived([683, 20, 150], 80)          # a gap later: still arrived
     assert not press_never_arrived([5, 6, 7], 80)               # no previous stream
+
+
+# ---- the environment of a stack ----
+
+def test_each_child_environment_has_its_own_home_for_the_spawners_lock(monkeypatch):
+    monkeypatch.setattr(stack_helpers, '_LOGS', [])
+    monkeypatch.setattr(stack_helpers, 'TEMP_LOG_DIRS', [])
+    monkeypatch.delenv('PYTEST_XDIST_WORKER', raising=False)
+    monkeypatch.setenv('ROS_HOME', '/somewhere/shared')
+    try:
+        first = stack_helpers.child_environment(offset=1)
+        second = stack_helpers.child_environment(offset=1)
+        homes = [first['ROS_HOME'], second['ROS_HOME']]
+        assert homes[0] != homes[1] and '/somewhere/shared' not in homes
+        assert all(os.path.isdir(home) and not os.listdir(home) for home in homes)
+        # Removed with the session's other temporary directories, and not the log directory.
+        assert set(homes) <= set(stack_helpers.TEMP_LOG_DIRS)
+        assert first['ROS_LOG_DIR'] != first['ROS_HOME']
+    finally:
+        for path in stack_helpers.TEMP_LOG_DIRS:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 # ---- logs kept when a test fails ----
