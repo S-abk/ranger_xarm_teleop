@@ -540,9 +540,10 @@ says why and what to do. Simulation only, like `move_arm.py`.
 
 All three tools send their motion goal once. A reply can be lost on the way, so when no answer
 comes, to the goal or to the request for its result, the goal counts as unknown, not as
-rejected: the tool cancels every goal of that controller and prints how the controller listed
-the goal, what the cancel achieved and what the joints did (`UNKNOWN`, exit status 1). Look at
-the arm before running the tool again.
+rejected: the tool asks the controller to cancel that goal (its own, named by its id, so no
+other goal is touched) and prints how the controller listed the goal, what the cancel achieved
+and what the joints did since before the goal went out (`UNKNOWN`, exit status 1). Look at the
+arm before running the tool again.
 
 (simulation only, like `tools/move_arm.py`, which prints why a goal was rejected). Without
 `--controller`, `move_arm.py` asks the command mux which controller is MoveIt's (failing that,
