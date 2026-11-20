@@ -124,7 +124,7 @@ def test_an_arm_that_did_not_move_is_reported_so_only_when_it_was_watched_at_res
     assert motion.known and motion.still and motion.from_before and motion.moved == 0.0
     assert 'did not move' in motion.text() and '2.0 s' in motion.text()
     nothing = calls.JointWatch(NAMES).motion(3.0).text()
-    assert nothing.startswith("no joint state with all of the arm's joints arrived")
+    assert nothing.startswith("no fresh joint state with all of the arm's joints was at hand")
     # Joint states came, but none with the joints asked about: the same is said, and not
     # that no joint state arrived.
     other = watch([(0.0, 0.5, 0.0), (0.5, 0.5, 0.0)], mark_at=0.2, names=('j1', 'j9'))
@@ -226,15 +226,14 @@ def test_a_cancel_answer_is_reported_as_what_it_shows_and_no_more():
     # An unknown id: the goal never arrived, or it ended and the server forgot it (a server
     # keeps a finished goal for some seconds only), or it is still on its way. Not one of
     # them is claimed.
-    unknown = calls.cancel_text((2, 0))
-    assert unknown.startswith('the server knew no goal with this id when asked to cancel it')
-    assert 'never reached it, or had ended and been forgotten' in unknown
+    assert calls.cancel_text((2, 0)) == ('the server knew no goal with this id when asked to '
+                                         'cancel it')
     # A goal whose result was lost, cancelled after the server forgot it: no contradiction
     # between what was listed and what the cancel is said to show.
     still = watch([(k * 0.1, 0.5, -0.2) for k in range(31)], mark_at=1.0).motion(3.0)
     text = calls.unanswered_goal("the request for the goal's result", 30.0, [2, 4], (2, 0), still)
     assert 'listed the goal as executing, then succeeded; the server knew no goal' in text
-    assert 'never reached it;' not in text
+    assert 'never reached' not in text
     # A goal already being cancelled (a second request after a late answer) is answered like
     # one that has ended: the text says both.
     past = calls.cancel_text((3, 0))

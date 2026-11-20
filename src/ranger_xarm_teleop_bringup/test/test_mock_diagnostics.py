@@ -137,13 +137,11 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
     """
     probe, env, logs, _ = stack
     probe.disarm()
-    servo_output = []           # (arrival, stamp) of MoveIt Servo's output, a fourth stream
-    # A second of it is kept, so that a pause of this process loses none of it: a gap in its
-    # stamps is then MoveIt Servo's own pause (``stack_helpers.sender_pauses``).
+    servo_output = []           # when MoveIt Servo's output arrived, a fourth stream
+    # A second of it is kept, so that a pause of this process loses none of it.
     watch = probe.node.create_subscription(
         JointTrajectory, '/teleop_arm_controller/joint_trajectory',
-        lambda msg: servo_output.append((time.monotonic(), msg.header.stamp.sec
-                                         + msg.header.stamp.nanosec * 1e-9)),
+        lambda msg: servo_output.append(time.monotonic()),
         QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT))
     recorder, path = start_recorder(env, logs, 'circle')
     late = None

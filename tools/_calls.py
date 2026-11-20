@@ -51,6 +51,7 @@ class Calls:
         self.joints = deque(maxlen=1000)        # the newest (time, {joint: position})
         self.watched = None                     # the joints since the last mark
         self.silent = ''                        # why the last read returned None
+        self._joint_states = joint_states
         self._parameter_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST, depth=rules.PARAMETER_REPLY_DEPTH)
@@ -103,8 +104,18 @@ class Calls:
         self.silent = NO_ANSWER
         return None
 
-    def mark(self, names) -> None:
-        """Count the motion of the joints ``names`` from now (before a goal goes out)."""
+    def mark(self, names, wait: float = 1.0) -> None:
+        """
+        Count the motion of the joints ``names`` from now (before a goal goes out).
+
+        Waits up to ``wait`` s for a joint state of the last 0.2 s with these joints, so that
+        the motion is counted from before the goal. Without one the report says so.
+        """
+        def fresh() -> bool:
+            return (bool(self.joints) and time.monotonic() - self.joints[-1][0] <= 0.2
+                    and all(name in self.joints[-1][1] for name in names))
+        if self._joint_states:
+            self.spin(wait, fresh)
         self.watched = rules.JointWatch(names)
         for sample in list(self.joints):
             self.watched.sample(*sample)

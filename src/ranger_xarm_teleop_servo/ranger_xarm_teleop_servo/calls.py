@@ -110,13 +110,13 @@ GOAL_STATUS = {0: 'unknown', 1: 'accepted', 2: 'executing', 3: 'cancelling', 4: 
 STILL_S = 1.0               # joints are still when none changed by STILL_RAD over this long
 STILL_RAD = 0.001
 CANCEL_NO_ERROR = 0         # action_msgs/srv/CancelGoal return codes
-# What a return code shows, and no more. An unknown id does not show that the goal never
-# reached the server: a server forgets a goal some seconds after it ended (10 s by default),
-# and a goal request still on its way is unknown until it arrives. A goal that is already being
-# cancelled is answered like one that has ended.
+# What a return code shows, and no more. An unknown id has three causes that the caller cannot
+# tell apart: the goal never reached the server; it ended and the server has forgotten it (a
+# server keeps a finished goal for some seconds only, 10 by default in ROS 2 Jazzy); or the
+# goal request is still on its way, and then the arm can still move after the report. A goal
+# that is already being cancelled is answered like one that has ended.
 CANCEL_REASONS = {1: 'the server rejected the cancel request',
-                  2: ('the server knew no goal with this id when asked to cancel it (the goal '
-                      'never reached it, or had ended and been forgotten)'),
+                  2: 'the server knew no goal with this id when asked to cancel it',
                   3: ('the server answered that the goal can no longer be cancelled (it has '
                       'ended, or is already being cancelled)')}
 
@@ -139,8 +139,8 @@ class Motion:
     def text(self) -> str:
         """Say it in words for a report line."""
         if not self.known:
-            return ("no joint state with all of the arm's joints arrived, so whether the arm "
-                    'moved is not known')
+            return ("no fresh joint state with all of the arm's joints was at hand, so whether "
+                    'the arm moved is not known')
         amount = (f'up to {self.moved:.3f} rad' if self.from_before else
                   f'{self.moved:.3f} rad or more (no joint state from before the request was '
                   'at hand)')
