@@ -292,7 +292,7 @@ def test_recovery_moves_nothing_while_teleop_keeps_the_arm(stack):
         assert process.wait(60.0) == 4, process.output()
     finally:
         process.stop()
-    assert 'NOT RECOVERED, nothing moved' in process.output()
+    assert 'NOT RECOVERED, nothing sent' in process.output()
     assert 'owner: TELEOP' in process.output()
     time.sleep(0.5)
     assert probe.max_joint_change(start, before) < 1e-6

@@ -96,3 +96,89 @@ class Reread:
         """Stop wanting an answer (the owner asks from scratch later)."""
         self.wanted = False
         self.request = None
+
+
+# ---- a motion goal without an answer ----
+#
+# A goal is never sent twice, and a missing answer is not a rejection: the controller may be
+# moving. The caller cancels, watches the goal's status and the joints, and reports what it
+# saw. "Nothing moved" is said only when the joints were watched and did not move.
+
+GOAL_STATUS = {0: 'unknown', 1: 'accepted', 2: 'executing', 3: 'cancelling', 4: 'succeeded',
+               5: 'cancelled', 6: 'aborted'}        # action_msgs/msg/GoalStatus
+GOAL_ACTIVE = (1, 2, 3)
+STILL_S = 1.0               # joints are still when none changed by STILL_RAD over this long
+STILL_RAD = 0.001
+CANCEL_NO_ERROR = 0         # action_msgs/srv/CancelGoal return codes
+CANCEL_REASONS = {1: 'the server rejected the cancel request',
+                  2: 'the server knows no such goal',
+                  3: 'the goal had already ended'}
+
+
+class Motion:
+    """What the joint states showed between two moments: how far, and whether it ended."""
+
+    def __init__(self, known: bool, moved: float = 0.0, still: bool = False,
+                 watched_s: float = 0.0) -> None:
+        self.known, self.moved, self.still, self.watched_s = known, moved, still, watched_s
+
+    def text(self) -> str:
+        """Say it in words for a report line."""
+        if not self.known:
+            return 'no joint states arrived, so whether the arm moved is not known'
+        if self.moved < STILL_RAD and self.still:
+            return (f'the joints did not move (largest change {self.moved:.4f} rad in '
+                    f'{self.watched_s:.1f} s)')
+        end = 'are still now' if self.still else 'ARE STILL MOVING'
+        return f'the joints moved by up to {self.moved:.3f} rad and {end}'
+
+
+def motion_seen(samples, names, since: float, now: float, still_s: float = STILL_S,
+                still_rad: float = STILL_RAD) -> Motion:
+    """
+    Return the motion in ``samples`` ((time, {joint: position}), oldest first) since ``since``.
+
+    The reference is the last sample at or before ``since`` (else the first after it).
+    ``still`` needs samples that cover the last ``still_s`` up to ``now``: joint states that
+    stopped arriving do not show an arm at rest.
+    """
+    rows = [(t, [positions[n] for n in names]) for t, positions in samples
+            if all(n in positions for n in names)]
+    if not rows:
+        return Motion(False)
+    before = [row for row in rows if row[0] <= since]
+    reference = before[-1] if before else rows[0]
+    after = [row for row in rows if row[0] >= reference[0]]
+    moved = max(max(abs(a - b) for a, b in zip(q, reference[1])) for _, q in after)
+    recent = [q for t, q in rows if t >= now - still_s]
+    covered = (rows[-1][0] >= now - 0.5 * still_s and rows[0][0] <= now - still_s
+               and len(recent) >= 2)
+    spread = max((max(q[j] for q in recent) - min(q[j] for q in recent)
+                  for j in range(len(names))), default=0.0) if recent else 0.0
+    return Motion(True, moved, covered and spread < still_rad, now - reference[0])
+
+
+def cancel_text(answer) -> str:
+    """Say what a cancel request achieved (``answer``: return code and goals, or None)."""
+    if answer is None:
+        return 'the cancel request was NOT ANSWERED'
+    code, cancelling = answer
+    if code != CANCEL_NO_ERROR:
+        return f'cancel refused: {CANCEL_REASONS.get(code, f"return code {code}")}'
+    if cancelling == 0:
+        return 'the server had no goal to cancel'
+    return f'the server is cancelling {cancelling} goal{"" if cancelling == 1 else "s"}'
+
+
+def status_text(statuses) -> str:
+    """Say what the action server's status topic showed of the goal, in the order seen."""
+    if not statuses:
+        return 'the server never listed the goal'
+    return 'the server listed the goal as ' + ', then '.join(
+        str(GOAL_STATUS.get(status, status)) for status in statuses)
+
+
+def unanswered_goal(what: str, seconds: float, statuses, cancel, motion: Motion) -> str:
+    """Return the report for a request about a goal that got no answer."""
+    return (f'no answer to {what} within {seconds:g} s, so its state is UNKNOWN: '
+            f'{status_text(statuses)}; {cancel_text(cancel)}; {motion.text()}')

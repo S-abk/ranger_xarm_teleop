@@ -37,8 +37,14 @@ uses teleop's controller. Nothing moves when there is no path, the arm is not at
 the path goes deeper into contact on the way back, or no point within the bounds is clear.
 
 **Simulation only**, like ``tools/move_arm.py`` (exit status 3 otherwise). Exit status 0:
-moved and clear, or already clear; 5: refused, nothing moved; 4: not handed back to MoveIt,
-nothing moved; 1: the motion failed or was stopped; 2: something is missing.
+moved and clear, or already clear; 5: refused, nothing sent; 4: not handed back to MoveIt,
+nothing sent; 1: the motion failed, was stopped, or its state is unknown; 2: something is
+missing, nothing sent.
+
+Every read is asked again when no answer comes. The goal is sent once: without an answer to
+it, or to the request for its result, its state is unknown, not rejected. Every goal of the
+controller is then cancelled, and what the controller listed and what the joints did is
+printed.
 """
 
 import argparse
@@ -53,6 +59,8 @@ REPO = os.path.dirname(TOOLS)
 sys.path.insert(0, os.path.join(REPO, 'src', 'ranger_xarm_teleop_servo'))
 sys.path.insert(0, TOOLS)
 
+from _calls import Calls, Goal, GOAL_ANSWER_S, NO_SERVICE  # noqa: E402, I100
+from ranger_xarm_teleop_servo import calls as rules  # noqa: E402
 from ranger_xarm_teleop_servo import keepout as ko  # noqa: E402
 from ranger_xarm_teleop_servo import retreat  # noqa: E402
 from ranger_xarm_teleop_servo import solver as dls  # noqa: E402
@@ -90,12 +98,11 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
     from control_msgs.action import FollowJointTrajectory
     from moveit_msgs.msg import RobotState
     from moveit_msgs.srv import GetStateValidity
-    from move_arm import loaded_controllers, mux_controllers
+    from move_arm import controllers_of, list_client, MUX_NODE
     from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
     from ranger_xarm_teleop_interfaces.srv import GetJointPath
     from rcl_interfaces.srv import GetParameters
     import rclpy
-    from rclpy.action import ActionClient
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import JointState
     from std_msgs.msg import String
@@ -107,14 +114,6 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
     seen = {'description': None, 'owner': None, 'owner_at': -1e9, 'armed': None,
             'state_at': -1e9, 'margin': None, 'joints': None, 'joints_at': -1e9}
 
-    def spin(seconds: float, until=lambda: False) -> bool:
-        end = time.monotonic() + seconds
-        while time.monotonic() < end:
-            if until():
-                return True
-            rclpy.spin_once(node, timeout_sec=0.05)
-        return until()
-
     def fresh():
         now = time.monotonic()
         return (seen['owner'] if now - seen['owner_at'] <= STATE_FRESH_S else None,
@@ -124,14 +123,17 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         seen.update(armed=bool(msg.armed), state_at=time.monotonic(),
                     margin=float(msg.keepout_margin))
 
-    def call(client, request, seconds=5.0):
-        if not client.wait_for_service(timeout_sec=seconds):
-            return None
-        future = client.call_async(request)
-        spin(seconds, future.done)
-        return future.result() if future.done() else None
-
     try:
+        # Every client is made here, before the first wait, so that its server has long
+        # matched it when it is used.
+        calls = Calls(node)
+        spin = calls.spin
+        disarm = node.create_client(Trigger, '/teleop/disarm')
+        parameters = calls.parameter_client(TELEOP_NODE)
+        path_client = node.create_client(GetJointPath, '/teleop/joint_path')
+        validity = node.create_client(GetStateValidity, '/check_state_validity')
+        mux_client = calls.parameter_client(MUX_NODE)
+        controllers_client = list_client(node)
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         node.create_subscription(String, '/robot_description',
@@ -148,12 +150,17 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
             print(f'REFUSED, nothing sent: {err}')
             return 3
 
-        # 1. Disarm, and MoveIt's controller must own the arm.
-        answer = call(node.create_client(Trigger, '/teleop/disarm'), Trigger.Request(), 5.0)
-        print('disarm: ' + (answer.message if answer is not None else
-                            'no answer (teleop node not running?)'))
+        # 1. Disarm, and MoveIt's controller must own the arm. Disarming is asked once:
+        # whether it took effect is read back below, with or without an answer.
+        if spin(5.0, disarm.service_is_ready):
+            asked = disarm.call_async(Trigger.Request())
+            spin(5.0, asked.done)
+            print('disarm: ' + (asked.result().message if asked.done() else
+                                'no answer; reading the state back'))
+        else:
+            print('disarm: no /teleop/disarm service (teleop node not running?)')
         if not spin(args.wait, lambda: may_recover(*fresh())[0]):
-            print(f'NOT HANDED BACK, nothing moved: {may_recover(*fresh())[1]} after '
+            print(f'NOT HANDED BACK, nothing sent: {may_recover(*fresh())[1]} after '
                   f'{args.wait:.0f} s. If the arm is still moving, wait and run this again.')
             return 4
         print('MoveIt owns the arm, teleop is disarmed')
@@ -162,27 +169,39 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         names = ['base_frame', 'servo_tip_frame', 'link_keepout_cell_m',
                  'joint_velocity_limit_names', 'joint_velocity_limits',
                  'linear_speed_cap_m_s', 'angular_speed_cap_rad_s']
-        parameters = node.create_client(GetParameters, f'{TELEOP_NODE}/get_parameters')
-        values = call(parameters, GetParameters.Request(names=names))
-        if values is None or len(values.values) != len(names) or seen['margin'] is None:
-            print('MISSING, nothing moved: the teleop node did not report its settings')
+        values = calls.read(parameters, GetParameters.Request(names=names))
+        if values is None:
+            print('MISSING, nothing sent: ' + (
+                f'no {TELEOP_NODE}/get_parameters service (teleop node not running?)'
+                if calls.silent == NO_SERVICE else
+                'the teleop node did not answer the request for its settings'))
+            return 2
+        if len(values.values) != len(names):
+            print(f'MISSING, nothing sent: the teleop node answered with {len(values.values)} '
+                  f'of its {len(names)} settings ({", ".join(names)}): one of them has no value')
+            return 2
+        if seen['margin'] is None:
+            print('MISSING, nothing sent: no /teleop/state arrived, which carries the '
+                  'keep-out margin')
             return 2
         v = values.values
         base, tip = v[0].string_value, v[1].string_value
         cell = v[2].double_value or ko.DEFAULT_CELL
         limits = dict(zip(v[3].string_array_value, v[4].double_array_value))
         # Optional, without a value unless set (then the service answers nothing for it).
-        optional = call(parameters, GetParameters.Request(names=['min_arming_conditioning']))
+        optional = calls.read(parameters,
+                              GetParameters.Request(names=['min_arming_conditioning']))
         min_conditioning = (optional.values[0].double_value
                             if optional is not None and len(optional.values) == 1
                             else DEFAULT_MIN_ARMING_CONDITIONING)
         margin = seen['margin']
         wanted = max(margin, args.clearance)
-        reply = call(node.create_client(GetJointPath, '/teleop/joint_path'),
-                     GetJointPath.Request())
+        reply = calls.read(path_client, GetJointPath.Request())
         if reply is None:
-            print('MISSING, nothing moved: no /teleop/joint_path service (teleop node not '
-                  'running?)')
+            print('MISSING, nothing sent: ' + (
+                'no /teleop/joint_path service (teleop node not running?)'
+                if calls.silent == NO_SERVICE else
+                'the teleop node did not answer the request for its recorded path'))
             return 2
         path = reply.path
         times = np.array([p.time_from_start.sec + p.time_from_start.nanosec * 1e-9
@@ -199,23 +218,24 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
                                   angular_speed_cap=v[6].double_value)
         spin(2.0, lambda: seen['joints'] is not None)
         if seen['joints'] is None:
-            print('MISSING, nothing moved: no /joint_states')
+            print('MISSING, nothing sent: no /joint_states')
             return 2
         positions = dict(seen['joints'])
         try:
             measured = np.array([positions[name] for name in arm.joint_names])
             extra = model.extra_values(positions)
         except (KeyError, ko.ModelError) as err:
-            print(f'MISSING, nothing moved: joint state without {err}')
+            print(f'MISSING, nothing sent: joint state without {err}')
             return 2
-        validity = node.create_client(GetStateValidity, '/check_state_validity')
 
         def valid(q) -> bool:
+            # Without an answer the state does not count as valid: the retreat stays short
+            # of it, or is refused.
             state = RobotState()
             state.joint_state.name = list(arm.joint_names) + list(extra)
             state.joint_state.position = [float(x) for x in q] + list(extra.values())
-            answer = call(validity, GetStateValidity.Request(robot_state=state,
-                                                             group_name=args.group), 5.0)
+            answer = calls.read(validity, GetStateValidity.Request(robot_state=state,
+                                                                   group_name=args.group))
             return bool(answer is not None and answer.valid)
 
         plan = retreat.plan(
@@ -235,15 +255,20 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
               f'{plan.times[-1]:.1f} s; the largest joint motion {plan.joint_travel:.3f} rad')
 
         # 4. One goal to MoveIt's controller, watched.
-        moveit, teleop, manager = mux_controllers(node)
-        controllers = loaded_controllers(node, manager or '/controller_manager')
+        moveit, teleop, controllers = controllers_of(calls, mux_client, controllers_client)
         name, why = choose_arm_controller(controllers, moveit, teleop)
         if name is None or name == (teleop or TELEOP_CONTROLLER):
-            print(f'MISSING, nothing moved: no MoveIt arm controller ({why or name})')
+            print(f'MISSING, nothing sent: no MoveIt arm controller ({why or name})')
             return 2
-        client = ActionClient(node, FollowJointTrajectory, f'/{name}/follow_joint_trajectory')
-        if not client.wait_for_server(10.0):
-            print(f'MISSING, nothing moved: no action server /{name}/follow_joint_trajectory')
+        # The controller's name is known only now. Its cancel path is tried with a harmless
+        # request before any goal goes out.
+        action = Goal(calls, FollowJointTrajectory, f'/{name}/follow_joint_trajectory')
+        if not action.ready(10.0):
+            print('MISSING, nothing sent: ' + (
+                f'the action server /{name}/follow_joint_trajectory did not answer on its '
+                'cancel path, so a motion could not be stopped'
+                if action.client.server_is_ready() else
+                f'no action server /{name}/follow_joint_trajectory'))
             return 2
         goal = FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = list(arm.joint_names)
@@ -261,43 +286,46 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         spin(2.0, lambda: may_recover(*fresh())[0])
         allowed, why = may_recover(*fresh())
         if not allowed:
-            print(f'NOT HANDED BACK, nothing moved: {why}')
+            print(f'NOT HANDED BACK, nothing sent: {why}')
             return 4
-        sent = client.send_goal_async(goal)
-        spin(10.0, sent.done)
-        handle = sent.result() if sent.done() else None
-        if handle is None or not handle.accepted:
-            print('FAILED, nothing moved: the controller rejected the goal')
+        joint_names = list(arm.joint_names)
+        answer = action.send(goal)
+        if answer == 'unknown':
+            print('UNKNOWN: ' + action.unanswered('the goal', GOAL_ANSWER_S, joint_names))
             return 1
-        result = handle.get_result_async()
-        stopped = ''
-        end = time.monotonic() + plan.times[-1] + 10.0
+        if answer == 'rejected':
+            print('FAILED: the controller rejected the goal; '
+                  + calls.watch(action.sent_at, joint_names, limit=0.0).text())
+            return 1
+
+        def leaves() -> str:
+            """Return why the motion has to stop now, or ''."""
+            positions = dict(seen['joints'])
+            q = np.array([positions[n] for n in arm.joint_names])
+            off = retreat.distance_from_path(plan.postures, q)
+            if time.monotonic() - seen['joints_at'] > STALE_JOINTS_S:
+                return 'no fresh joint states'
+            if off > LEAVES_PATH:
+                return f'the arm left the path by {off:.3f} rad'
+            if fresh()[1]:
+                return 'teleop was armed'
+            return ''
+
+        wait = plan.times[-1] + 10.0
         try:
-            while not result.done():
-                rclpy.spin_once(node, timeout_sec=0.02)
-                positions = dict(seen['joints'])
-                q = np.array([positions[n] for n in arm.joint_names])
-                off = retreat.distance_from_path(plan.postures, q)
-                if time.monotonic() > end:
-                    stopped = 'the motion did not finish in time'
-                elif time.monotonic() - seen['joints_at'] > STALE_JOINTS_S:
-                    stopped = 'no fresh joint states'
-                elif off > LEAVES_PATH:
-                    stopped = f'the arm left the path by {off:.3f} rad'
-                elif fresh()[1]:
-                    stopped = 'teleop was armed'
-                if stopped:
-                    break
+            done, stopped = action.result(wait, stop=leaves)
         except KeyboardInterrupt:
-            stopped = 'interrupted'
+            done, stopped = None, 'interrupted'
+        if stopped == 'unknown':
+            print('UNKNOWN: ' + action.unanswered("the request for the goal's result", wait,
+                                                  joint_names))
+            return 1
         if stopped:
-            cancel = handle.cancel_goal_async()
-            spin(2.0, cancel.done)
-            print(f'STOPPED: {stopped}; motion cancelled')
+            cancel, motion = action.stop(joint_names)
+            print(f'STOPPED: {stopped}; {rules.cancel_text(cancel)}; {motion.text()}')
             return 1
         spin(1.0)
-        done = result.result() if result.done() else None
-        if done is None or done.result.error_code != 0:
+        if done.result.error_code != 0:
             print(f'FAILED: the controller reported {done}')
             return 1
         positions = dict(seen['joints'])
