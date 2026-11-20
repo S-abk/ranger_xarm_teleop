@@ -216,8 +216,10 @@ def test_a_finished_recording_has_ended_once_the_node_reports_its_input_stopped(
     state = _state(input_age=0.03, input_seq=269)
     events = [{'event': 'done', 'id': 1, 'records': 270, 'passes': 1, 'stopped': False,
                'failed': False, 'loop': False, 't': stack_helpers.time.time()}]
+    arrived = SimpleNamespace(age=0.01)                     # the newest state is new
     player = SimpleNamespace(events_of=lambda ident: events, running=lambda: True,
-                             probe=SimpleNamespace(state=lambda: state))
+                             probe=SimpleNamespace(state=lambda: state,
+                                                   state_age=lambda: arrived.age))
     ended = stack_helpers.Replay(player, 1, 'arm_only.jsonl', None)
     assert ended.returncode == 0                            # every record was sent ...
     assert ended.wait(0.05) is None                         # ... but the node still has input
@@ -230,6 +232,12 @@ def test_a_finished_recording_has_ended_once_the_node_reports_its_input_stopped(
     stuck = stack_helpers.Replay(player, 1, 'arm_only.jsonl', None)
     with pytest.raises(AssertionError, match='still reports fresh input'):
         stuck.wait(0.05)
+    # ... unless that fresh input is only the last state the probe ever got: then the teleop
+    # node or the probe stopped, and the message says that instead.
+    arrived.age = 2.4
+    with pytest.raises(AssertionError, match='no teleop state has reached the probe for 2.4 s'):
+        stack_helpers.Replay(player, 1, 'arm_only.jsonl', None).wait(0.05)
+    arrived.age = 0.01
     # A stopped recording, a failed one and a looped one do not wait for anything.
     for change, code in (({'stopped': True}, 2), ({'failed': True}, 1), ({'loop': True}, 0)):
         events[0] = {**events[0], 'stopped': False, 'failed': False, 'loop': False, **change}
@@ -238,6 +246,28 @@ def test_a_finished_recording_has_ended_once_the_node_reports_its_input_stopped(
     player.probe = None
     events[0] = {**events[0], 'stopped': False, 'failed': False, 'loop': False}
     assert stack_helpers.Replay(player, 1, 'x.jsonl', None).wait(0.05) == 0
+
+
+def test_stopping_a_recording_waits_for_the_player_only_and_checks_nothing():
+    # A recording that ends by itself just as it is stopped: every record sent, and the node
+    # still reporting fresh input from something else. stop() runs in finally blocks, so it
+    # must not fail there in place of the test.
+    state = _state(input_age=0.03, input_seq=269)
+    events, sent = [], []
+
+    def send(**command):
+        sent.append(command)
+        events.append({'event': 'done', 'id': 1, 'records': 270, 'passes': 1, 'stopped': False,
+                       'failed': False, 'loop': False, 't': stack_helpers.time.time() - 3.0})
+
+    player = SimpleNamespace(events_of=lambda ident: events, running=lambda: True, send=send,
+                             output=lambda: '', probe=SimpleNamespace(
+                                 state=lambda: state, state_age=lambda: 0.01))
+    playing = stack_helpers.Replay(player, 1, 'arm_only.jsonl', None)
+    playing.stop()
+    assert sent == [{'cmd': 'stop', 'id': 1}] and playing.returncode == 0
+    with pytest.raises(AssertionError, match='still reports fresh input'):
+        playing.wait(0.05)                                  # the check is wait's, as before
 
 
 # ---- the helpers that replay: what is repeated, and what never is ----

@@ -400,6 +400,12 @@ class Probe:
         with self.lock:
             return self.states[-1][1] if self.states else None
 
+    def state_age(self):
+        """Return how long ago the newest TeleopState arrived (s), None before the first."""
+        with self.lock:
+            newest = self.states[-1][0] if self.states else None
+        return None if newest is None else time.monotonic() - newest
+
     def assert_listening(self):
         """Fail unless a TeleopState arrived in the last half second."""
         with self.lock:
@@ -685,10 +691,18 @@ class Replay:
                 or not 0.0 <= state.input_age <= INPUT_TIMEOUT_S):
             self._quiet = True
             return code
-        assert time.time() - done.get('t', time.time()) < QUIET_TIMEOUT_S, (
-            f'{self.path} was sent to its end over {QUIET_TIMEOUT_S} s ago and the teleop node '
-            f'still reports fresh input (age {state.input_age * 1000.0:.0f} ms, seq '
-            f'{state.input_seq}): something else is sending input')
+        if time.time() - done.get('t', time.time()) >= QUIET_TIMEOUT_S:
+            # The newest state the probe has: fresh input in it means something else sends
+            # input only if that state is itself new.
+            age = probe.state_age()
+            assert age is not None and age < 0.5, (
+                f'{self.path} was sent to its end over {QUIET_TIMEOUT_S} s ago and no teleop '
+                f'state has reached the probe for {0.0 if age is None else age:.1f} s (the last '
+                'one still showed fresh input): the teleop node or the probe has stopped')
+            raise AssertionError(
+                f'{self.path} was sent to its end over {QUIET_TIMEOUT_S} s ago and the teleop '
+                f'node still reports fresh input (age {state.input_age * 1000.0:.0f} ms, seq '
+                f'{state.input_seq}): something else is sending input')
         return None
 
     def wait(self, timeout):
@@ -708,10 +722,18 @@ class Replay:
         return f'{self.path}\n' + '\n'.join(lines) + '\n' + self.player.output()[-3000:]
 
     def stop(self):
-        """Stop the recording if it is still playing."""
+        """
+        Stop the recording if it is still playing.
+
+        Waits for the player to report it stopped, not for the stack's input to go quiet
+        (``wait``): this runs in ``finally`` blocks, where a check that fails would replace
+        the failure of the test itself.
+        """
         if self.returncode is None:
             self.player.send(cmd='stop', id=self.ident)
-            self.wait(5.0)
+            end = time.monotonic() + 5.0
+            while self.returncode is None and time.monotonic() < end:
+                time.sleep(0.02)
         self._write_log()
 
     def _write_log(self):
