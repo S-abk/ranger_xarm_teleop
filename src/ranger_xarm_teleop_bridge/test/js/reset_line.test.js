@@ -116,3 +116,21 @@ test('reset: the picture changes when the reset line does', () => {
   s.offer(base(), NOW, SESSION);
   assert.notStrictEqual(FB.panelLines(s.state, NOW).key, key(reset()));
 });
+
+test('reset: a reset vibration on the right hand does not disturb an episode one on the left', () => {
+  const haptic = (over) => Object.assign({
+    type: 'teleop_haptic', v: 1, run: 1, id: 1, hand: 'left', source: 'episode', event: 'REFUSED',
+    priority: 3, pulses: [[1.0, 400, 0]], age_ms: 10, max_age_ms: 300, missed: 0,
+    echo: { session_id: SESSION, seq: 1, t_client: NOW - 25, held_ms: 5 },
+  }, over);
+  const h = FB.createHaptics();
+  assert.strictEqual(h.offer(haptic({ id: 1 }), NOW, SESSION, true), 'played');
+  // A lower priority from another source on the other hand is played, not blocked by the left.
+  assert.strictEqual(h.offer(haptic({ id: 2, hand: 'right', source: 'reset', event: 'START',
+    priority: 2, pulses: [[0.8, 200, 0]] }), NOW, SESSION, true), 'played');
+  const started = h.tick(NOW).map((p) => p.hand).sort();
+  assert.deepStrictEqual(started, ['left', 'right']);
+  // On the same hand another source's lower priority would not cut a playing pattern.
+  assert.strictEqual(h.offer(haptic({ id: 4, source: 'reset', event: 'START', priority: 2,
+    pulses: [[0.8, 200, 0]] }), NOW, SESSION, true), 'lower priority');
+});
