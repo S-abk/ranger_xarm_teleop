@@ -380,8 +380,8 @@ def test_release_during_planning_cancels_the_goal():
 def finish_stop(rig, goal, statuses=(5,)):
     """Answer the cancel, list the goal ended, let the joints rest."""
     if rig.r.cancel_due(rig.now) is not None:
-        rig.r.cancel_sent(rig.now)
-        rig.r.cancel_answered(rig.now, 0, 1)
+        rig.r.cancel_sent(rig.now, goal)
+        rig.r.cancel_answered(rig.now, goal, 0, 1)
     for st in statuses:
         rig.r.on_status(rig.now, goal, st)
     assert rig.r.cancel_due(rig.now + 1.0) is None      # ended: no more requests
@@ -391,8 +391,8 @@ def test_a_stop_ends_once_the_goal_has_ended_and_the_joints_rest_and_is_measured
     rig = Rig()
     goal = rig.moving()
     rig.step(0.0)
-    rig.r.cancel_sent(rig.now)
-    rig.r.cancel_timed_out()                        # the first cancel answer is lost
+    rig.r.cancel_sent(rig.now, goal)
+    rig.r.cancel_timed_out(goal)                    # the first cancel answer is lost
     assert rig.r.cancel_due(rig.now + 0.6) == goal  # asked again
     for k in range(5):                              # the arm still coasts a little
         rig.q[0] -= 0.002
@@ -475,22 +475,88 @@ def test_a_rejected_goal_is_refused():
     assert not rig.r.goal_out
 
 
-def test_a_goal_given_up_as_unknown_that_turns_up_running_is_stopped_again():
-    rig = Rig()
+def give_up(rig):
+    """Send a goal that is never answered and that the server never knows: it is given up."""
     goal = rig.press_to_goal()
     rig.hold(2.1)                                   # no answer: stopped as unknown
     for _ in range(200):                            # at most 4 s
-        if rig.r.cancel_due(rig.now) is None and rig.r.state != rs.STOPPING:
+        due = rig.r.cancel_due(rig.now)
+        if due is None and rig.r.state != rs.STOPPING:
             break
-        if rig.r.cancel_due(rig.now) is not None:
-            rig.r.cancel_sent(rig.now)
-            rig.r.cancel_answered(rig.now, 2, 0)    # "unknown goal"
+        if due is not None:
+            rig.r.cancel_sent(rig.now, due)
+            rig.r.cancel_answered(rig.now, due, 2, 0)   # "unknown goal"
         rig.step(0.0)
     rig.hold(1.5, 0.0)
     assert rig.r.state == rs.STOPPED and not rig.r.goal_out
+    assert rig.r.heartbeat_goal() == (False, bytes(16))
+    return goal
+
+
+def check_orphan(rig, goal):
+    assert rig.r.cancel_due(rig.now) == goal
+    assert rig.r.heartbeat_goal() == (True, goal)   # the watchdog covers it too
+    assert rig.r.last_event == rs.EVENT_STOPPED and rig.r.last_event_reason == rs.NO_ANSWER
+
+
+def test_a_given_up_goal_listed_running_later_is_cancelled():
+    rig = Rig()
+    goal = give_up(rig)
     rig.r.on_status(rig.now, goal, 2)               # it arrived after all, and runs
-    check_stopping(rig, goal, rs.NO_ANSWER)
-    assert rig.r.goal_out
+    check_orphan(rig, goal)
+
+
+def test_a_given_up_goal_accepted_later_then_listed_is_cancelled():
+    """The late answer first, then its status (the usual order): review finding."""
+    rig = Rig()
+    goal = give_up(rig)
+    rig.r.on_goal_answer(rig.now, goal, True)
+    check_orphan(rig, goal)
+    rig.r.on_status(rig.now, goal, 2)
+    rig.step(0.0)
+    assert rig.r.cancel_due(rig.now) == goal or rig.r.orphans[goal].outstanding is not None
+
+
+def test_a_given_up_goal_turning_up_during_a_newer_motion_stops_both():
+    rig = Rig()
+    old = give_up(rig)
+    new = rig.moving()
+    assert new != old
+    rig.r.on_status(rig.now, old, 2)
+    assert rig.r.state == rs.STOPPING and rig.r.reason == rs.NO_ANSWER
+    first = rig.r.cancel_due(rig.now)
+    rig.r.cancel_sent(rig.now, first)
+    second = rig.r.cancel_due(rig.now)
+    assert {first, second} == {old, new}            # each by its own id
+
+
+def test_no_new_goal_while_a_given_up_goal_is_being_cancelled():
+    rig = Rig()
+    goal = give_up(rig)
+    rig.r.on_status(rig.now, goal, 2)
+    rig.hold(0.1, 0.0)
+    rig.hold(0.6)
+    assert rig.r.state == rs.REFUSED and rig.r.reason == rs.BUSY and len(rig.sent) == 1
+    rig.r.cancel_sent(rig.now, goal)
+    rig.r.cancel_answered(rig.now, goal, 0, 1)
+    rig.r.on_status(rig.now, goal, 5)               # cancelled
+    rig.hold(1.3, 0.0)                              # the joints seen at rest
+    assert not rig.r.orphan_active() and goal not in rig.r.orphans
+    assert rig.hold(0.6) is not None                # a press works again
+
+
+def test_a_given_up_goal_listed_ended_is_forgotten():
+    rig = Rig()
+    goal = give_up(rig)
+    rig.r.on_status(rig.now, goal, 6)
+    assert goal not in rig.r.orphans and rig.r.cancel_due(rig.now) is None
+
+
+def test_a_rejected_goal_is_not_watched_afterwards():
+    rig = Rig()
+    goal = rig.press_to_goal()
+    rig.r.on_goal_answer(rig.now, goal, False)
+    assert goal not in rig.r.orphans
 
 
 def test_events_are_counted_with_their_wall_time():

@@ -165,6 +165,7 @@ class Rig:
         self.q = list(START)
         self.armed, self.owner, self.episode = False, OWNER_MOVEIT, EpisodeState.STATE_IDLE
         self.watchdog = True
+        self.echo = True                # the watchdog echoes the newest heartbeat it heard
         self.node._on_description(String(data=SIM_DESCRIPTION))
 
     def stamp(self):
@@ -206,7 +207,8 @@ class Rig:
         self.node._on_owner(ArmOwner(owner=self.owner))
         self.node._on_episode(EpisodeState(state=self.episode))
         if self.watchdog:
-            self.node._on_watchdog(ResetWatchdog(seq=1))
+            echo = self.node.beat_seq if self.echo else 0
+            self.node._on_watchdog(ResetWatchdog(seq=1, heartbeat_seq=echo))
         self.node._on_joints(JointState(name=list(ARM_JOINTS), position=list(self.q)))
 
     def step(self, stick=0.0, frame=True, **frame_kw):
@@ -380,6 +382,39 @@ def test_a_session_change_stops_the_motion(rig):
     r.session = 8
     r.step(1.0)
     assert r.state().reason == ResetState.REASON_SESSION_CHANGED and cancels(r, goal_id)
+
+
+def test_a_sequence_going_backwards_stops_the_motion(rig):
+    r = rig()
+    goal_id, _, _ = r.moving()
+    r.seq -= 5
+    r.step(1.0)
+    assert r.state().reason == ResetState.REASON_SEQ_BACKWARDS and cancels(r, goal_id)
+
+
+def test_a_watchdog_that_does_not_hear_the_heartbeat_counts_as_absent(rig):
+    r = rig()
+    r.echo = False
+    r.hold(1.2, 0.0)
+    r.hold(0.6)
+    assert r.state().reason == ResetState.REASON_WATCHDOG_ABSENT and not r.action.goals
+    assert not r.state().watchdog_alive
+
+
+def test_a_goal_accepted_after_it_was_given_up_is_cancelled_and_announced(rig):
+    """The late answer comes before its status: the heartbeat names it, cancels follow."""
+    r = rig()
+    goal_id, _, future, _ = r.goal()
+    r.cancel.answering = True                       # answers "unknown goal" (not listed)
+    r.hold(2.1)                                     # no answer: stopped as unknown
+    r.hold(4.0, 0.0)                                # the server never knew it: given up
+    assert r.state().state == ResetState.STATE_STOPPED and not r.state().goal_out
+    before = len(r.cancel.requests)
+    future.answer(Handle(True))                     # it was accepted after all
+    r.step(0.0)
+    assert r.beats[-1].goal_out and bytes(r.beats[-1].goal_id) == goal_id
+    assert r.state().goal_out and r.state().last_event == ResetState.EVENT_STOPPED
+    assert [g for g, _ in r.cancel.requests[before:]] == [goal_id]
 
 
 def test_stale_input_stops_the_motion(rig):

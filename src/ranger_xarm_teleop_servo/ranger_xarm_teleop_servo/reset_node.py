@@ -91,6 +91,11 @@ STATE_PERIOD_S = 0.1        # ResetState at 10 Hz, and on change
 JOINTS_FRESH_S = 0.5        # a joint state older than this says nothing about the arm
 GRAPH_LOOK_S = 1.0          # how often the graph is asked who publishes what
 READY_ASK_S = 1.0           # the harmless round trip is asked again after this
+# The watchdog counts as alive while its sign of life is fresh and echoes a heartbeat of this
+# node no more than this many beats old (0.5 s at 50 Hz): it is there and hears this node.
+# Fixed values, not parameters: they are never widened.
+WATCHDOG_TIMEOUT_S = 0.5
+ECHO_LAG_BEATS = 25
 
 
 class StartupRefused(RuntimeError):
@@ -133,7 +138,7 @@ class ResetNode(Node):
             press_threshold=float(p('reset_press_threshold', defaults.press_threshold).value),
             hold_threshold=float(p('reset_hold_threshold', defaults.hold_threshold).value),
             dwell_s=float(p('reset_dwell_s', defaults.dwell_s).value),
-            watchdog_timeout_s=float(p('watchdog_timeout_s', defaults.watchdog_timeout_s).value))
+            watchdog_timeout_s=WATCHDOG_TIMEOUT_S)
         try:
             self.reset = rs.Reset(params, self.posture, postures[self.posture],
                                   self.joint_names, lambda: uuid.uuid4().bytes)
@@ -148,7 +153,7 @@ class ResetNode(Node):
         self.owner: Optional[int] = None
         self.armed: Optional[bool] = None
         self.episode: Optional[int] = None
-        self.watchdog = (False, bytes(16))               # (stopping, goal id)
+        self.watchdog = (False, bytes(16), 0)            # (stopping, goal id, heartbeat echoed)
         self.joints: Optional[tuple] = None
         self.simulator = False
         self.publishers_seen = {STATE_TOPIC: False, EPISODE_TOPIC: False}
@@ -231,7 +236,7 @@ class ResetNode(Node):
         self.seen[EPISODE_TOPIC] = time.monotonic()
 
     def _on_watchdog(self, msg: ResetWatchdog) -> None:
-        self.watchdog = (bool(msg.stopping), bytes(msg.goal_id))
+        self.watchdog = (bool(msg.stopping), bytes(msg.goal_id), int(msg.heartbeat_seq))
         self.seen[WATCHDOG_TOPIC] = time.monotonic()
 
     def _on_joints(self, msg: JointState) -> None:
@@ -256,9 +261,8 @@ class ResetNode(Node):
         mine = False
         for entry in msg.status_list:
             goal_id = bytes(entry.goal_info.goal_id.uuid)
-            if goal_id == self.reset.goal_id:
-                mine = True
-                self.reset.on_status(now, goal_id, int(entry.status))
+            mine = mine or goal_id == self.reset.goal_id
+            self.reset.on_status(now, goal_id, int(entry.status))   # it keeps what is its own
         if not mine:
             self.reset.on_other_status()
 
@@ -325,13 +329,14 @@ class ResetNode(Node):
             return
         request = CancelGoal.Request()
         request.goal_info.goal_id = UUID(uuid=list(goal_id))     # its own id, never zero
-        self.reset.cancel_sent(now)
-        self.cancel_client.call_async(request).add_done_callback(self._cancel_answered)
+        self.reset.cancel_sent(now, goal_id)
+        self.cancel_client.call_async(request).add_done_callback(
+            lambda f, g=goal_id: self._cancel_answered(f, g))
 
-    def _cancel_answered(self, future) -> None:
+    def _cancel_answered(self, future, goal_id: bytes) -> None:
         answer = future.result()
         if answer is not None:
-            self.reset.cancel_answered(time.monotonic(), int(answer.return_code),
+            self.reset.cancel_answered(time.monotonic(), goal_id, int(answer.return_code),
                                        len(answer.goals_canceling))
 
     # ---- the cycle ----
@@ -346,8 +351,8 @@ class ResetNode(Node):
             for topic in self.publishers_seen:
                 self.publishers_seen[topic] = self.count_publishers(topic) > 0
         fresh_s = self.params.state_fresh_s
-        stopping, goal = self.watchdog
-        alive = self._fresh(WATCHDOG_TOPIC, self.params.watchdog_timeout_s, now)
+        stopping, goal, _ = self.watchdog
+        alive = self.watchdog_alive(now)
         return rs.World(
             now=now, since_start=now - self.started, enabled=self.enabled,
             simulator=self.simulator,
@@ -359,6 +364,12 @@ class ResetNode(Node):
             watchdog_alive=alive, watchdog_stopping=alive and stopping, watchdog_goal=goal,
             moveit_ready=self.moveit_ready,
             joints=self.joints if self._fresh('/joint_states', JOINTS_FRESH_S, now) else None)
+
+    def watchdog_alive(self, now: float) -> bool:
+        """Return True while the watchdog's sign of life is fresh and echoes this node's beat."""
+        echoed = self.watchdog[2]
+        return (self._fresh(WATCHDOG_TOPIC, WATCHDOG_TIMEOUT_S, now)
+                and echoed > 0 and self.beat_seq - echoed <= ECHO_LAG_BEATS)
 
     def _cycle(self) -> None:
         now = time.monotonic()
@@ -381,13 +392,14 @@ class ResetNode(Node):
         msg = ResetHeartbeat()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.seq = self.beat_seq
-        msg.goal_out = bool(self.reset.goal_out)
-        msg.goal_id = list(self.reset.goal_id if self.reset.goal_out else bytes(16))
+        out, goal_id = self.reset.heartbeat_goal()      # the current goal, or an orphan's
+        msg.goal_out = bool(out)
+        msg.goal_id = list(goal_id)
         self.beat_pub.publish(msg)
 
     def _publish_state(self, now: float, force: bool = False) -> None:
         r = self.reset
-        key = (r.state, r.reason, r.event_count, r.goal_out)
+        key = (r.state, r.reason, r.event_count, r.heartbeat_goal())
         if not force and key == self.published and now - self.state_at < STATE_PERIOD_S:
             return
         self.published, self.state_at = key, now
@@ -397,15 +409,16 @@ class ResetNode(Node):
         msg.state, msg.reason = r.state, r.reason
         msg.reason_text = r.reason_text()
         msg.posture = self.posture
-        msg.goal_out = bool(r.goal_out)
-        msg.goal_id = list(r.goal_id if r.goal_out and r.goal_id else bytes(16))
+        out, goal_id = r.heartbeat_goal()
+        msg.goal_out = bool(out)
+        msg.goal_id = list(goal_id)
         msg.moveit_error_code = int(r.moveit_error_code)
         msg.event_count = r.event_count
         msg.last_event, msg.last_event_reason = r.last_event, r.last_event_reason
         msg.last_event_wall_time = float(r.last_event_wall)
         msg.stop_distance, msg.stop_time = float(r.stop_distance), float(r.stop_time)
         msg.enabled = bool(self.enabled and self.simulator)
-        msg.watchdog_alive = self._fresh(WATCHDOG_TOPIC, self.params.watchdog_timeout_s, now)
+        msg.watchdog_alive = self.watchdog_alive(now)
         self.state_pub.publish(msg)
 
 

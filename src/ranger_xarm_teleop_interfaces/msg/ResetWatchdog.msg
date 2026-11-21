@@ -8,3 +8,4 @@ bool stopping                   # the watchdog is cancelling a goal now (the res
 uint8[16] goal_id               # the goal it is cancelling or last cancelled (zeros when none)
 uint32 stops                    # how many goals it has cancelled since it started
 string last_report              # what it saw while cancelling the last one
+uint32 heartbeat_seq            # the newest reset heartbeat it heard (0: none): it hears the reset node

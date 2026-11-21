@@ -35,6 +35,12 @@ posture goes out, and the arm moves only while the stick stays held and the inpu
   until the goal has ended) and watches the joints until they rest. A goal whose answer did
   not come is unknown, not refused: it is stopped the same way. "Nothing moved" is said only
   when the joints were watched from before the goal went out and did not move.
+* **A goal given up is still watched.** A goal whose stop ended without it ever being seen
+  ended (the server only ever answered that it knew no such goal) is kept by its id. If it
+  turns up after all, accepted or listed as running, in whatever order and even after a newer
+  goal went out, it is cancelled by its id until it has ended and the joints rest, a motion in
+  progress is stopped too, the heartbeat names it (so the watchdog covers it), and no new goal
+  goes out meanwhile.
 
 The node (``reset_node.py``) feeds this class with the input samples, what it knows of the
 world at every cycle, the joint states and move_group's answers, and carries out what it asks:
@@ -43,7 +49,7 @@ send a goal, send a cancel request. No ROS imports.
 
 from dataclasses import dataclass
 import math
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from ranger_xarm_teleop_bridge.joy_layout import AXIS_NAMES
 
@@ -319,6 +325,9 @@ class Reset:
         self.stop_watch = JointWatch(self.names)
         self.meter: Optional[StopMeter] = None
         self.stop_distance, self.stop_time = math.nan, math.nan
+        # Goals given up without being seen ended: id -> their stop once they turned up.
+        self.orphans: Dict[bytes, Optional[GoalStop]] = {}
+        self.orphan_watch = JointWatch(self.names)
         # Events.
         self.event_count, self.last_event, self.last_event_reason = 0, EVENT_NONE, NONE
         self.last_event_wall = math.nan
@@ -351,13 +360,18 @@ class Reset:
         """Take one joint state (a mapping of joint name to position)."""
         self.sent_watch.sample(when, positions)
         self.stop_watch.sample(when, positions)
+        self.orphan_watch.sample(when, positions)
         if self.meter is not None:
             self.meter.sample(when, positions)
 
     # ---- move_group ----
 
     def on_goal_answer(self, now: float, goal_id: bytes, accepted: bool) -> None:
-        """Take move_group's answer to the goal."""
+        """Take move_group's answer to a goal."""
+        if goal_id in self.orphans:
+            if accepted:
+                self._turned_up(now, goal_id, 'accepted')
+            return
         if goal_id != self.goal_id or self.answer is not None:
             return
         self.answer = 'accepted' if accepted else 'rejected'
@@ -370,7 +384,16 @@ class Reset:
             self._end(REFUSED, MOVEIT_NOT_READY, now, 'move_group rejected the goal')
 
     def on_status(self, now: float, goal_id: bytes, status: int) -> None:
-        """Take a status of a goal from move_group's status topic."""
+        """Take a status of a goal from move_group's status topic (any goal of the server)."""
+        if goal_id in self.orphans:
+            stop = self.orphans[goal_id]
+            if stop is not None:
+                stop.status(now, status)
+            elif status in ACTIVE:
+                self._turned_up(now, goal_id, 'listed as running')
+            elif status in TERMINAL:
+                del self.orphans[goal_id]           # it has ended: nothing to watch
+            return
         if goal_id != self.goal_id:
             return
         self.status = int(status)
@@ -381,18 +404,42 @@ class Reset:
         if status in ACTIVE and self.answer is None and self.state in (PLANNING, MOVING):
             # Listed by the server, the answer to the goal lost on its way: still unknown.
             self.log.append('move_group lists the goal although its answer has not arrived')
-        if (status in ACTIVE and self.state not in (PLANNING, MOVING, STOPPING)
-                and self.answer is None and self.terminal_at is None
-                and self.moveit_error_code == 0):
-            # A goal given up as never arrived (no answer, no result, never listed ended)
-            # turns up running after all.
-            self.goal_out = True
-            self._begin_stop(now, NO_ANSWER, 'listed as running after it was stopped')
+
+    def _turned_up(self, now: float, goal_id: bytes, how: str) -> None:
+        """Cancel a goal given up as never arrived that turns up, and stop what moves now."""
+        if not any(stop is not None for stop in self.orphans.values()):
+            self.orphan_watch.mark(now)
+        stop = GoalStop(goal_id, self.params.cancel_answer_s)
+        self.orphans[goal_id] = stop
+        self.log.append(f'goal {goal_id.hex()}, given up as never arrived, was {how}: '
+                        'cancelling it')
+        if self.state in (PLANNING, MOVING):
+            self._begin_stop(now, NO_ANSWER, f'an earlier goal was {how} after it was given up')
+        elif self.state != STOPPING:
+            self.state, self.reason = STOPPED, NO_ANSWER
+            self.detail = f'an earlier goal was {how} after it was given up; cancelling it'
+            self._event(EVENT_STOPPED, NO_ANSWER, now)
+
+    def orphan_active(self) -> bool:
+        """Return True while a goal given up earlier is being cancelled."""
+        return any(stop is not None for stop in self.orphans.values())
+
+    def heartbeat_goal(self) -> Tuple[bool, bytes]:
+        """Return (a goal is out, its id) for the heartbeat: the current goal, or an orphan's."""
+        if self.goal_out and self.goal_id is not None:
+            return True, self.goal_id
+        for goal_id, stop in self.orphans.items():
+            if stop is not None:
+                return True, goal_id
+        return False, bytes(16)
 
     def on_other_status(self) -> None:
-        """Note a status message that did not list this goal."""
+        """Note a status message that did not list the current goal."""
         if self.stop is not None:
             self.stop.other_status()
+        for stop in self.orphans.values():
+            if stop is not None:
+                stop.other_status()
 
     def on_feedback(self, goal_id: bytes, state: str) -> None:
         """Take move_group's feedback (its state: PLANNING, MONITOR while executing, IDLE)."""
@@ -427,25 +474,37 @@ class Reset:
 
     # ---- cancel requests (the node sends them) ----
 
+    def _stop_of(self, goal_id: bytes) -> Optional[GoalStop]:
+        if self.stop is not None and goal_id == self.goal_id:
+            return self.stop
+        return self.orphans.get(goal_id)
+
     def cancel_due(self, now: float) -> Optional[bytes]:
-        """Return the goal id to send a cancel request for now, or None."""
+        """Return the goal id to send a cancel request for now, or None (one per call)."""
         if self.stop is not None and self.stop.due(now):
             return self.goal_id
+        for goal_id, stop in self.orphans.items():
+            if stop is not None and stop.due(now):
+                return goal_id
         return None
 
-    def cancel_sent(self, now: float) -> None:
-        """Note that a cancel request went out."""
-        self.stop.sent(now)
+    def cancel_sent(self, now: float, goal_id: bytes) -> None:
+        """Note that a cancel request for ``goal_id`` went out."""
+        stop = self._stop_of(goal_id)
+        if stop is not None:
+            stop.sent(now)
 
-    def cancel_answered(self, now: float, code: int, cancelling: int) -> None:
-        """Take the answer to a cancel request."""
-        if self.stop is not None:
-            self.stop.answered(now, code, cancelling)
+    def cancel_answered(self, now: float, goal_id: bytes, code: int, cancelling: int) -> None:
+        """Take the answer to a cancel request for ``goal_id``."""
+        stop = self._stop_of(goal_id)
+        if stop is not None:
+            stop.answered(now, code, cancelling)
 
-    def cancel_timed_out(self) -> None:
-        """Note that the open cancel request got no answer in time."""
-        if self.stop is not None:
-            self.stop.timed_out()
+    def cancel_timed_out(self, goal_id: bytes) -> None:
+        """Note that the open cancel request for ``goal_id`` got no answer in time."""
+        stop = self._stop_of(goal_id)
+        if stop is not None:
+            stop.timed_out()
 
     # ---- the cycle ----
 
@@ -463,6 +522,7 @@ class Reset:
         elif stick < self.params.hold_threshold:
             self.need_release = False
         held = broken == NONE and stick >= self.params.hold_threshold
+        self._watch_orphans(now)
         if self.state in (PLANNING, MOVING):
             self._watch_goal(now, world, broken, held)
             return None
@@ -490,6 +550,8 @@ class Reset:
             return None
         self.need_release = True                        # whatever happens, a new press next
         why = self.dwell_refusal
+        if why == NONE and self.orphan_active():
+            why = BUSY
         if why != NONE:
             self._end(REFUSED, why, now)
             return None
@@ -555,6 +617,25 @@ class Reset:
         self._event(EVENT_RELEASED if reason == RELEASED else EVENT_STOPPED, reason, now)
         self.log.append(f'stopping: {REASON_TEXT[reason]}' + (f' ({detail})' if detail else ''))
 
+    def _watch_orphans(self, now: float) -> None:
+        motion = self.orphan_watch.motion(now)
+        for goal_id, stop in list(self.orphans.items()):
+            if stop is None:
+                continue
+            stop.tick(now)
+            if stop.finished(motion):
+                self.log.append(f'earlier goal {goal_id.hex()} stopped: {stop.report(motion)}')
+                if any(s in (4, 5, 6) for s in stop.statuses):
+                    del self.orphans[goal_id]
+                else:
+                    self.orphans[goal_id] = None    # still never seen ended: keep watching
+        while len(self.orphans) > 32:               # the oldest given-up goals are forgotten
+            oldest = next(k for k, v in self.orphans.items() if v is None) \
+                if any(v is None for v in self.orphans.values()) else None
+            if oldest is None:
+                break
+            del self.orphans[oldest]
+
     def _watch_stop(self, now: float) -> None:
         self.stop.tick(now)
         if self.stop.ended_by:
@@ -562,6 +643,10 @@ class Reset:
         motion = self.stop_watch.motion(now)
         if not self.stop.finished(motion):
             return
+        if (self.terminal_at is None and self.moveit_error_code == 0
+                and self.answer != 'rejected'):
+            # Never seen ended: if it turns up after all, it is cancelled then.
+            self.orphans[self.goal_id] = None
         self.stop_distance, self.stop_time = self.meter.result()
         report = self.stop.report(motion)
         self.log.append(f'stopped ({REASON_TEXT[self.stop_reason]}): {report}; '

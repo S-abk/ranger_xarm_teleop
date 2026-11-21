@@ -32,7 +32,8 @@ import sys
 import threading
 import time
 
-from ranger_xarm_teleop_interfaces.msg import EpisodeState, ResetState, ResetWatchdog
+from ranger_xarm_teleop_interfaces.msg import (EpisodeState, InputStatus, ResetState,
+                                               ResetWatchdog)
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from stack_helpers import ARM_JOINTS, node_pids, READY, replay_file, SERVO_FIXTURES
 
@@ -68,10 +69,12 @@ def write_recording(path, phases):
     """
     session = next(_SESSIONS)
     lines, begins, i = [], [], 0
+    firsts = []                     # (session id, seq) of each phase's first frame
     for seconds, how in phases:
         begins.append(i / mf.RATE_HZ)
         if how.get('session') == 'new':
             session = next(_SESSIONS)
+        firsts.append((session, i))
         for _ in range(int(round(seconds * mf.RATE_HZ))):
             right = None
             if how.get('controller', True):
@@ -87,6 +90,7 @@ def write_recording(path, phases):
             i += 1
     with open(path, 'w', encoding='utf-8', newline='\n') as handle:
         handle.write('\n'.join(lines) + '\n')
+    write_recording.firsts = firsts
     return begins
 
 
@@ -98,10 +102,30 @@ class ResetWatcher:
         self.lock = threading.Lock()
         self.states = []            # (monotonic, ResetState)
         self.alive = []             # (monotonic, ResetWatchdog)
+        self.frames = []            # (monotonic, session id, seq) of every input status
+        probe.node.create_subscription(InputStatus, '/teleop/input/status', self._on_frame, 50)
         probe.node.create_subscription(ResetState, '/teleop/reset/state', self._on_state,
                                        RESET_QOS)
         probe.node.create_subscription(ResetWatchdog, '/teleop/reset/watchdog', self._on_alive,
                                        LIVENESS_QOS)
+
+    def _on_frame(self, msg):
+        with self.lock:
+            self.frames.append((time.monotonic(), int(msg.session_id), int(msg.seq)))
+
+    def frame_arrival(self, session, seq, last_before=False):
+        """
+        Return when the probe received frame ``seq`` of ``session``; None if none arrived.
+
+        The first frame at or after ``seq`` counts; with ``last_before``, the last one before it.
+        """
+        with self.lock:
+            frames = [(w, q) for w, sid, q in self.frames if sid == session]
+        if last_before:
+            before = [w for w, q in frames if q < seq]
+            return before[-1] if before else None
+        after = [w for w, q in frames if q >= seq]
+        return after[0] if after else None
 
     def _on_state(self, msg):
         with self.lock:
@@ -167,21 +191,41 @@ class EpisodeStandIn:
     """Publishes an EpisodeState at 5 Hz, as the episode node does (IDLE unless set)."""
 
     def __init__(self, probe):
-        self.state = EpisodeState.STATE_IDLE
+        self._state = EpisodeState.STATE_IDLE
         self.pub = probe.node.create_publisher(EpisodeState, '/teleop/episode/state',
                                                EPISODE_QOS)
         self.running = True
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
+    @property
+    def state(self):
+        return self._state
+
+    @state.setter
+    def state(self, value):
+        """Change the state and publish it at once (a test then need not wait a period)."""
+        self._state = value
+        self.pub.publish(EpisodeState(state=value))
+
     def _run(self):
         while self.running:
-            self.pub.publish(EpisodeState(state=self.state))
+            self.pub.publish(EpisodeState(state=self._state))
             time.sleep(0.2)
 
     def close(self):
         self.running = False
         self.thread.join(1.0)
+
+
+def _resting(probe, since, window=0.5):
+    """Return True when the joints changed by no more than 0.001 rad over the last ``window``."""
+    now = time.monotonic()
+    if now - since < window:
+        return False
+    recent = [q for w, q in probe.timed_joints_since(now - window)]
+    return len(recent) >= 5 and all(
+        max(q[j] for q in recent) - min(q[j] for q in recent) <= 0.001 for j in range(6))
 
 
 def stop_measure(probe, request_at, settle=1.5):
@@ -193,7 +237,7 @@ def stop_measure(probe, request_at, settle=1.5):
 
     Rest is the last joint state that differs from the final one by more than 0.001 rad.
     """
-    time.sleep(settle)
+    probe.wait_for(lambda: _resting(probe, request_at), settle + 10.0, 'the joints to rest')
     timed = probe.timed_joints_since(request_at - 0.2)
     before = [(w, q) for w, q in timed if w < request_at]
     after = [(w, q) for w, q in timed if w >= request_at]
@@ -270,19 +314,26 @@ def stopped_midway(stack, name, phases, reason):
     probe, watch = stack['probe'], stack['watch']
     ready_after(stack, stack['far'])
     start, begins, _ = play(stack, name, phases)
+    session, seq = write_recording.firsts[2]
+    # The hold ends with the third phase's first frame, as the probe received it; a hold that
+    # ends with the input itself (no third phase) ends with the last frame received.
+    if phases[2][0] > 0.0:
+        release = watch.frame_arrival(session, seq)
+    else:
+        release = watch.frame_arrival(session, seq, last_before=True)
+    assert release is not None, 'the probe received no frame of the end of the hold'
     when, stopping = watch.wait(start, S.STATE_STOPPING, 5.0, after=stack['count'])
     assert stopping.reason == reason, describe(stopping)
-    travel, rest, speed, tool = stop_measure(probe, when)
+    travel, rest, speed, tool = stop_measure(probe, release)
     _, stopped = watch.wait(start, S.STATE_STOPPED, 10.0, after=stack['count'])
     assert stopped.reason == reason, describe(stopped)
     assert not at(probe, READY, 0.05), 'it ran on to the posture'
     assert speed > 0.05, f'the arm was not moving when the hold ended ({speed:.3f} rad/s)'
-    release = start + begins[2]
     stack['results'].append(
-        f'{name}: hold ended at {begins[2]:.2f} s; stop request {when - release:+.3f} s after '
-        f'it; joint speed then {speed:.3f} rad/s; joints travelled {travel:.4f} rad and the tool '
-        f'{tool * 1000.0:.1f} mm after the request; rest {rest:.2f} s after it (node: '
-        f'{stopped.stop_distance:.4f} rad, {stopped.stop_time:.2f} s)')
+        f'{name}: from the end of the hold (its frame at the probe): stop request '
+        f'{when - release:+.3f} s; joint speed then {speed:.3f} rad/s; joints travelled '
+        f'{travel:.4f} rad and the tool {tool * 1000.0:.1f} mm; rest {rest:.2f} s (node, from '
+        f'its stop request: {stopped.stop_distance:.4f} rad, {stopped.stop_time:.2f} s)')
     return travel, rest, when - release
 
 

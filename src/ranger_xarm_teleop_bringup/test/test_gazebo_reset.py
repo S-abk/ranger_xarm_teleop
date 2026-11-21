@@ -89,8 +89,7 @@ def test_held_the_arm_reaches_the_ready_posture_in_gazebo(stack, index):
     start, _, _ = play(stack, f'reach_{index}', [phase(0.3), phase(10.0, 1.0), phase(0.3)])
     when, arrived = watch.wait(start, S.STATE_ARRIVED, 10.0, after=stack['count'])
     assert arrived.reason == S.REASON_REACHED
-    time.sleep(1.0)
-    assert at(probe, READY, 0.02), probe.joint_positions()
+    probe.wait_for(lambda: at(probe, READY, 0.02), 3.0, 'the joints at the ready posture')
     assert gripper(probe) == grip
     stack['results'].append(f'gazebo reach {index}: arrived {when - start:.2f} s after the '
                             'recording began')
@@ -138,13 +137,11 @@ def test_a_press_while_armed_is_refused_in_gazebo(stack):
 
 def test_a_press_while_an_episode_waits_for_review_is_refused_in_gazebo(stack):
     episode = stack['episode']
-    episode.state = EpisodeState.STATE_REVIEW
+    episode.state = EpisodeState.STATE_REVIEW      # published at once; the press follows
     try:
-        time.sleep(0.5)
         refused(stack, 'review', S.REASON_REVIEW)
     finally:
         episode.state = EpisodeState.STATE_IDLE
-        time.sleep(0.5)
 
 
 def test_the_reset_node_killed_midway_is_stopped_by_the_watchdog_in_gazebo(stack):

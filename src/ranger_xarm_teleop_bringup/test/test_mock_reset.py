@@ -91,8 +91,7 @@ def test_held_the_arm_reaches_the_ready_posture_from_another_posture(stack, inde
     start, _, _ = play(stack, f'reach_{index}', [phase(0.3), phase(8.0, 1.0), phase(0.3)])
     when, arrived = watch.wait(start, S.STATE_ARRIVED, 5.0, after=stack['count'])
     assert arrived.reason == S.REASON_REACHED, describe(arrived)
-    time.sleep(0.5)
-    assert at(probe, READY, 0.01), probe.joint_positions()
+    probe.wait_for(lambda: at(probe, READY, 0.01), 2.0, 'the joints at the ready posture')
     assert gripper(probe) == grip                        # the gripper is never moved
     assert len(watch.goals_since(start)) == 1
     assert not any(s.state == S.STATE_STOPPING for _, s in watch.since(start, stack['count']))
@@ -145,7 +144,13 @@ def test_looking_away_and_other_pose_only_conditions_do_not_stop_the_arm(stack):
     assert at(probe, READY, 0.01)
 
 
-def test_a_release_during_planning_cancels_the_goal(stack):
+def test_a_release_right_after_the_dwell_cancels_the_goal_and_nothing_moves(stack):
+    """
+    Released 60 ms after the dwell: the goal is out and is cancelled before the arm moves.
+
+    Mock planning is quick, so the release can reach the node while move_group is still
+    planning or just as it starts executing; what is asserted is that the joints did not move.
+    """
     probe, watch = stack['probe'], stack['watch']
     ready_after(stack, FAR)
     before = probe.joint_positions()
@@ -155,8 +160,9 @@ def test_a_release_during_planning_cancels_the_goal(stack):
     watch.wait(start, S.STATE_STOPPED, 10.0, S.REASON_RELEASED, after=after)
     moved = probe.max_joint_change(start, before)
     seen = sorted({s.state for _, s in watch.since(start, stack['count'])})
-    note(stack, f'release during planning: the joints moved {moved:.4f} rad; states seen '
-                f'{seen} (mock planning can end before the release is seen)')
+    note(stack, f'release right after the dwell: the joints moved {moved:.4f} rad; states seen '
+                f'{seen} (3 planning, 4 moving, 5 stopping, 6 stopped)')
+    assert len(watch.goals_since(start)) == 1
     assert moved < 0.02, moved
 
 
@@ -181,13 +187,21 @@ def test_a_press_while_armed_is_refused(stack):
 
 def test_a_press_while_an_episode_waits_for_review_is_refused(stack):
     episode = stack['episode']
-    episode.state = EpisodeState.STATE_REVIEW
+    episode.state = EpisodeState.STATE_REVIEW      # published at once; the press follows
     try:
-        time.sleep(0.5)
         refused(stack, 'review', S.REASON_REVIEW)
     finally:
         episode.state = EpisodeState.STATE_IDLE
-        time.sleep(0.5)
+
+
+def test_a_press_while_an_episode_records_is_refused(stack):
+    """Stood in: a real episode stops by itself when teleop is disarmed (then: review)."""
+    episode = stack['episode']
+    episode.state = EpisodeState.STATE_RECORDING
+    try:
+        refused(stack, 'recording', S.REASON_RECORDING)
+    finally:
+        episode.state = EpisodeState.STATE_IDLE
 
 
 def test_a_posture_moveit_considers_in_collision_moves_nothing_and_says_so(stack):
@@ -199,8 +213,9 @@ def test_a_posture_moveit_considers_in_collision_moves_nothing_and_says_so(stack
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 10.0, 'teleop owning')
     positions = np.array(path['positions'])
     probe.publish_path(positions, path['times'])
-    time.sleep(path['times'][-1] + 2.0)
-    assert float(np.max(np.abs(np.array(probe.joint_positions()) - positions[-1]))) < 0.01
+    probe.wait_for(lambda: float(np.max(np.abs(np.array(probe.joint_positions())
+                                               - positions[-1]))) < 0.01,
+                   path['times'][-1] + 5.0, 'the recorded contact posture')
     probe.disarm()
     before = probe.joint_positions()
     start = refused(stack, 'collision', S.REASON_START_IN_COLLISION, goal=True)
@@ -233,19 +248,30 @@ def test_the_reset_node_killed_midway_is_stopped_by_the_watchdog(stack):
     assert "for this goal's own id" in report
 
 
+def sim_speed_scaling():
+    """Return reset_speed_scaling from the simulation-only limits file, as the launch does."""
+    import yaml
+    from ament_index_python.packages import get_package_share_directory
+    path = os.path.join(get_package_share_directory('ranger_xarm_teleop_bringup'), 'config',
+                        'SIMULATION_ONLY_limits.yaml')
+    with open(path, encoding='utf-8') as handle:
+        return float(yaml.safe_load(handle)['/**']['ros__parameters']['reset_speed_scaling'])
+
+
 def restart_reset_node(stack):
     from ament_index_python.packages import get_package_share_directory
     share = get_package_share_directory('ranger_xarm_teleop_bringup')
     node = Process(['ros2', 'run', 'ranger_xarm_teleop_servo', 'reset_node', '--ros-args',
                     '--params-file', os.path.join(share, 'config', 'reset.yaml'),
-                    '-p', 'reset_speed_scaling:=0.2', '-p', 'enabled:=true'],
+                    '-p', f'reset_speed_scaling:={sim_speed_scaling()}', '-p', 'enabled:=true'],
                    stack['env'], str(stack['logs'] / 'reset_node_again.log'))
     stack['reset_again'] = node
     since = time.monotonic()
+    # Alive and enabled: it hears the watchdog's echo of its own heartbeat. The teleop and
+    # episode states it hears at once (they are published), so no discovery wait is left.
     stack['probe'].wait_for(lambda: any(s.watchdog_alive and s.enabled
                                         for _, s in stack['watch'].since(since)), 30.0,
                             'the restarted reset node')
-    time.sleep(6.0)                 # past its discovery time for the teleop and episode nodes
 
 
 def test_the_watchdog_killed_midway_stops_the_motion(stack):

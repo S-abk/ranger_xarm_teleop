@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""INV-6 for the reset feedback module: no ROS imports, loads without ROS."""
+"""INV-8 for the reset feedback module: no ROS imports, loads without ROS."""
 
 import os
 import subprocess

@@ -56,8 +56,8 @@ class ResetWatchdogNode(Node):
     def __init__(self, node_name: str = 'reset_watchdog', parameter_overrides=None) -> None:
         """Make the clients and subscriptions; start the cycle."""
         super().__init__(node_name, parameter_overrides=parameter_overrides or [])
-        timeout = float(self.declare_parameter('heartbeat_timeout_s',
-                                               rw.HEARTBEAT_TIMEOUT_S).value)
+        # The heartbeat limit is a fixed value, not a parameter: it is never widened.
+        timeout = rw.HEARTBEAT_TIMEOUT_S
         names = list(self.declare_parameter('arm_joints', list(ARM_JOINTS)).value)
         self.dog = rw.Watchdog(names, heartbeat_timeout_s=timeout)
         self.create_subscription(ResetHeartbeat, HEARTBEAT_TOPIC, self._on_beat, LIVENESS_QOS)
@@ -133,6 +133,7 @@ class ResetWatchdogNode(Node):
         msg.goal_id = list(self.dog.stop_id or bytes(16))
         msg.stops = self.dog.stops
         msg.last_report = self.dog.last_report
+        msg.heartbeat_seq = int(self.dog.beat_seq or 0)
         self.alive_pub.publish(msg)
 
 
