@@ -21,8 +21,10 @@ one, and its headset pose if the status announces one. A status waits at most
 ``PAIR_WAIT_S`` for its parts; after that the frame is handed on without them, and a missing
 part then counts as absent. Frames are handed on in the order their status arrived.
 
-Any node that judges headset input uses this one assembler, so that all of them see the same
-frames. The message arguments are duck-typed, so this module imports no message package.
+Any node that judges headset input uses this one assembler, so that all of them pair by the
+same rule. Each node keeps its own assembler on its own arrival clock: the same stamp can be
+complete in one node and late in another. The message arguments are duck-typed, so this module
+imports no message package.
 """
 
 from collections import deque
