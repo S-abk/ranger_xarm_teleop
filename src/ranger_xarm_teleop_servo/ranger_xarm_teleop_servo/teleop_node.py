@@ -72,7 +72,7 @@ import math
 import sys
 import threading
 import time
-from typing import Dict, Optional
+from typing import Optional
 
 from ament_index_python.packages import get_package_share_directory
 from control_msgs.msg import JointJog
@@ -90,10 +90,10 @@ from ranger_xarm_teleop_servo import keepout as ko
 from ranger_xarm_teleop_servo import params as gate_params
 from ranger_xarm_teleop_servo import rigid_pairs
 from ranger_xarm_teleop_servo import solver as dls
-from ranger_xarm_teleop_servo.frames import (ARM_BUTTON, CALIBRATE_BUTTON, CLUTCH_BUTTON,
-                                             SCALE_BUTTON, TRIGGER_AXIS)
 from ranger_xarm_teleop_servo.gate import (Env, Frame, frame_fault, GateState, Hold, Limit,
                                            on_frame, tick)
+from ranger_xarm_teleop_servo.input_frames import (FrameAssembler, gate_frame, PAIR_WAIT_S,
+                                                   stamp_key)
 from ranger_xarm_teleop_servo.kinematics import ChainError
 from ranger_xarm_teleop_servo.retreat import PathRecorder
 from ranger_xarm_teleop_servo.rotations import (inverse, Pose, pose_from_matrix, pose_to_matrix,
@@ -145,7 +145,6 @@ TF_STATIC_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                            history=HistoryPolicy.KEEP_LAST, depth=100,
                            durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-PAIR_WAIT_S = 0.02          # how long a status waits for the pose and joy of its frame
 SLOW_CYCLE_S = 0.01         # a cycle longer than this is reported
 LATE_START_S = 0.03         # a cycle starting this long after the previous one is counted
 CYCLE_REPORT_S = 60.0       # how often the slow and late cycles are summed up in the log
@@ -226,11 +225,6 @@ _OPTIONAL = {
 
 class StartupRefused(RuntimeError):
     """The node must not start with this configuration."""
-
-
-def stamp_key(stamp) -> int:
-    """Return a header stamp as integer nanoseconds (the pairing key)."""
-    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
 def pose_of(msg) -> Pose:
@@ -423,10 +417,7 @@ class TeleopNode(Node):
         self.steady = Clock(clock_type=ClockType.STEADY_TIME)
 
         # Input pairing: messages of one headset frame share one stamp.
-        self._poses: Dict[int, Pose] = {}
-        self._heads: Dict[int, Pose] = {}
-        self._joys: Dict[int, Joy] = {}
-        self._pending: deque = deque()
+        self.frames = FrameAssembler(PAIR_WAIT_S)
 
         # Frames. Fixed transforms come from /tf_static only.
         self.static = StaticGraph()
@@ -606,36 +597,32 @@ class TeleopNode(Node):
 
     def _on_pose(self, msg: PoseStamped) -> None:
         self._input_arrived()
-        self._poses[stamp_key(msg.header.stamp)] = pose_of(msg.pose)
+        self.frames.add_pose(stamp_key(msg.header.stamp), pose_of(msg.pose))
         self._assemble()
 
     def _on_head(self, msg: PoseStamped) -> None:
         self._input_arrived()
-        self._heads[stamp_key(msg.header.stamp)] = pose_of(msg.pose)
+        self.frames.add_head(stamp_key(msg.header.stamp), pose_of(msg.pose))
         self._assemble()
 
     def _on_joy(self, msg: Joy) -> None:
         self._input_arrived()
-        self._joys[stamp_key(msg.header.stamp)] = msg
+        self.frames.add_joy(stamp_key(msg.header.stamp), msg)
         self._assemble()
 
     def _on_status(self, msg: InputStatus) -> None:
-        self._pending.append((self._input_arrived(), msg))
+        self.frames.add_status(self._input_arrived(), msg)
         self._assemble()
 
     def _assemble(self) -> None:
         """Hand complete frames to the gate, in order; give up on a part after PAIR_WAIT_S."""
         now = self.mono()
-        while self._pending:
-            arrival, status = self._pending[0]
-            key = stamp_key(status.header.stamp)
-            complete = (key in self._joys
-                        and (not status.right.pose_present or key in self._poses)
-                        and (not status.viewer_present or key in self._heads))
-            if not complete and now - arrival < PAIR_WAIT_S:
+        while True:
+            paired = self.frames.take(now)
+            if paired is None:
                 return
-            self._pending.popleft()
-            self._diagnose_frame(status, key, now - arrival)
+            status, key, arrival = paired.status, paired.key, paired.arrival
+            self._diagnose_frame(status, key, paired.waited)
             frame = self.build_frame(status, arrival)
             if (self.gripper_params.enabled
                     and frame_fault(self.state.frame, frame) != Hold.NONE):
@@ -643,9 +630,7 @@ class TeleopNode(Node):
                 # between two cycles freezes the gripper in the next one.
                 self.gripper_tripped = True
             self.state = on_frame(self.state, frame, self.params)
-            for store in (self._poses, self._heads, self._joys):
-                for old in [k for k in store if k <= key]:
-                    del store[old]
+            self.frames.done(key)
 
     def _diagnose_frame(self, status: InputStatus, key: int, waited: float) -> None:
         """
@@ -660,9 +645,9 @@ class TeleopNode(Node):
         if not status.right.pose_present:
             missing.append('the status reports no controller pose')
         else:
-            if key not in self._poses:
+            if not self.frames.has_pose(key):
                 missing.append('no pose message')
-            if key not in self._joys:
+            if not self.frames.has_joy(key):
                 missing.append('no joy message (buttons unknown)')
         if not missing:
             self._incomplete = False
@@ -683,36 +668,10 @@ class TeleopNode(Node):
 
         A pose or joy message that did not arrive with the same stamp is treated as
         absent: without the buttons the grip is unknown, so the controller counts as
-        not present.
+        not present (``input_frames.gate_frame``).
         """
-        key = stamp_key(status.header.stamp)
-        joy = self._joys.get(key)
-        buttons = list(joy.buttons) if joy is not None else []
-        have_buttons = len(buttons) > max(CLUTCH_BUTTON, CALIBRATE_BUTTON, ARM_BUTTON,
-                                          SCALE_BUTTON)
-        controller = self._poses.get(key) if have_buttons else None
-        head = self._heads.get(key)
-        trigger = None
-        if joy is not None and len(joy.axes) > TRIGGER_AXIS:
-            trigger = float(joy.axes[TRIGGER_AXIS])
-        return Frame(
-            arrival=arrival,
-            xr_time=float(status.xr_time_ms) / 1000.0,
-            session_id=int(status.session_id),
-            seq=int(status.seq),
-            reset_count=int(status.reset_count),
-            controller=controller,
-            controller_present=bool(status.right.pose_present) and controller is not None,
-            controller_emulated=bool(status.right.emulated_position),
-            head=head,
-            head_present=bool(status.viewer_present) and head is not None,
-            head_emulated=bool(status.viewer_emulated_position),
-            grip=have_buttons and bool(buttons[CLUTCH_BUTTON]),
-            calibrate=have_buttons and bool(buttons[CALIBRATE_BUTTON]),
-            arm=have_buttons and bool(buttons[ARM_BUTTON]),
-            scale_toggle=have_buttons and bool(buttons[SCALE_BUTTON]),
-            trigger=trigger,
-        )
+        joy, controller, head = self.frames.parts(stamp_key(status.header.stamp))
+        return gate_frame(status, joy, controller, head, arrival)
 
     # ---- robot side ----
 
