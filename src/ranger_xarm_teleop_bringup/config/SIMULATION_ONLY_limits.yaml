@@ -44,3 +44,7 @@
     gripper_open_position: 0.0
     gripper_closed_position: 0.849
     gripper_max_speed: 1.0
+    # G-16: speed scaling (velocity and acceleration) of the reset, the hold-to-run return to
+    # a named posture from the headset (reset:=true). PENDING in the safety gate; chosen for
+    # the simulated arm only, as the recovery tools' default speed doubled.
+    reset_speed_scaling: 0.2

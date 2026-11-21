@@ -277,7 +277,7 @@ def test_session_that_used_to_halt_is_recorded_without_a_halt(stack):
     assert result['summary']['engaged_s'] > 2.0
 
 
-def test_move_arm_says_why_the_goal_was_rejected(stack):
+def test_move_arm_refuses_while_teleop_owns_the_arm(stack):
     probe, env, logs, _ = stack
     # Still armed from the replay: teleop owns the arm.
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 5.0, 'teleop owner')
@@ -285,10 +285,13 @@ def test_move_arm_says_why_the_goal_was_rejected(stack):
     start = time.monotonic()
     process = Process(tool('move_arm.py'), env, str(logs / 'move_arm.log'))
     try:
-        assert process.wait(60.0) == 1, process.output()
+        # With a command mux the tool needs MoveIt as the owner before any goal goes out
+        # (session.may_recover): refused, no goal sent, and it says what to do.
+        assert process.wait(60.0) == 4, process.output()
     finally:
         process.stop()
-    assert 'goal REJECTED: teleop owns the arm: disarm first' in process.output()
+    assert 'REFUSED, no motion goal sent' in process.output()
+    assert 'teleop owns the arm: disarm first' in process.output()
     assert probe.max_joint_change(start, before) < 1e-6
 
 

@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 from .episode_feedback import EVENT_NAMES
 from .operator_status import EPISODE_STATE_NAMES
+from .reset_feedback import REASON_NAMES, STATE_NAMES
 
 PROTOCOL_VERSION = 1
 HAPTIC_TYPE = 'teleop_haptic'
@@ -113,7 +114,7 @@ def status_payload(msg, run: int, seq: int, panel: Dict[str, Any], stale_ms: flo
             'missed': int(msg.events_missed),
             'disk_minutes_left': _num(msg.disk_minutes_left),
         }
-    return {
+    body = {
         'type': STATUS_TYPE, 'v': PROTOCOL_VERSION, 'run': int(run), 'seq': int(seq),
         'stale_ms': float(stale_ms), 'period_ms': float(period_ms),
         'teleop': teleop, 'teleop_age_s': _num(msg.teleop_age),
@@ -121,6 +122,20 @@ def status_payload(msg, run: int, seq: int, panel: Dict[str, Any], stale_ms: flo
         'sim_text': str(sim_text),
         'panel': dict(panel),
     }
+    # The reset section exists only once a reset state has been seen: with the feature off the
+    # body is what it always was.
+    if math.isfinite(float(getattr(msg, 'reset_age', math.nan))):
+        valid = bool(msg.reset_valid)
+        body['reset'] = {
+            'valid': valid,
+            'state': STATE_NAMES.get(int(msg.reset_state), f'UNKNOWN_{int(msg.reset_state)}')
+            if valid else None,
+            'reason': REASON_NAMES.get(int(msg.reset_reason), f'UNKNOWN_{int(msg.reset_reason)}')
+            if valid else None,
+            'text': str(msg.reset_text) if valid else '',
+            'event_age_s': _num(msg.reset_event_age) if valid else None,
+        }
+    return body
 
 
 def echo_of(frame: Optional[FrameInfo], now: float) -> Optional[Dict[str, Any]]:

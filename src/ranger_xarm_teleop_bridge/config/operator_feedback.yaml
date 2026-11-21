@@ -15,6 +15,7 @@ operator_feedback:
     episode_stale_s: 1.0
     fault_latch_s: 10.0           # a fault hold stays on the panel this long after it ends
     limit_hold_s: 1.0             # the most severe limit stays this long after it clears
+    reset_stale_s: 0.5            # the reset line shows "no data" when its source is older
     haptic:
       MARK: [0.5, 40.0, 0.0]                                   # tick
       START: [0.8, 200.0, 0.0]                                 # one buzz
@@ -32,6 +33,22 @@ operator_feedback:
       DISCARD: 2
       REFUSED: 3
       AUTO_STOP: 3
+
+# Reset events (a headset-started planned motion): vibration on reset_hand, source "reset", from
+# the reset node's /teleop/reset/state. Same format as above. A release (the operator let go)
+# has no vibration; STOPPED is a stop by a fault and feels like REFUSED. With the feature off
+# no reset state is published and none of this is used.
+    reset_hand: right
+    reset_haptic:
+      START: [0.8, 200.0, 0.0]                                 # one buzz
+      ARRIVED: [0.7, 500.0, 0.0]                               # one long
+      REFUSED: [1.0, 350.0, 200.0, 1.0, 350.0, 0.0]                # two long, strong
+      STOPPED: [1.0, 350.0, 200.0, 1.0, 350.0, 0.0]                # two long, strong
+    reset_haptic_priority:
+      START: 2
+      ARRIVED: 2
+      REFUSED: 3
+      STOPPED: 3
 
 # The panel: information only, hidden and shown with the left thumbstick click.
 # anchor left_controller: offset from the left grip in a frame facing the head (x right, y up,

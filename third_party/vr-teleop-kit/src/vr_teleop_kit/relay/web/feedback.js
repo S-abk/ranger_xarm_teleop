@@ -15,7 +15,7 @@
 (function (root) {
   'use strict';
 
-  const FEEDBACK_VERSION = 'feedback-5';
+  const FEEDBACK_VERSION = 'feedback-6';
   const SEEN_MAX = 512;               // (run, id) pairs remembered for de-duplication
   const MAX_PULSES = 32;
   const MAX_PATTERN_MS = 10000;
@@ -252,6 +252,18 @@
         addWrapped(ep.last_event_text || 'Stopped by itself: no reason given', 'bad');
       }
       if (ep.missed > 0) add('missed ' + ep.missed + ' events', 'warn');
+    }
+
+    // The reset line (a headset-started planned motion): only when the status has a reset section,
+    // which the sender adds once a reset state has been seen. Its text carries its own age.
+    const rs = msg.reset;
+    if (rs && typeof rs === 'object') {
+      if (!rs.valid) {
+        add('Reset: no data', 'warn');
+      } else if (typeof rs.text === 'string' && rs.text) {
+        const bad = rs.state === 'REFUSED' || (rs.state === 'STOPPED' && rs.reason !== 'RELEASED');
+        addWrapped(rs.text, bad ? 'bad' : (rs.state === 'ARRIVED' ? 'ok' : 'text'), 'small', 3);
+      }
     }
     return { stale: false, lines, key: lines.map((l) => l.size + '|' + l.tone + '|' + l.text).join('\n') };
   }

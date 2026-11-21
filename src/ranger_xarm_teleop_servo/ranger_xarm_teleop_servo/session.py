@@ -298,3 +298,28 @@ def owner_row(msg: Any) -> Dict[str, Any]:
     """Row for an ``ArmOwner``."""
     return {'k': 'owner', 'owner': int(msg.owner), 'status': int(msg.status),
             'detail': str(msg.detail)}
+
+
+def may_move_directly(mux_present: bool, owner: Optional[int], armed: Optional[bool],
+                      teleop_running: bool) -> Tuple[bool, str]:
+    """
+    Allow a goal straight to MoveIt's arm controller (``tools/move_arm.py``), or say why not.
+
+    With a command mux, the rule of ``may_recover``: MoveIt owns the arm and, where a teleop
+    node runs, teleop is known not to be armed. Without a mux and without a teleop node there
+    is no one to take the arm, as before the mux existed. Without a mux but with a teleop node
+    running, nothing says who owns the arm, so no goal may go out.
+    """
+    if mux_present:
+        return may_recover(owner, armed, teleop_running)
+    if teleop_running:
+        return False, ('a teleop node is running but no command mux reports who owns the '
+                       'arm, so whether teleop could take it is not known')
+    return True, ''
+
+
+def direct_case(mux_present: bool, armed: Optional[bool]) -> str:
+    """Say which case allows a direct goal (after ``may_move_directly``)."""
+    if mux_present:
+        return 'the command mux reports that MoveIt owns the arm, ' + recovery_case(armed)
+    return 'no command mux and no teleop node are running'

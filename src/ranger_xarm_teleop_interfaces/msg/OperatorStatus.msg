@@ -50,3 +50,13 @@ string last_refusal_text            # the newest refusal, plain words; empty whe
 float64 last_refusal_age            # s; NaN when none
 uint32 events_missed                # events lost between state messages since the node started
 float64 disk_minutes_left           # NaN while unknown
+
+# ---- reset (ResetState), appended: a headset-started planned motion (G-16) ----
+# reset_valid is False when no reset node runs (the feature is off) or its state is too old;
+# the reset fields then keep their defaults and the panel shows no reset line.
+bool reset_valid
+float64 reset_age
+uint8 reset_state                   # ResetState.STATE_*
+uint8 reset_reason                  # ResetState.REASON_*
+string reset_text                   # the panel line, plain words
+float64 reset_event_age             # s since the newest reset event (host wall clock); NaN when none
