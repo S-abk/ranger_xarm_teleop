@@ -277,7 +277,7 @@ def test_session_that_used_to_halt_is_recorded_without_a_halt(stack):
     assert result['summary']['engaged_s'] > 2.0
 
 
-def test_move_arm_says_why_the_goal_was_rejected(stack):
+def test_move_arm_refuses_while_teleop_owns_the_arm(stack):
     probe, env, logs, _ = stack
     # Still armed from the replay: teleop owns the arm.
     probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_TELEOP, 5.0, 'teleop owner')
