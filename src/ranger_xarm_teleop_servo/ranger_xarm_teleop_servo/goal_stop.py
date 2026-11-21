@@ -85,7 +85,8 @@ class GoalStop:
         return not self.ended_by
 
     def sent(self, now: float) -> None:
-        """Note that a request went out."""
+        """Note that a request went out (one still open counts as unanswered)."""
+        self.timed_out()
         self.sent_count += 1
         self.outstanding = now
 
