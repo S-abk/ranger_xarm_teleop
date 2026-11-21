@@ -355,6 +355,7 @@ def test_a_person_start_asks_for_the_labels_and_keeps_them_out_of_every_log(sess
     env = dict(session['env'])
     data = tmp_path / 'data'
     task, operator = f'task-{secrets.token_hex(4)}', f'operator-{secrets.token_hex(4)}'
+    started = time.time()
     term = Terminal([sys.executable, TOOL, 'start', '--profile', 'mock', '--no-rviz',
                      '--data-dir', str(data), '--port', str(PORT)], env)
     try:
@@ -377,11 +378,18 @@ def test_a_person_start_asks_for_the_labels_and_keeps_them_out_of_every_log(sess
     labels = json.loads((data / 'labels.json').read_text())
     assert labels == {'task': task, 'operator': operator}
     assert 'Continue anyway?' not in term.output()
-    for path in glob.glob(os.path.join(state['log_dir'], '**', '*'), recursive=True):
-        if os.path.isfile(path):
-            with open(path, 'rb') as handle:
-                text = handle.read()
-            assert task.encode() not in text and operator.encode() not in text, path
+    # Every file under ROS_LOG_DIR: the launcher's own logs (log_dir is inside it) and the
+    # nodes' own ROS log files, of which this start wrote some.
+    root = env['ROS_LOG_DIR']
+    assert state['log_dir'].startswith(os.path.join(root, ''))
+    files = [p for p in glob.glob(os.path.join(root, '**', '*'), recursive=True)
+             if os.path.isfile(p)]
+    assert any(not p.startswith(state['log_dir']) and os.path.getmtime(p) >= started
+               for p in files), 'no node log file written by this start'
+    for path in files:
+        with open(path, 'rb') as handle:
+            text = handle.read()
+        assert task.encode() not in text and operator.encode() not in text, path
 
 
 def test_a_profile_that_is_not_a_simulation_is_refused(session):
