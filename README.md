@@ -69,7 +69,8 @@ The stack role needs ROS sourced, as for the manual sequence.
 - A stack that does not come up disarmed with MoveIt as owner, or that the probe could not
   check, stops the session in every mode.
 - **Closing a window.**
-  - Closing RViz (mock) is said, and the session goes on.
+  - Closing RViz (mock) is said, and the session goes on. Its node leaves the graph: that change
+    after STACK READY is the operator's own, not the launcher's.
   - The gz window is part of the simulator's own process: closing it ends the simulator, and
     the session stops.
   - Any other process of the stack that ends also stops the session, with its log printed.
