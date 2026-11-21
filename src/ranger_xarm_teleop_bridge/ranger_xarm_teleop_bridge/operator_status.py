@@ -17,8 +17,9 @@ What the operator's panel shows, in plain words (no ROS).
 ``StatusTracker`` takes every teleop state (50 Hz) and episode state message and keeps what a
 5 Hz sample would lose: the newest fault hold (latched for ``fault_latch_s`` even if it
 lasted one cycle) and the most severe limit (held ``limit_hold_s`` after it clears, so the
-panel does not flicker). ``snapshot`` gives the fields of OperatorStatus. A source older than
-its staleness limit is reported as not valid; its fields are then defaults, never old values.
+panel does not flicker). ``snapshot`` gives the fields of OperatorStatus, the reset part too. A
+source older than its staleness limit is reported as not valid; its fields are then defaults,
+never old values.
 
 ``SimSpeed`` takes the (ROS stamp, wall time) pair of each status and says, in words, when the
 ROS clock runs much slower than real time (a slow simulator: arm data then arrives late).
@@ -30,6 +31,7 @@ import math
 from typing import Dict, Optional
 
 from .episode_feedback import EVENT_NAMES
+from .reset_feedback import reset_text
 
 NAN = float('nan')
 
@@ -223,6 +225,18 @@ class EpisodeView:
     disk_minutes_left: float
 
 
+@dataclass(frozen=True)
+class ResetView:
+    """The fields of one ResetState message the panel shows."""
+
+    state: int
+    reason: int
+    posture: str
+    moveit_error_code: int
+    last_event: int
+    event_wall_time: float      # host wall clock of the newest event; NaN when none
+
+
 @dataclass
 class Snapshot:
     """The fields of one OperatorStatus message (same names)."""
@@ -261,6 +275,12 @@ class Snapshot:
     last_refusal_age: float = NAN
     events_missed: int = 0
     disk_minutes_left: float = NAN
+    reset_valid: bool = False
+    reset_age: float = NAN
+    reset_state: int = 0
+    reset_reason: int = 0
+    reset_text: str = ''
+    reset_event_age: float = NAN
 
 
 @dataclass
@@ -271,6 +291,7 @@ class StatusTracker:
     episode_stale_s: float = 1.0
     fault_latch_s: float = 10.0
     limit_hold_s: float = 1.0
+    reset_stale_s: float = 0.5
     gripper_open: float = NAN
     gripper_closed: float = NAN
     _teleop: Optional[TeleopSample] = None
@@ -284,6 +305,8 @@ class StatusTracker:
     _refusal: str = ''
     _refusal_wall: float = NAN
     _refusal_count: int = -1
+    _reset: Optional[ResetView] = None
+    _reset_at: float = NAN
     events_missed: int = 0
     counts: Dict[str, int] = field(default_factory=lambda: {'teleop': 0, 'episode': 0})
 
@@ -310,6 +333,10 @@ class StatusTracker:
             self._refusal = refusal_words(e.detail)
             self._refusal_wall = e.event_wall_time
             self._refusal_count = e.event_count
+
+    def on_reset(self, r: ResetView, now: float) -> None:
+        """Take one ResetState (``now``: monotonic arrival time, s)."""
+        self._reset, self._reset_at = r, now
 
     @staticmethod
     def _severity(code: int) -> int:
@@ -384,6 +411,17 @@ class StatusTracker:
             if self._refusal:
                 out.last_refusal_text = self._refusal
                 out.last_refusal_age = max(0.0, wall_now - self._refusal_wall)
+        r = self._reset
+        if r is not None:
+            out.reset_age = now - self._reset_at
+        if r is not None and out.reset_age <= self.reset_stale_s:
+            out.reset_valid = True
+            out.reset_state = int(r.state)
+            out.reset_reason = int(r.reason)
+            if int(r.last_event) != 0 and math.isfinite(r.event_wall_time):
+                out.reset_event_age = max(0.0, wall_now - r.event_wall_time)
+            out.reset_text = reset_text(r.state, r.reason, r.posture, r.moveit_error_code,
+                                        out.reset_event_age)
         return out
 
 

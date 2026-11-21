@@ -621,7 +621,7 @@ test('config: defaults, limits and bad values', () => {
 });
 
 test('version is exported', () => {
-  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-5');
+  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-6');
 });
 
 test('lines: a section older than the staleness limit shows no data, never its old state', () => {
