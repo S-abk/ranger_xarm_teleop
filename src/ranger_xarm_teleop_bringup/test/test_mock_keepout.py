@@ -91,7 +91,7 @@ def test_retreat_without_a_recorded_path_moves_nothing(stack):
     finally:
         process.stop()
     output = process.output()
-    assert code == 5 and 'no recorded path' in output and 'Nothing moved' in output, output
+    assert code == 5 and 'no recorded path' in output and 'No motion goal sent' in output, output
     assert probe.joint_positions() == pytest.approx(before, abs=1e-4)
 
 
@@ -298,7 +298,7 @@ def test_retreat_asked_for_more_clearance_refuses_or_walks_further_back(stack):
     code, output = _retreat(env, logs, 'retreat_far_080', '--clearance', '0.08')
     assert code == 5, output
     assert 'REFUSED' in output and 'is clear by 80.0 mm' in output, output
-    assert 'the best clearance is' in output and 'Nothing moved' in output, output
+    assert 'the best clearance is' in output and 'No motion goal sent' in output, output
     assert 'Next:' in output, output
     assert probe.joint_positions() == pytest.approx(halted_at, abs=1e-4)
     code, output = _retreat(env, logs, 'retreat_far_030', '--clearance', '0.03')

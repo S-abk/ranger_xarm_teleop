@@ -135,13 +135,13 @@ def plan(times: np.ndarray, postures: np.ndarray, measured: Sequence[float],
     measured = np.asarray(measured, dtype=float)
     if len(postures) == 0:
         return Plan(False, 'no recorded path: the teleop node has none (it was restarted, or '
-                    'teleop has not moved the arm since it started). Nothing moved. '
+                    'teleop has not moved the arm since it started). No motion goal sent. '
                     + NEXT_STEP)
     newest = postures[-1]
     off = float(np.max(np.abs(newest - measured)))
     if off > ON_PATH:
         return Plan(False, f'the arm is {off:.3f} rad from the end of the recorded path: it '
-                    'has moved since teleop moved it. Nothing moved. ' + NEXT_STEP)
+                    'has moved since teleop moved it. No motion goal sent. ' + NEXT_STEP)
     start = clearance(measured)
     if start >= wanted and valid(measured):
         return Plan(False, f'already clear: clearance {start * 1000.0:.1f} mm, valid for '
@@ -162,7 +162,7 @@ def plan(times: np.ndarray, postures: np.ndarray, measured: Sequence[float],
             return Plan(False, f'the recorded path goes deeper on the way back (clearance '
                         f'{c * 1000.0:.1f} mm, {start * 1000.0:.1f} mm now, at '
                         f'{tool_travel * 1000.0:.0f} mm of tool path): it is not followed. '
-                        'Nothing moved. ' + NEXT_STEP, start_clearance=start)
+                        'No motion goal sent. ' + NEXT_STEP, start_clearance=start)
         if c > best[0]:
             best = (c, tool_travel)
         if c >= wanted and valid(q):
@@ -182,7 +182,7 @@ def plan(times: np.ndarray, postures: np.ndarray, measured: Sequence[float],
                 f'mm of tool path and {max_joint_travel:.2f} rad per joint is clear by '
                 f'{wanted * 1000.0:.1f} mm and valid for MoveIt; the best clearance is '
                 f'{best[0] * 1000.0:.1f} mm, at '
-                f'{best[1] * 1000.0:.0f} mm of tool path. Nothing moved. ' + NEXT_STEP,
+                f'{best[1] * 1000.0:.0f} mm of tool path. No motion goal sent. ' + NEXT_STEP,
                 start_clearance=start)
 
 
