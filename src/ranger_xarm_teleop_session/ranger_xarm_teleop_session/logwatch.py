@@ -26,7 +26,7 @@ from output the launcher owns anyway:
 
 from dataclasses import dataclass, field
 import re
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 BRIDGE_STATS = re.compile(
     r'(?P<source>[\w:./-]+): connected=(?P<connected>True|False) (?P<rate>[0-9.]+) frames/s '
@@ -45,6 +45,13 @@ PAIRS_NOT_CHECKED = re.compile(r"(?P<why>MoveIt Servo(?:'s self-collision pairs 
                                r'checked: .*| reports no robot_description.*| description and '
                                r'SRDF not read: .*))')
 FEEDBACK_VERSION = re.compile(r"FEEDBACK_VERSION\s*=\s*'(?P<v>[^']+)'")
+# The launch's own lines about the processes it runs.
+PROCESS_EVENT = re.compile(r'^\[(?:INFO|ERROR)\] \[(?P<proc>[\w.-]+)-(?P<n>\d+)\]: process '
+                           r'(?P<event>started|has died|has finished cleanly)')
+# Executables a launch starts that end by themselves while the stack keeps running: a
+# controller spawner leaves once its controller is loaded; gz's ``create`` once the robot is
+# spawned.
+EXITING = ('spawner', 'create')
 
 
 @dataclass
@@ -128,6 +135,41 @@ class PairsState:
             self.result, self.count = 'some', int(PAIRS_SOME.search(line)['n'])
         elif PAIRS_NOT_CHECKED.search(line):
             self.result, self.why = 'not_checked', PAIRS_NOT_CHECKED.search(line)['why']
+
+
+@dataclass
+class LaunchState:
+    """The processes of one launch, from the launch's own lines."""
+
+    started: Dict[str, str] = field(default_factory=dict)    # 'name-N' -> name
+    finished: Dict[str, str] = field(default_factory=dict)
+    died: Dict[str, str] = field(default_factory=dict)       # 'name-N' -> the line
+    events: int = 0
+
+    def feed(self, line: str) -> None:
+        """Read one output line of the launch."""
+        m = PROCESS_EVENT.search(line)
+        if not m:
+            return
+        self.events += 1
+        key = f'{m["proc"]}-{m["n"]}'
+        if m['event'] == 'started':
+            self.started[key] = m['proc']
+        elif m['event'] == 'has died':
+            self.died[key] = line.strip()
+        else:
+            self.finished[key] = m['proc']
+
+    def pending(self) -> List[str]:
+        """Return the processes that end by themselves and have not ended yet."""
+        return sorted(k for k, name in self.started.items()
+                      if name in EXITING and k not in self.finished and k not in self.died)
+
+    def ended_wrongly(self) -> List[str]:
+        """Return the processes that died, or ended though they should keep running."""
+        out = [f'{k} died: {line}' for k, line in sorted(self.died.items())]
+        out += [f'{k} ended' for k, name in sorted(self.finished.items()) if name not in EXITING]
+        return out
 
 
 def feedback_version(source: str) -> Optional[str]:

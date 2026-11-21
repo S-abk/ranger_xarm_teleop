@@ -37,7 +37,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 from . import logwatch
 from . import plan as pl
@@ -50,10 +50,17 @@ from .facts import feedback_js
 STOP_WAIT_S = {'probe': 10.0, 'sim_check': 10.0, 'bridge': 20.0, 'stack': 60.0,
                'simulator': 40.0, 'relay': 15.0}
 TERM_WAIT_S = 10.0
+ACK_WAIT_S = 5.0            # a launch logs that it took the SIGINT up within this
+LAUNCH_SIGINT_LINE = b'user interrupted with ctrl-c (SIGINT)'
+LAUNCH_STARTED_LINE = b']: process started with pid'
+LAUNCH_UP_WAIT_S = 15.0     # a launch younger than its first process gets this to come up
+LAUNCH_STEPS = ('simulator', 'stack', 'bridge')
 KILL_WAIT_S = 5.0
 RELAY_UP_S = 30.0
 SIM_WAIT_S = 180.0          # the simulator up and publishing joint states
 PROBE_TIMEOUT_S = {'mock': 120.0, 'gazebo': 180.0}
+SETTLE_TIMEOUT_S = 240.0    # every process of the launches started, the spawners ended
+SETTLE_QUIET_S = 2.0
 EXIT_OK, EXIT_REFUSED, EXIT_FAILED = 0, 2, 1
 
 
@@ -164,50 +171,108 @@ def _remaining(pids, mark: str) -> List[int]:
 
 
 def _wait_gone(pids, mark: str, timeout: float, reap: Callable[[], None]) -> List[int]:
+    """Wait until none of ``pids`` (a list, or a function returning the current ones) is left."""
     end = time.monotonic() + timeout
     while True:
         reap()
-        left = _remaining(pids, mark)
+        left = _remaining(pids() if callable(pids) else pids, mark)
         if not left or time.monotonic() >= end:
-            return left
+            return sorted(left)
         time.sleep(0.1)
+
+
+def _members(mark: str, root: int) -> List[int]:
+    """Return the processes with ``mark`` in ``root``'s process group or below it."""
+    live = procs.marked(mark)
+    group = {p.pid for p in live if p.pgid == root or p.pid == root}
+    group |= {p.pid for p in procs.descendants_of(root, live)}
+    return sorted(group)
+
+
+def _launch_running(path: Optional[str]) -> bool:
+    """Return True once a launch has started its first process (its signal handling is up)."""
+    try:
+        with open(path, 'rb') as handle:
+            return LAUNCH_STARTED_LINE in handle.read()
+    except (OSError, TypeError):
+        return False
+
+
+def _size(path: Optional[str]) -> int:
+    try:
+        return os.path.getsize(path) if path else 0
+    except OSError:
+        return 0
+
+
+def _acknowledged(path: str, since: int) -> bool:
+    """Return True when the launch logged, after ``since`` bytes, that it took the SIGINT."""
+    try:
+        with open(path, 'rb') as handle:
+            handle.seek(since)
+            return LAUNCH_SIGINT_LINE in handle.read()
+    except OSError:
+        return False
 
 
 def stop_processes(mark: str, children: List[dict], say: Callable[[str], None],
                    reap: Callable[[], None] = lambda: None,
-                   waits: Optional[Dict[str, float]] = None) -> List[str]:
+                   waits: Optional[Dict[str, float]] = None,
+                   notes: Optional[List[str]] = None) -> List[str]:
     """
     Stop the session's processes in stop order; return the problems (escalations, leftovers).
 
-    ``children``: state-file entries ({'name', 'pid', 'rank'}). A child's processes are those
-    carrying ``mark`` in its process group or below it. Each gets SIGINT; what is left after its
-    wait gets SIGTERM, then SIGKILL, and that is a problem. Then every process still carrying
-    ``mark`` (but the caller) is named, ended the same way, and is a problem too.
+    ``children``: state-file entries ({'name', 'pid', 'rank', 'log'}). A child's processes are
+    those carrying ``mark`` in its process group or below it, looked up again on every check (a
+    launch can still start one while it shuts down). Each step gets one SIGINT; what is left
+    after its wait gets SIGTERM, then SIGKILL, and that is a problem. Then every process still
+    carrying ``mark`` (but the caller) is named, ended the same way, and is a problem too.
     """
     waits = dict(STOP_WAIT_S, **(waits or {}))
     problems = []
+    notes = [] if notes is None else notes
     for child in sorted(children, key=lambda c: c['rank']):
-        live = procs.marked(mark)
-        group = {p.pid for p in live if p.pgid == child['pid'] or p.pid == child['pid']}
-        group |= {p.pid for p in procs.descendants_of(child['pid'], live)}
+        def members(root=child['pid']):
+            return _members(mark, root)
+        group = members()
         if not group:
             continue
         name = child['name']
-        # One SIGINT to the step's own process (ros2 launch, the relay): a launch passes it
-        # on to its nodes once and escalates by itself. Signalling the whole group as well
-        # would give every node a second SIGINT while it cleans up (the episode node marks an
-        # episode interrupted in that cleanup). Only when the leader is gone do the rest of
-        # its processes get the SIGINT directly.
+        log = child.get('log') if name in LAUNCH_STEPS else None
+        # A launch takes a SIGINT up only once its signal handling is in place, which is so
+        # when it has started its first process. One that has not yet is given that time
+        # (or ends by itself, as a launch that fails does).
+        if log and child['pid'] in group and not _launch_running(log):
+            end = time.monotonic() + LAUNCH_UP_WAIT_S
+            while time.monotonic() < end and not _launch_running(log) and \
+                    child['pid'] in _remaining([child['pid']], mark):
+                reap()
+                time.sleep(0.1)
+            group = members()
+            if not group:
+                continue
+        # One SIGINT to the step's own process (a launch, the relay). A launch whose stdin is
+        # not a terminal (noninteractive) passes it on to its nodes once and escalates by
+        # itself; signalling the whole group as well would give every node a second SIGINT
+        # while it cleans up (the episode node marks an episode interrupted in that cleanup).
+        seen = _size(log)
         if child['pid'] in group:
-            leader = [child['pid']]
             say(f'stopping {name}: SIGINT to pid {child["pid"]} ({len(group)} processes)')
+            _signal_marked([child['pid']], signal.SIGINT, mark)
+            left = _wait_gone(members, mark, ACK_WAIT_S if log else 0.0, reap)
+            if left and child['pid'] in left and log and not _acknowledged(log, seen):
+                # The launch has not taken the SIGINT up (no "ctrl-c" line from it): give every
+                # process of the step the SIGINT a terminal's Ctrl-C would, once each (the
+                # launch has forwarded nothing).
+                notes.append(f'{name}: its launch did not take up the SIGINT within '
+                             f'{ACK_WAIT_S:.0f} s; SIGINT sent to its {len(left)} processes')
+                say(notes[-1])
+                _signal_marked(left, signal.SIGINT, mark)
         else:
-            leader = sorted(group)
             say(f'stopping {name}: its first process has ended; SIGINT to the {len(group)} '
                 'processes left')
-        _signal_marked(leader, signal.SIGINT, mark)
-        left = _wait_gone(group, mark, waits.get(name, 15.0), reap)
-        # New processes of the same group (started while it shut down) are its too.
+            _signal_marked(group, signal.SIGINT, mark)
+        left = _wait_gone(members, mark, waits.get(name, 15.0), reap)
         for sig, wait, word in ((signal.SIGTERM, TERM_WAIT_S, 'SIGTERM'),
                                 (signal.SIGKILL, KILL_WAIT_S, 'SIGKILL')):
             if not left:
@@ -217,7 +282,7 @@ def stop_processes(mark: str, children: List[dict], say: Callable[[str], None],
                             + ', '.join(_describe(p) for p in left))
             say(problems[-1])
             _signal_marked(left, sig, mark)
-            left = _wait_gone(left, mark, wait, reap)
+            left = _wait_gone(members, mark, wait, reap)
         if left:
             problems.append(f'{name}: could not end ' + ', '.join(_describe(p) for p in left))
             say(problems[-1])
@@ -297,6 +362,7 @@ class Supervisor:
         self.bridge = logwatch.BridgeState()
         self.relay = logwatch.RelayState()
         self.pairs = logwatch.PairsState()
+        self.launches = {n: logwatch.LaunchState() for n in ('simulator', 'stack', 'bridge')}
         self.relay_here = opts.role == 'relay' or not opts.relay_url
         self.env = dict(os.environ)
         self.env[procs.MARK_VAR] = mark
@@ -352,20 +418,27 @@ class Supervisor:
                     self.relay.feed(line)
                 elif c.step.name == 'stack':
                     self.pairs.feed(line)
+                if c.step.name in self.launches:
+                    self.launches[c.step.name].feed(line)
 
     def child(self, name: str) -> Optional[Child]:
         """Return the running step ``name``."""
         return next((c for c in self.children if c.step.name == name), None)
 
     def failed_child(self) -> Optional[Child]:
-        """Return a long-running step that has ended."""
+        """Return a long-running step that has ended, or one of whose processes has."""
         for c in self.children:
-            if not c.step.runs_to_end and c.ended() is not None:
+            if c.step.runs_to_end:
+                continue
+            if c.ended() is not None:
+                return c
+            launch = self.launches.get(c.step.name)
+            if launch is not None and launch.ended_wrongly():
                 return c
         return None
 
     def sleep(self, seconds: float) -> None:
-        """Wait, watching for a stop and for a long-running step that ends."""
+        """Wait, watching for a stop and for a long-running step (or its process) that ends."""
         end = time.monotonic() + seconds
         while time.monotonic() < end:
             self.check_stop()
@@ -375,6 +448,31 @@ class Supervisor:
             if dead is not None:
                 raise ChildEnded(dead)
             time.sleep(min(0.1, max(0.0, end - time.monotonic())))
+
+    def wait_settled(self, names: List[str]) -> None:
+        """
+        Wait until every launch in ``names`` has started all its processes.
+
+        That is: the processes that end by themselves (the controller spawners) have ended,
+        and no new process has started for SETTLE_QUIET_S. Then no node of the stack joins or
+        leaves any more, and the probe can look.
+        """
+        end = time.monotonic() + SETTLE_TIMEOUT_S
+        last, since = None, time.monotonic()
+        while True:
+            self.sleep(0.2)
+            launches = [self.launches[n] for n in names if self.child(n)]
+            state = tuple((len(s.started), len(s.finished)) for s in launches)
+            if state != last:
+                last, since = state, time.monotonic()
+            pending = [p for s in launches for p in s.pending()]
+            if not pending and all(s.started for s in launches) and \
+                    time.monotonic() - since >= SETTLE_QUIET_S:
+                return
+            if time.monotonic() > end:
+                raise Refused(f'the stack did not settle within {SETTLE_TIMEOUT_S:.0f} s; still '
+                              f'running: {", ".join(pending) or "(none)"}; see the logs in '
+                              f'{self.log_dir}')
 
     def show(self, items: List[pf.Item]) -> None:
         """Print items and remember them."""
@@ -418,8 +516,11 @@ class Supervisor:
             code = EXIT_REFUSED
         except ChildEnded as dead:
             c = dead.child
-            self.say(f'{c.step.name} ended (exit {c.ended()}) while the session ran; its log '
-                     f'{c.log_path} ends with:\n{c.last_lines()}')
+            launch = self.launches.get(c.step.name)
+            what = (', '.join(launch.ended_wrongly()) if launch and launch.ended_wrongly()
+                    else f'exit {c.ended()}')
+            self.say(f'{c.step.name} failed ({what}); its log {c.log_path} ends with:\n'
+                     f'{c.last_lines(20)}')
             code = EXIT_FAILED
         finally:
             problems = self.stop()
@@ -467,6 +568,9 @@ class Supervisor:
             self.session_dir = os.path.join(self.data_dir(), self.session)
             self.write_state()
         self.start_step(by['bridge'])
+        self.say('waiting for every process of the stack (the controller spawners end once '
+                 'their controller is loaded)')
+        self.wait_settled([n for n in ('simulator', 'stack', 'bridge') if n in by])
         self.set_phase('probing')
         probe = self.start_step(by['probe'])
         while probe.ended() is None:
@@ -600,12 +704,13 @@ class Supervisor:
         except OSError:
             pass
         self.say('stopping the session')
+        notes: List[str] = []
         problems = stop_processes(self.mark, [c.state() for c in self.children], self.say,
-                                  self.reap)
+                                  self.reap, notes=notes)
         for c in self.children:
             c.log.close()
         problems += after_stop(self.session_dir)
-        report = stop_report(self.session_dir, problems, supervisor_gone=False)
+        report = stop_report(self.session_dir, problems, supervisor_gone=False, notes=notes)
         self.say(report)
         try:
             with open(os.path.join(self.log_dir, 'stop_report.txt'), 'w',
@@ -617,9 +722,11 @@ class Supervisor:
         return problems
 
 
-def stop_report(session_dir: Optional[str], problems: List[str], supervisor_gone: bool) -> str:
+def stop_report(session_dir: Optional[str], problems: List[str], supervisor_gone: bool,
+                notes: Sequence[str] = ()) -> str:
     """Return the stop report."""
     lines = ['STOP REPORT']
+    lines += [f'note: {n}' for n in notes]
     if supervisor_gone:
         lines.append('the supervisor was already gone; its processes were stopped from the '
                      'state file and the session mark')

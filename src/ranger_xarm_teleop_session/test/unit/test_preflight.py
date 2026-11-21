@@ -163,6 +163,8 @@ def test_commits_item():
 def test_adb_item():
     assert pf.adb_item(None, False).status == pf.UNKNOWN
     assert pf.adb_item({'adb': False}, True).status == pf.UNKNOWN
+    item = pf.adb_item({'adb': None}, True)
+    assert item.status == pf.UNKNOWN and 'not consulted' in item.detail
     assert pf.adb_item({'adb': True, 'devices': []}, True).status == pf.MISSING
     ok = {'adb': True, 'devices': ['1WMHH'], 'reverse': ['UsbFfs tcp:8443 tcp:8443']}
     assert pf.adb_item(ok, True).status == pf.OK

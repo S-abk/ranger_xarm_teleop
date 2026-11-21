@@ -120,6 +120,63 @@ def test_a_step_that_ignores_sigint_is_escalated_and_reported(mark, started):
     assert deaf.wait(5) == -signal.SIGTERM
 
 
+# A launch that does not take the SIGINT up: it ignores it, and ends once its child has ended.
+DEAF_LAUNCH = (
+    'import signal, subprocess, sys, time\n'
+    'signal.signal(signal.SIGINT, signal.SIG_IGN)\n'
+    'child = subprocess.Popen([sys.executable, "-c", "import signal, time; '
+    'signal.signal(signal.SIGINT, signal.default_int_handler); time.sleep(60)"])\n'
+    'print(f"[INFO] [sleeper-1]: process started with pid [{child.pid}]", flush=True)\n'
+    'child.wait()\n')
+
+
+def test_a_launch_that_does_not_take_up_the_sigint_gets_it_for_each_process(mark, started,
+                                                                            tmp_path):
+    log = tmp_path / 'stack.log'
+    out = open(log, 'w+')
+    launch = started(DEAF_LAUNCH, mark, stdout=out)
+    wait_marked(mark, 2)
+    notes = []
+    child = dict(entry('stack', launch), log=str(log))
+    problems = sv.stop_processes(mark, [child], lambda s: None, lambda: launch.poll(),
+                                 notes=notes)
+    assert problems == []
+    assert len(notes) == 1 and 'did not take up the SIGINT' in notes[0]
+    assert launch.wait(5) == 0
+    report = sv.stop_report(None, problems, False, notes)
+    assert 'note: stack: its launch did not take up' in report and 'PASS' in report
+
+
+# A launch still starting: it loses a SIGINT until its first process is started (seen once in a
+# stack test: the bridge's launch, 0.5 s old, kept going and started its node).
+STARTING_LAUNCH = (
+    'import signal, time\n'
+    'signal.signal(signal.SIGINT, signal.SIG_IGN)\n'
+    'time.sleep(1.5)\n'
+    'signal.signal(signal.SIGINT, signal.default_int_handler)\n'
+    'print("[INFO] [node-1]: process started with pid [1]", flush=True)\n'
+    'time.sleep(60)\n')
+
+
+def test_a_launch_is_signalled_only_once_it_has_started_its_first_process(
+        mark, started, tmp_path):
+    log = tmp_path / 'bridge.log'
+    launch = started(STARTING_LAUNCH, mark, stdout=open(log, 'w'))
+    wait_marked(mark, 1)
+    notes = []
+    problems = sv.stop_processes(mark, [dict(entry('bridge', launch), log=str(log))],
+                                 lambda s: None, lambda: launch.poll(), notes=notes)
+    assert problems == [] and notes == []
+    assert launch.wait(5) is not None
+
+
+def test_a_launch_that_says_it_took_the_sigint_is_left_to_do_its_work(mark, started, tmp_path):
+    log = tmp_path / 'stack.log'
+    log.write_text('[WARNING] [launch]: user interrupted with ctrl-c (SIGINT)\n')
+    assert not sv._acknowledged(str(log), log.stat().st_size)
+    assert sv._acknowledged(str(log), 0)
+
+
 def test_a_process_without_the_mark_is_never_signalled(mark, started, tmp_path):
     out = open(tmp_path / 'pid', 'w+')
     parent = started(PARENT_OF_UNMARKED, mark, stdout=out)

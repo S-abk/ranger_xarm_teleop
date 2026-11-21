@@ -67,6 +67,23 @@ def test_rigid_pairs_lines():
     assert p.result == 'not_checked' and 'no group xarm6' in p.why
 
 
+def test_launch_process_events():
+    s = lw.LaunchState()
+    for line in ['[INFO] [robot_state_publisher-1]: process started with pid [11]',
+                 '[INFO] [spawner-3]: process started with pid [13]',
+                 '[INFO] [teleop_node-10]: process started with pid [20]',
+                 '[spawner-3] [INFO] [1.0] [spawner_x]: Configured and activated x']:
+        s.feed(line)
+    assert s.pending() == ['spawner-3'] and s.ended_wrongly() == []
+    s.feed('[INFO] [spawner-3]: process has finished cleanly [pid 13]')
+    assert s.pending() == [] and s.ended_wrongly() == []
+    died = "[ERROR] [teleop_node-10]: process has died [pid 20, exit code 2, cmd 'x']"
+    s.feed(died)
+    assert s.ended_wrongly() == ['teleop_node-10 died: ' + died]
+    s.feed('[INFO] [robot_state_publisher-1]: process has finished cleanly [pid 11]')
+    assert 'robot_state_publisher-1 ended' in s.ended_wrongly()
+
+
 def test_the_served_feedback_version_is_read_from_the_page_source():
     path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'third_party',
                         'vr-teleop-kit', 'src', 'vr_teleop_kit', 'relay', 'web', 'feedback.js')

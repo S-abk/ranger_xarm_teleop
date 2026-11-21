@@ -223,6 +223,9 @@ def adb_item(facts: Optional[dict], relay_here: bool) -> Item:
     if not relay_here:
         return Item('adb', title, UNKNOWN, 'the relay runs on another machine',
                     'checked by the relay role on the operator PC')
+    if facts and facts.get('adb') is None:
+        return Item('adb', title, UNKNOWN, 'adb not consulted (TELEOP_SESSION_NO_ADB is set)',
+                    f'check it yourself: {ADB_COMMAND}')
     if not facts or not facts.get('adb'):
         return Item('adb', title, UNKNOWN, 'adb is not installed here',
                     f'install adb, then {ADB_COMMAND}')

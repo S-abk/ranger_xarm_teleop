@@ -351,16 +351,19 @@ def stop_command(state_file: str, out=print, wait_s: float = STOP_SUPERVISOR_WAI
             procs.clear_state(state_file, mark)
             return sv.EXIT_OK
         out('processes of the session are still there; stopping them from the state file')
-        problems = sv.stop_processes(mark, state.get('children') or [], out)
+        notes: List[str] = []
+        problems = sv.stop_processes(mark, state.get('children') or [], out, notes=notes)
         problems += sv.after_stop(state.get('session_dir'))
-        out(sv.stop_report(state.get('session_dir'), problems, supervisor_gone=False))
+        out(sv.stop_report(state.get('session_dir'), problems, supervisor_gone=False,
+                           notes=notes))
         procs.clear_state(state_file, mark)
         return sv.EXIT_FAILED
     out(f'the supervisor (pid {sup_pid}) of session {name} was already gone; stopping its '
         'processes from the state file and the session mark, in order')
-    problems = sv.stop_processes(mark, state.get('children') or [], out)
+    notes: List[str] = []
+    problems = sv.stop_processes(mark, state.get('children') or [], out, notes=notes)
     problems += sv.after_stop(state.get('session_dir'))
-    out(sv.stop_report(state.get('session_dir'), problems, supervisor_gone=True))
+    out(sv.stop_report(state.get('session_dir'), problems, supervisor_gone=True, notes=notes))
     procs.clear_state(state_file, mark)
     return sv.EXIT_FAILED if problems else sv.EXIT_OK
 

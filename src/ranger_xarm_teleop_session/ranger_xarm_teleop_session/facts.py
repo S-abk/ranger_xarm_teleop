@@ -30,6 +30,9 @@ from .procs import MARK_VAR
 EGL_VENDOR_NVIDIA = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'   # sim.launch.py's criterion
 ADB_PORT = 8443
 ADB_REVERSE = ['adb', 'reverse', f'tcp:{ADB_PORT}', f'tcp:{ADB_PORT}']
+# Set by automated runs (the stack tests): no adb command at all, so a test never reaches a
+# headset that happens to be plugged in, nor starts an adb server.
+NO_ADB_VAR = 'TELEOP_SESSION_NO_ADB'
 
 
 def _env() -> Dict[str, str]:
@@ -72,6 +75,8 @@ def adb_facts(run_reverse: bool, port: int = ADB_PORT) -> dict:
     With ``run_reverse``, run ``adb reverse tcp:8443 tcp:8443`` once when a device is listed
     and ``tcp:8443`` is not reversed yet; never any other adb command, never retried.
     """
+    if os.environ.get(NO_ADB_VAR):
+        return {'adb': None}
     if shutil.which('adb') is None:
         return {'adb': False}
     code, out = _run(['adb', 'devices'])
