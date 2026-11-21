@@ -30,6 +30,7 @@ import copy
 import math
 import os
 import shutil
+import signal
 import time
 from typing import Dict, List, Optional
 
@@ -932,6 +933,9 @@ def main(args=None):
     except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:
+        # A second SIGINT (a second Ctrl-C, or a launch passing on one the terminal already
+        # sent) must not cut the marking short and leave the episode "recording".
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         node.shutdown()
         node.destroy_node()
         if rclpy.ok():
