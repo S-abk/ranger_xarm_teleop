@@ -33,6 +33,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -151,10 +152,14 @@ def session(tmp_path_factory):
                         '--keep-labels', '--data-dir', str(data), '--port', str(PORT))
     try:
         launcher.wait_phase(('stack_ready', 'session_ready'), 240.0)
+        # At once (the phase is polled every 0.2 s): the probe must already be gone. Then a
+        # settled sample, compared with the one before stop.
+        at_phase = graph_nodes(probe, settle=0.0)
         at_ready = graph_nodes(probe, settle=2.0)
         register_log(launcher.state()['log_dir'])
         yield {'probe': probe, 'launcher': launcher, 'env': env, 'tmp': tmp, 'data': data,
-               'labels': labels, 'at_ready': at_ready, 'mark': launcher.state()['mark']}
+               'labels': labels, 'at_phase': at_phase, 'at_ready': at_ready,
+               'mark': launcher.state()['mark']}
     finally:
         if launcher.process.wait(0.0) is None:
             print(tool(env, 'stop')[1])
@@ -174,6 +179,7 @@ def test_the_stack_comes_up_disarmed_with_moveit_as_owner(session):
 
 def test_the_probe_had_left_before_stack_ready_and_the_nodes_are_the_manual_stacks(session):
     at_ready = session['at_ready']
+    assert PROBE_NODE not in session['at_phase'], session['at_phase']
     assert PROBE_NODE not in at_ready, at_ready
     expected = dict(LAUNCHER_NODES)
     seen = list(at_ready)
@@ -229,6 +235,15 @@ def test_stop_during_an_episode_marks_it_interrupted_and_leaves_nothing(session)
     order = [line.split('stopping ')[1].split(':')[0] for line in launcher.output().splitlines()
              if ' stopping ' in line and ':' in line.split('stopping ')[1]]
     assert order == ['bridge', 'stack', 'relay'], order
+    # The recorder was closed by the launch's SIGINT, not escalated to SIGTERM.
+    with open(os.path.join(state['log_dir'], 'stack.log'), errors='replace') as handle:
+        stack = handle.read()
+    assert re.search(r'\[INFO\] \[episode_recorder-\d+\]: process has finished cleanly', stack)
+    assert not re.search(r'\[episode_recorder-\d+\]: process\[episode_recorder-\d+\] failed to '
+                         r'terminate', stack)
+    escalated = [line for line in stack.splitlines()
+                 if 'escalating' in line and 'episode_' in line]
+    assert escalated == [], escalated
 
 
 def test_no_label_reaches_any_log(session):
@@ -297,6 +312,76 @@ def test_stop_after_the_supervisor_was_killed(session, tmp_path):
         assert not os.path.exists(procs.state_path(env))
     finally:
         launcher.process.stop()
+
+
+class Terminal:
+    """The launcher on a pseudo-terminal, as a person starts it: prompts and answers."""
+
+    def __init__(self, argv, env):
+        self.master, slave = os.openpty()
+        self.process = subprocess.Popen(argv, env=env, stdin=slave, stdout=slave, stderr=slave,
+                                        start_new_session=True)
+        os.close(slave)
+        self.text = ''
+        self.lock = threading.Lock()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        while True:
+            try:
+                data = os.read(self.master, 4096)
+            except OSError:
+                return
+            if not data:
+                return
+            with self.lock:
+                self.text += data.decode('utf-8', 'replace')
+
+    def output(self):
+        with self.lock:
+            return self.text
+
+    def answer(self, prompt, reply, timeout=60.0):
+        end = time.monotonic() + timeout
+        while prompt not in self.output():
+            assert time.monotonic() < end and self.process.poll() is None, \
+                f'no prompt {prompt!r}:\n' + self.output()[-3000:]
+            time.sleep(0.1)
+        os.write(self.master, (reply + '\n').encode())
+
+
+def test_a_person_start_asks_for_the_labels_and_keeps_them_out_of_every_log(session, tmp_path):
+    """No --yes, no --keep-labels, on a terminal: the defaults a person gets (but RViz)."""
+    env = dict(session['env'])
+    data = tmp_path / 'data'
+    task, operator = f'task-{secrets.token_hex(4)}', f'operator-{secrets.token_hex(4)}'
+    term = Terminal([sys.executable, TOOL, 'start', '--profile', 'mock', '--no-rviz',
+                     '--data-dir', str(data), '--port', str(PORT)], env)
+    try:
+        term.answer('Task label: ', task)
+        term.answer('Operator: ', operator)
+        end = time.monotonic() + 240.0
+        while 'STACK READY' not in term.output():
+            assert time.monotonic() < end and term.process.poll() is None, \
+                term.output()[-4000:]
+            time.sleep(0.2)
+        state = procs.read_state(procs.state_path(env))
+        code, out = tool(env, 'stop')
+        assert code == 0, out
+        assert term.process.wait(60.0) == 0, term.output()[-3000:]
+    finally:
+        if term.process.poll() is None:
+            tool(env, 'stop')
+            term.process.kill()
+        os.close(term.master)
+    labels = json.loads((data / 'labels.json').read_text())
+    assert labels == {'task': task, 'operator': operator}
+    assert 'Continue anyway?' not in term.output()
+    for path in glob.glob(os.path.join(state['log_dir'], '**', '*'), recursive=True):
+        if os.path.isfile(path):
+            with open(path, 'rb') as handle:
+                text = handle.read()
+            assert task.encode() not in text and operator.encode() not in text, path
 
 
 def test_a_profile_that_is_not_a_simulation_is_refused(session):

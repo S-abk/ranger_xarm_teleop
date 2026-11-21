@@ -52,6 +52,10 @@ PROCESS_EVENT = re.compile(r'^\[(?:INFO|ERROR)\] \[(?P<proc>[\w.-]+)-(?P<n>\d+)\
 # controller spawner leaves once its controller is loaded; gz's ``create`` once the robot is
 # spawned.
 EXITING = ('spawner', 'create')
+# Viewers the operator may close (or that may crash) while the stack runs on: RViz. Their end
+# is said, not fatal. (gz's window is part of the one ``gz sim`` process: closing it ends the
+# simulator, which is fatal.)
+VIEWERS = ('rviz2',)
 
 
 @dataclass
@@ -167,9 +171,16 @@ class LaunchState:
 
     def ended_wrongly(self) -> List[str]:
         """Return the processes that died, or ended though they should keep running."""
-        out = [f'{k} died: {line}' for k, line in sorted(self.died.items())]
-        out += [f'{k} ended' for k, name in sorted(self.finished.items()) if name not in EXITING]
+        out = [f'{k} died: {line}' for k, line in sorted(self.died.items())
+               if self.started.get(k, k.rsplit('-', 1)[0]) not in VIEWERS]
+        out += [f'{k} ended' for k, name in sorted(self.finished.items())
+                if name not in EXITING and name not in VIEWERS]
         return out
+
+    def viewers_ended(self) -> List[str]:
+        """Return the viewers (RViz) that have ended, closed or crashed."""
+        keys = set(self.died) | set(self.finished)
+        return sorted(k for k in keys if self.started.get(k, k.rsplit('-', 1)[0]) in VIEWERS)
 
 
 def feedback_version(source: str) -> Optional[str]:

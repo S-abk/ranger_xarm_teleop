@@ -65,7 +65,14 @@ The stack role needs ROS sourced, as for the manual sequence.
 - Recording with the cameras off is refused before anything starts: the Gazebo profile requires
   both camera streams.
 - A missing item asks "continue anyway?". `--yes` goes on past missing items; `--strict` stops at
-  the first one.
+  the first one. A missing adb item never stops the start: the headset may be plugged in later.
+- A stack that does not come up disarmed with MoveIt as owner, or that the probe could not
+  check, stops the session in every mode.
+- **Closing a window.**
+  - Closing RViz (mock) is said, and the session goes on.
+  - The gz window is part of the simulator's own process: closing it ends the simulator, and
+    the session stops.
+  - Any other process of the stack that ends also stops the session, with its log printed.
 
 **Order and checks.**
 1. It asks for the task label and operator. They are written only into the data directory,

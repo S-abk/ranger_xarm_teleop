@@ -405,6 +405,7 @@ class Supervisor:
         self.relay = logwatch.RelayState()
         self.pairs = logwatch.PairsState()
         self.launches = {n: logwatch.LaunchState() for n in ('simulator', 'stack', 'bridge')}
+        self.viewers_said: set = set()
         self.relay_here = opts.role == 'relay' or not opts.relay_url
         self.env = dict(os.environ)
         self.env[procs.MARK_VAR] = mark
@@ -482,6 +483,10 @@ class Supervisor:
             launch = self.launches.get(c.step.name)
             if launch is not None and launch.ended_wrongly():
                 return c
+            for viewer in (launch.viewers_ended() if launch is not None else []):
+                if viewer not in self.viewers_said:
+                    self.viewers_said.add(viewer)
+                    self.say(f'{viewer} ended (a viewer, closed or crashed); the stack goes on')
         return None
 
     def sleep(self, seconds: float) -> None:
@@ -606,7 +611,9 @@ class Supervisor:
     def run_stack_role(self, local_items: List[pf.Item], sim: Optional[dict]) -> None:
         """Stack role: everything on this machine, the relay here or elsewhere."""
         self.show(local_items)
-        self.gate('before the start', local_items)
+        # adb is not a reason to stop at the start: the headset is often plugged in later, and
+        # the human's rule for the adb step is to say so and carry on.
+        self.gate('before the start', [i for i in local_items if i.key != 'adb'])
         steps = self.plan_steps(sim)
         by = {s.name: s for s in steps}
         if 'relay' in by:
