@@ -474,6 +474,55 @@ The mock and Gazebo stack tests that compare the tool speed with the gripper ope
 and the mock test that drives the closed gripper into the robot's body, skip, naming the
 pairs, while any is left enabled.
 
+### Returning to the ready posture (reset)
+
+Off unless the stack is launched with `reset:=true` (default false: neither node starts), and
+**simulation only**: the reset node refuses every request unless every ros2_control hardware
+plugin in `/robot_description` is a simulator. Rule G-16 of the safety gate: a planned motion
+started from the headset is hold-to-run.
+
+- **The control:** with teleop disarmed (B), pull the **right thumbstick back** (towards you)
+  past 0.8 and hold it. After 0.5 s the reset node sends move_group one goal to the posture
+  `reset_posture` (default `ready`, the arm tools' ready posture), planned with collision
+  checking and executed through MoveIt's controller, at `reset_speed_scaling` (velocity and
+  acceleration; required, no default: the simulation-only limits file sets 0.2). No node reads
+  the right stick axes otherwise; the stick click (scale) is a press, not a pull.
+- **Hold-to-run:** the arm moves only while the stick stays above 0.5 and the input is fresh.
+  Releasing it, stale input (100 ms; also a relay disconnect), a lost right controller and a
+  change of XR session or a sequence going backwards cancel the goal. Looking away, an emulated
+  or absent pose and a reference-space reset do not: you may watch the arm, not the controller.
+  After any stop the stick must be released and pulled again; a held stick never resumes.
+- **Refused, with the reason on the panel and the refused vibration,** while teleop is armed or
+  the arm is not handed back to MoveIt, while an episode is recording or waits for keep or
+  discard, without a fresh state of the teleop node or the episode node, without the watchdog,
+  before move_group answers, and when the feature is off or the robot is not simulated. A
+  posture MoveIt considers in collision is refused with nothing moved: disarm and use
+  `tools/retreat_arm.py`. A refusal comes only after the full dwell, so a brush of the stick
+  does nothing.
+- **Never** arms teleop, asks the mux for the arm, or moves the gripper. An episode cannot start
+  during a reset (teleop is not armed); arming during one is refused by the mux while the goal
+  runs, and teleop armed stops the reset.
+- **The watchdog:** a separate process (`reset_watchdog_node`) cancels the reset's goal by its
+  id when the reset node's 50 Hz heartbeat (`/teleop/reset/heartbeat`, which names the goal) is
+  older than 0.2 s, and keeps cancelling until the goal has ended and the joints rest. The
+  reset node sends no goal without the watchdog's own sign of life
+  (`/teleop/reset/watchdog`), sent only once its cancel path answered once, and stops its goal
+  if that sign of life is older than 0.5 s. A process joining the ROS graph can stall a
+  publisher for about a third of a second: that cancels a reset in progress ("heartbeat
+  late"), which fails safe; press again.
+- **State:** `/teleop/reset/state` (`ResetState`, 10 Hz and on change): what it does, why, the
+  goal's id while one is out, and the last stop's joint travel and time. The operator feedback
+  node turns it into a line on the panel and a vibration on the right controller (start,
+  arrival, refusal, a stop by a fault; a release is silent).
+- **Configuration:** `config/reset.yaml` (`reset_params_file`): the named postures
+  (`reset_posture_names`, `reset_postures.<name>`), the one the control goes to, and the
+  control's thresholds and dwell. It may not set the speed scaling or the switch.
+
+```bash
+ros2 launch ranger_xarm_teleop_bringup teleop_mock.launch.py reset:=true
+ros2 topic echo /teleop/reset/state --field reason_text     # what it does and why
+```
+
 ### Measuring a run
 
 ```bash
