@@ -23,6 +23,7 @@ OTHER = bytes(range(2, 18))
 
 
 class Rig:
+
     def __init__(self):
         self.w = Watchdog(ARM_JOINTS)
         self.now = 50.0

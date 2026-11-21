@@ -79,6 +79,10 @@ def note(stack, text):
 
 def test_the_stack_runs_the_reset_node_and_its_watchdog(stack):
     probe, launch = stack['probe'], stack['launch']
+    # Every controller loaded first (this test runs first in its module, and under load the
+    # spawners can still be at work when the stack answers).
+    probe.wait_for(lambda: {'teleop_arm_controller', 'teleop_gripper_controller'}
+                   <= set(probe.controllers()), 60.0, 'the teleop controllers to be loaded')
     expected = {**MOCK_STACK_NODES, '/reset_node': 1, '/reset_watchdog': 1}
     assert_stack_nodes(probe, launch, expected)
 

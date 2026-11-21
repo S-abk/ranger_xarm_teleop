@@ -57,6 +57,7 @@ def ros():
 
 
 class FakeTime:
+
     def __init__(self):
         self.t = 1000.0
 
@@ -68,6 +69,7 @@ class FakeTime:
 
 
 class Future:
+
     def __init__(self):
         self.callbacks, self.value, self.finished = [], None, False
 
@@ -130,6 +132,7 @@ class FakeAction:
 
 
 class Handle:
+
     def __init__(self, accepted):
         self.accepted = accepted
         self.result_future = Future()
@@ -485,6 +488,7 @@ def test_while_move_group_is_not_ready_requests_are_refused(rig):
 # ---- the watchdog node ----
 
 class Dog:
+
     def __init__(self, monkeypatch):
         self.clock = FakeTime()
         monkeypatch.setattr(reset_watchdog_node, 'time', self.clock)
