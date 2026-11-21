@@ -258,9 +258,15 @@ def test_the_manual_launch_has_the_same_parameters(session, tmp_path):
     bridge = Process(['ros2', 'launch', 'ranger_xarm_teleop_bridge', 'bridge.launch.py',
                       f'relay_url:=ws://127.0.0.1:{PORT}/ws'], env, str(tmp_path / 'bridge.log'))
     probe = session['probe']
+    started = time.monotonic()
     try:
-        probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_MOVEIT, 120.0,
-                       'the manual stack')
+        # States published by the manual stack itself (the probe's cached owner is the
+        # stopped session's). A node answers parameter requests only once it spins, which is
+        # after its constructor has declared every parameter.
+        probe.wait_for(lambda: probe.states_since(started) and probe.episode_since(started),
+                       120.0, 'the manual stack')
+        probe.wait_for(lambda: probe.owner_value() == ArmOwner.OWNER_MOVEIT, 60.0,
+                       'MoveIt as owner')
         names = [n.strip('/') for n in COMPARED]
         probe.wait_for(lambda: all(n in [x for x, _ in probe.node.get_node_names_and_namespaces()]
                                    for n in names), 60.0, 'every compared node')
@@ -294,7 +300,12 @@ def test_stop_after_the_supervisor_was_killed(session, tmp_path):
 
 
 def test_a_profile_that_is_not_a_simulation_is_refused(session):
-    """INV-3: the launcher starts no stack for a profile it cannot show to be a simulation."""
+    """
+    INV-3: the launcher starts no stack for a profile it cannot show to be a simulation.
+
+    From the command line this is the unknown-profile path (the launcher knows only simulation
+    profiles); the "simulation: true" check itself is a unit test (test_plan.py).
+    """
     code, out = tool(session['env'], 'start', '--profile', 'hardware', '--yes', timeout=60.0)
     assert code == 2, out
     assert 'refused' in out and 'hardware bring-up is started by hand' in out

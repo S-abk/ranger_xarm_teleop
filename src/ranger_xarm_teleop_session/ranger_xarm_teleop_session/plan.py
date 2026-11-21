@@ -126,9 +126,10 @@ def listen_warning(opts: 'Options') -> Optional[str]:
     return None
 
 
-def local_relay_url(port: int) -> str:
-    """Return the bridge's URL for a relay on this machine."""
-    return f'ws://127.0.0.1:{port}/ws'
+def local_relay_url(port: int, listen: str = DEFAULT_HOST) -> str:
+    """Return the bridge's URL for a relay on this machine, listening on ``listen``."""
+    host = '127.0.0.1' if listen in ('0.0.0.0', '::') else listen
+    return f'ws://{host}:{port}/ws'
 
 
 def relay_url_problem(url: str) -> Optional[str]:
@@ -274,7 +275,7 @@ def build_plan(opts: Options, *, checkout: str, bringup_share: str = '', session
             argv.append(f'record_data_dir:={opts.data_dir}')
     steps.append(Step('stack', tuple(argv)))
     argv = ['ros2', 'launch', 'ranger_xarm_teleop_bridge', 'bridge.launch.py']
-    url = opts.relay_url or local_relay_url(int(opts.port))
+    url = opts.relay_url or local_relay_url(int(opts.port), opts.listen)
     if url != local_relay_url(DEFAULT_PORT):
         argv.append(f'relay_url:={url}')
     if not opts.feedback:

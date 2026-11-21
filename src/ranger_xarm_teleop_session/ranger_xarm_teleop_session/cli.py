@@ -162,6 +162,13 @@ def start_command(args, checkout: Optional[str], state_file: str, argv) -> int:
         os.execve(sys.executable, [sys.executable, script] + list(
             sys.argv[1:] if argv is None else argv), env)
     session = mark.split('.')[0]
+    if not procs.take_lock(state_file):
+        print('refused: another session is starting or running on this machine (its lock is '
+              'held). One session at a time: see  tools/teleop_session status')
+        return sv.EXIT_REFUSED
+    refused = refuse_second_session(state_file)     # again, now under the lock
+    if refused is not None:
+        return refused
     opts = options_from(args)
     record_profile = None
     if opts.role == 'stack':
@@ -207,17 +214,24 @@ def start_command(args, checkout: Optional[str], state_file: str, argv) -> int:
                         keep_labels=args.keep_labels)
 
     def on_signal(signum, _frame):
+        # Inside a critical section (a child being started and recorded) the signal only asks
+        # for the stop; the supervisor acts on it right after. Elsewhere it interrupts the wait
+        # or the prompt at once.
         if not sup.stopping:
             sup.stopping = True
-            raise sv.StopRequested()
+            if not sup.critical:
+                raise sv.StopRequested()
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
     sup.started_wall = time.time()
     sup.write_state()
     try:
+        sup.critical = False
         local = local_items(opts, sup, record_profile, policy == 'ask' and not args.keep_labels)
         sim = sup_sim(opts)
+        sup.critical = True         # until run() is in its own try
+        sup.check_stop()
     except sv.StopRequested:
         sup.say('stop asked for')
         sup.stop()
@@ -342,13 +356,17 @@ def stop_command(state_file: str, out=print, wait_s: float = STOP_SUPERVISOR_WAI
                 break
             time.sleep(0.2)
         report = os.path.join(state.get('log_dir') or '', 'stop_report.txt')
+        text = ''
         if os.path.isfile(report):
             with open(report, encoding='utf-8') as handle:
-                out(handle.read().rstrip())
+                text = handle.read().rstrip()
+            out(text)
         left = procs.marked(mark)
         if not left:
             procs.clear_state(state_file, mark)
-            return sv.EXIT_OK
+            # The supervisor's own report decides: an escalation, an open file or an episode
+            # still recording is a failed stop even with no process left.
+            return sv.EXIT_OK if 'PASS:' in text else sv.EXIT_FAILED
         out('processes of the session are still there; stopping them from the state file')
         notes: List[str] = []
         problems = sv.stop_processes(mark, state.get('children') or [], out, notes=notes)

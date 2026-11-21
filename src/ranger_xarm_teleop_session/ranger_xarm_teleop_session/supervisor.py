@@ -81,7 +81,12 @@ class Console:
         stamp = time.strftime('%H:%M:%S')
         lines = text.split('\n') if text else ['']
         block = '\n'.join(f'{stamp} {line}' if line else '' for line in lines)
-        print(block, file=self.out, flush=True)
+        try:
+            print(block, file=self.out, flush=True)
+        except (OSError, ValueError):
+            # The terminal is gone (closed window, lost SSH: SIGHUP, then EIO on every write).
+            # The supervisor must still stop what it started; launcher.log keeps the lines.
+            pass
         if self.log:
             self.log.write(block + '\n')
             self.log.flush()
@@ -278,24 +283,37 @@ def stop_processes(mark: str, children: List[dict], say: Callable[[str], None],
         # itself; signalling the whole group as well would give every node a second SIGINT
         # while it cleans up (the episode node marks an episode interrupted in that cleanup).
         seen = _size(log)
-        if child['pid'] in group:
+        signalled_all = False
+        if child['pid'] not in group:
+            say(f'stopping {name}: its first process has ended; SIGINT to the {len(group)} '
+                'processes left')
+            _signal_marked(group, signal.SIGINT, mark)
+            signalled_all = True
+        elif name not in LAUNCH_STEPS:
+            # Not a launch: ``ros2 run`` (the simulator check, the probe) does not pass a SIGINT
+            # on (it relies on a terminal signalling the whole group), and the relay is one
+            # process. Every process of the step gets the SIGINT once, as from a terminal.
+            say(f'stopping {name}: SIGINT to its {len(group)} processes')
+            _signal_marked(group, signal.SIGINT, mark)
+            signalled_all = True
+        else:
             say(f'stopping {name}: SIGINT to pid {child["pid"]} ({len(group)} processes)')
             _signal_marked([child['pid']], signal.SIGINT, mark)
             left = _wait_gone(members, mark, ACK_WAIT_S if log else 0.0, reap)
             if left and child['pid'] in left and log and not _acknowledged(log, seen):
-                # The launch has not taken the SIGINT up (no "ctrl-c" line from it): give every
-                # process of the step the SIGINT a terminal's Ctrl-C would, once each (the
-                # launch has forwarded nothing).
+                # The launch has not taken the SIGINT up (no "ctrl-c" line from it): its other
+                # processes get the SIGINT a terminal's Ctrl-C would, once each. Never the launch
+                # again: should it take that one up, it would pass it on a second time. It ends
+                # by itself once its processes have.
+                nodes = [p for p in left if p != child['pid']]
                 notes.append(f'{name}: its launch did not take up the SIGINT within '
-                             f'{ACK_WAIT_S:.0f} s; SIGINT sent to its {len(left)} processes')
+                             f'{ACK_WAIT_S:.0f} s; SIGINT sent to its {len(nodes)} other '
+                             'processes')
                 say(notes[-1])
-                _signal_marked(left, signal.SIGINT, mark)
-        else:
-            say(f'stopping {name}: its first process has ended; SIGINT to the {len(group)} '
-                'processes left')
-            _signal_marked(group, signal.SIGINT, mark)
+                _signal_marked(nodes, signal.SIGINT, mark)
+                signalled_all = True
         left = _wait_outliving(child['pid'], members, mark, waits.get(name, 15.0), reap,
-                               name, say, notes, signalled=child['pid'] not in group)
+                               name, say, notes, signalled=signalled_all)
         for sig, wait, word in ((signal.SIGTERM, TERM_WAIT_S, 'SIGTERM'),
                                 (signal.SIGKILL, KILL_WAIT_S, 'SIGKILL')):
             if not left:
@@ -382,6 +400,7 @@ class Supervisor:
         self.items: Dict[str, pf.Item] = {}
         self.session_dir: Optional[str] = None
         self.stopping = False
+        self.critical = True        # until the run's own handling is in place
         self.bridge = logwatch.BridgeState()
         self.relay = logwatch.RelayState()
         self.pairs = logwatch.PairsState()
@@ -415,10 +434,15 @@ class Supervisor:
     def start_step(self, step: pl.Step) -> Child:
         """Start one step and record it before anything else happens."""
         self.check_stop()
-        child = Child(step, self.env, self.log_dir)
-        self.children.append(child)
-        self.write_state()
+        self.critical = True        # a signal now only asks for the stop (see cli.on_signal)
+        try:
+            child = Child(step, self.env, self.log_dir)
+            self.children.append(child)
+            self.write_state()
+        finally:
+            self.critical = False
         self.say(f'started {step.name} (pid {child.pid}): {" ".join(step.argv)}')
+        self.check_stop()
         return child
 
     def check_stop(self) -> None:
@@ -527,6 +551,8 @@ class Supervisor:
         self.record_profile = record_profile
         code = EXIT_OK
         try:
+            self.critical = False
+            self.check_stop()       # a stop asked for before the run could act on it
             self.set_phase('starting')
             if self.opts.role == 'relay':
                 self.run_relay_role(local_items)
@@ -609,11 +635,18 @@ class Supervisor:
         items = self.stack_items(report)
         self.show(items)
         if report is None:
-            self.say(f'the probe gave no report; its log ends with:\n{probe.last_lines()}')
+            raise Refused('the probe gave no report, so the stack could not be checked; its '
+                          f'log ends with:\n{probe.last_lines()}')
+        owner = next(i for i in items if i.key == 'owner')
+        if owner.status != pf.OK:
+            # INV-1: the stack must come up disarmed with MoveIt as owner. Not a matter of
+            # going on anyway (--yes): the launcher stops.
+            raise Refused(f'stopped: the stack did not come up disarmed with MoveIt as owner '
+                          f'({owner.detail})')
+        self.gate('at stack ready', items)
         self.set_phase('stack_ready')
         self.say('STACK READY: the probe has left; nothing joins the ROS graph from here.\n'
                  'Put on the headset now.')
-        self.gate('at stack ready', items)
         self.watch_headset()
 
     def plan_steps(self, sim: Optional[dict]) -> List[pl.Step]:
@@ -679,7 +712,8 @@ class Supervisor:
         if self.opts.role == 'stack':
             bridge = {'lines': self.bridge.lines, 'connected': self.bridge.connected,
                       'rate': self.bridge.rate,
-                      'url': self.opts.relay_url or pl.local_relay_url(self.opts.port)}
+                      'url': self.opts.relay_url or pl.local_relay_url(self.opts.port,
+                                                                       self.opts.listen)}
         expected = None
         try:
             with open(feedback_js(self.checkout), encoding='utf-8') as handle:
@@ -703,7 +737,8 @@ class Supervisor:
                 shown.update({i.key: i.status for i in changed})
             for i in items:
                 self.items[i.key] = i
-            if not ready and not pf.missing(items):
+            headset = next(i for i in items if i.key == 'headset')
+            if not ready and headset.status == pf.OK and not pf.missing(items):
                 keys = {i.key for i in items}
                 earlier = [i for i in self.items.values()
                            if i.key not in keys and i.status in (pf.MISSING, pf.UNKNOWN)]
@@ -715,7 +750,7 @@ class Supervisor:
                             + '; '.join(f'{i.title} ({pf.SHOWN[i.status]})' for i in checks)
                             if checks else '')
                          + '\nStop with Ctrl-C here, or: tools/teleop_session stop')
-            elif ready and pf.missing(items):
+            elif ready and (headset.status != pf.OK or pf.missing(items)):
                 ready = False
                 self.set_phase('headset_lost')
                 self.say('the headset items are missing again (above)')

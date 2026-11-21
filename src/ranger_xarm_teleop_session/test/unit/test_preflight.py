@@ -194,8 +194,9 @@ def test_headset_item_stack_role():
 
 def test_headset_item_relay_role():
     assert pf.headset_item(None, {'peers': {}}, 'relay').status == pf.MISSING
-    assert pf.headset_item(None, {'peers': {'127.0.0.1:5': '2026-11-21 10:00:00'}},
-                           'relay').status == pf.OK
+    item = pf.headset_item(None, {'peers': {'127.0.0.1:5': '2026-11-21 10:00:00'}}, 'relay')
+    assert item.status == pf.OK and item.title == 'Headset page connected to this relay'
+    assert 'still flow shows on the robot computer' in item.detail
 
 
 def test_version_item():

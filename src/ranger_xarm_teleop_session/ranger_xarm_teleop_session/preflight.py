@@ -381,12 +381,17 @@ def headset_item(bridge: Optional[dict], relay: Optional[dict], role: str) -> It
     todo = ('put on the headset, open http://localhost:8443 in its browser and press Enter VR '
             f'(USB link: {ADB_COMMAND})')
     if role == 'relay':
+        # The relay's log shows a page connecting and its first frame, not that frames still
+        # flow (the bridge on the robot computer judges that): the item says only what it saw.
+        title = 'Headset page connected to this relay'
         peers = (relay or {}).get('peers') or {}
         if peers:
             since = sorted(peers.values())[0]
             return Item('headset', title, OK,
-                        f'a page sends headset frames to this relay (since {since or "?"})')
-        return Item('headset', title, MISSING, 'no page sends headset frames to this relay', todo)
+                        f'connected and has sent headset frames (since {since or "?"}); whether '
+                        'they still flow shows on the robot computer (the bridge)')
+        return Item('headset', title, MISSING, 'no page has sent headset frames to this relay',
+                    todo)
     if not bridge or not bridge.get('lines'):
         return Item('headset', title, UNKNOWN,
                     "the bridge's first report is not in yet (every 5 s)",

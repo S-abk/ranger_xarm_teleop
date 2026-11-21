@@ -139,6 +139,15 @@ def test_listening_beyond_this_machine_is_said_in_one_line():
     assert pl.listen_warning(pl.Options(listen='0.0.0.0', relay_url='ws://x:1/ws')) is None
 
 
+def test_the_bridge_reaches_a_relay_listening_on_another_address():
+    steps = {s.name: s for s in pl.build_plan(pl.Options(listen='10.1.2.3'), checkout=CHECKOUT,
+                                              session='S')}
+    assert pl.args_of(steps['bridge'].argv) == {'relay_url': 'ws://10.1.2.3:8443/ws'}
+    steps = {s.name: s for s in pl.build_plan(pl.Options(listen='0.0.0.0'), checkout=CHECKOUT,
+                                              session='S')}
+    assert pl.args_of(steps['bridge'].argv) == {}           # 127.0.0.1 reaches 0.0.0.0
+
+
 def test_the_relay_role_starts_the_relay_only():
     steps = pl.build_plan(pl.Options(role='relay'), checkout=CHECKOUT)
     assert [s.name for s in steps] == ['relay']

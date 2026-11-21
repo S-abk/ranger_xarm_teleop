@@ -14,12 +14,12 @@
 """
 The pre-flight's look at the running stack: a short-lived node that exits before "stack ready".
 
-It subscribes to what the stack already publishes, never publishes, calls no service and
-changes nothing. It watches until every stack item of the pre-flight is ok (at least
-``--min-seconds``) or ``--timeout`` passes, writes what it saw as JSON and exits. The launcher
-waits for this process to end before it says "stack ready": from then on nothing joins or
-leaves the ROS graph (INV-6). The judgement is ``preflight``'s, the rate rule the recorder's
-(``StreamWatch``).
+It subscribes to what the stack already publishes, publishes nothing of its own (only rclpy's
+start-up parameter event), offers and calls no service, and changes nothing. It watches until
+every stack item of the pre-flight is ok (at least ``--min-seconds``) or ``--timeout`` passes,
+writes what it saw as JSON and exits. The launcher waits for this process to end before it
+says "stack ready": from then on nothing joins or leaves the ROS graph (INV-6). The judgement
+is ``preflight``'s, the rate rule the recorder's (``StreamWatch``).
 
 It never subscribes to the reset node's two liveness topics; the reset node's own state
 carries ``watchdog_alive``.
@@ -97,7 +97,10 @@ class Probe(Node):
 
     def __init__(self, profile: dict, record: bool, feedback: bool, reset: bool):
         """Subscribe to what the pre-flight needs, for the parts that are on."""
-        super().__init__(PROBE_NODE)
+        # No /rosout publisher and no parameter services. rclpy still creates its
+        # /parameter_events publisher and announces its own use_sim_time parameter on it once
+        # at start-up, as every rclpy node does; nothing else is ever published.
+        super().__init__(PROBE_NODE, enable_rosout=False, start_parameter_services=False)
         self.profile = profile
         self.record, self.feedback, self.reset = record, feedback, reset
         self.watch: Dict[str, StreamWatch] = {}

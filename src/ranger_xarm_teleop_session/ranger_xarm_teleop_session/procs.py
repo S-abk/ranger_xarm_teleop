@@ -212,6 +212,29 @@ def clear_state(path: str, mark: Optional[str] = None) -> bool:
     return True
 
 
+_LOCK = []      # the open lock file of this supervisor, held for its whole life
+
+
+def take_lock(state_file: str) -> bool:
+    """
+    Take the one-session lock beside the state file; return False when another holds it.
+
+    An exclusive flock, held until this process ends (also when it is killed): two starts at
+    the same moment cannot both pass. The file is not inherited by the children.
+    """
+    import fcntl
+    path = os.path.join(os.path.dirname(state_file), 'lock')
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    handle = open(path, 'a')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    _LOCK.append(handle)
+    return True
+
+
 def session_is_live(state: Optional[dict], proc_root: str = '/proc') -> bool:
     """Return True when a live process carries the state file's mark."""
     if not state or not state.get('mark'):

@@ -96,7 +96,7 @@ as ok. The items:
 
 Once the headset is on, the panel shows the session's live state as before.
 
-A correct start ends with:
+A correct start ends with (each line begins with the time):
 
 ```text
 STACK READY: the probe has left; nothing joins the ROS graph from here.
@@ -110,16 +110,23 @@ SESSION READY
 - Each step gets one SIGINT, in this order: the bridge (the arm holds on stale input), the
   teleop stack with the recorder (an episode in progress is marked interrupted), the simulator,
   then the relay.
-- It escalates only past a timeout, and the stop report says so.
+- A launch gets its SIGINT once it has started its first process, and passes it on to its
+  nodes. If it does not log that it took the SIGINT up within 5 s, its other processes get it
+  directly. A process that outlives its launch, such as gz's server, also gets it directly, as
+  a terminal's Ctrl-C would give it. The stop report notes both cases.
+- It escalates to SIGTERM only past a timeout, and the stop report lists that as a problem.
 - Only processes carrying the session's own mark (`TELEOP_SESSION_MARK` in their environment)
   are ever signalled.
 - `stop` also works when the launcher itself was killed: it stops the processes from its state
   file (`$XDG_RUNTIME_DIR/teleop_session/`).
-- One session runs at a time per machine. A stale state file is reported and cleared.
+- One session runs at a time per user on a machine (a lock and the state file). A stale state
+  file is reported and cleared.
 
 **Logs and the relay.**
 - Every process's output is in `$ROS_LOG_DIR/teleop_session/<session>/` (default
   `~/.ros/log`), with `launcher.log`, `sim_check.json`, `probe.json` and `stop_report.txt`.
+- The bridge records no raw relay text (`record_path` is left off, unlike the manual example
+  below, which writes into `recordings/`); the recorder records the session.
 - The relay has no authentication. It listens on 127.0.0.1 unless `--listen` names another
   address, and then the launcher says that anything on that network can connect to it.
 

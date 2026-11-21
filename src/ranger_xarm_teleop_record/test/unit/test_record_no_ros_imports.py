@@ -25,8 +25,8 @@ PKG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 # the Joy layout) are pure as well.
 SERVO_DIR = os.path.join(os.path.dirname(PKG_DIR), 'ranger_xarm_teleop_servo')
 BRIDGE_DIR = os.path.join(os.path.dirname(PKG_DIR), 'ranger_xarm_teleop_bridge')
-MODULES = ['streams', 'streamwatch', 'profile', 'metadata', 'checker', 'consistency', 'export', 'episode',
-           'extrinsics', 'linkstats', 'provenance', 'sim_check', 'parameters']
+MODULES = ['streams', 'streamwatch', 'profile', 'metadata', 'checker', 'consistency', 'export',
+           'episode', 'extrinsics', 'linkstats', 'provenance', 'sim_check', 'parameters']
 FORBIDDEN = ['rclpy', 'geometry_msgs', 'sensor_msgs', 'std_msgs', 'std_srvs', 'tf2_ros',
              'tf2_msgs', 'nav_msgs', 'moveit_msgs', 'control_msgs', 'controller_manager_msgs',
              'action_msgs', 'trajectory_msgs', 'rcl_interfaces', 'builtin_interfaces',

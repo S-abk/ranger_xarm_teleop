@@ -33,7 +33,8 @@ from ranger_xarm_teleop_session import procs
 from ranger_xarm_teleop_session import supervisor as sv
 
 SLEEPER = 'import time\ntime.sleep(60)\n'
-DEAF = 'import signal, time\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\ntime.sleep(60)\n'
+DEAF = ('import signal, time\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\n'
+        'print("ignoring SIGINT", flush=True)\ntime.sleep(60)\n')
 # A marked process that starts an unmarked one in its own process group, then waits.
 PARENT_OF_UNMARKED = (
     'import os, subprocess, sys, time\n'
@@ -110,10 +111,13 @@ def test_steps_stop_in_order_with_sigint(mark, started):
     assert procs.marked(mark) == []
 
 
-def test_a_step_that_ignores_sigint_is_escalated_and_reported(mark, started):
-    deaf = started(DEAF, mark)
-    wait_marked(mark, 1)
-    time.sleep(0.3)                                    # the handler is installed
+def test_a_step_that_ignores_sigint_is_escalated_and_reported(mark, started, tmp_path):
+    out = open(tmp_path / 'out', 'w')
+    deaf = started(DEAF, mark, stdout=out)
+    end = time.monotonic() + 10                        # until it says it ignores SIGINT
+    while 'ignoring SIGINT' not in open(tmp_path / 'out').read():
+        assert time.monotonic() < end
+        time.sleep(0.05)
     problems = sv.stop_processes(mark, [entry('stack', deaf)], lambda s: None,
                                  lambda: deaf.poll(), waits={'stack': 0.5})
     assert len(problems) == 1 and 'SIGTERM' in problems[0] and 'after SIGINT' in problems[0]
@@ -197,6 +201,26 @@ def test_a_launch_that_says_it_took_the_sigint_is_left_to_do_its_work(mark, star
     log.write_text('[WARNING] [launch]: user interrupted with ctrl-c (SIGINT)\n')
     assert not sv._acknowledged(str(log), log.stat().st_size)
     assert sv._acknowledged(str(log), 0)
+
+
+# The run wrapper of the simulator check and the probe: it does not pass a SIGINT on.
+WRAPPER = (
+    'import signal, subprocess, sys\n'
+    'signal.signal(signal.SIGINT, signal.SIG_IGN)\n'
+    'child = subprocess.Popen([sys.executable, "-c", "import signal, time; '
+    'signal.signal(signal.SIGINT, signal.default_int_handler); time.sleep(60)"])\n'
+    'sys.exit(child.wait() and 0)\n')
+
+
+def test_a_step_that_is_not_a_launch_gets_the_sigint_for_each_process(mark, started):
+    probe = started(WRAPPER, mark)
+    wait_marked(mark, 2)
+    said = []
+    problems = sv.stop_processes(mark, [entry('probe', probe)], said.append,
+                                 lambda: probe.poll())
+    assert problems == [], problems
+    assert said == ['stopping probe: SIGINT to its 2 processes']
+    assert probe.wait(5) is not None
 
 
 def test_a_process_without_the_mark_is_never_signalled(mark, started, tmp_path):
@@ -302,6 +326,43 @@ def test_after_stop_finds_open_files_and_episodes_still_recording(tmp_path):
     assert any('bag.mcap' in p and 'open file' in p for p in problems)
     report = sv.stop_report(str(session), problems, supervisor_gone=False)
     assert 'PROBLEMS' in report and 'PASS' not in report
+
+
+class HungUp:
+    """A terminal after SIGHUP: every write fails."""
+
+    def write(self, _text):
+        raise OSError(5, 'Input/output error')
+
+    def flush(self):
+        raise OSError(5, 'Input/output error')
+
+
+def test_a_terminal_that_is_gone_does_not_stop_the_supervisor(tmp_path):
+    console = sv.Console(out=HungUp(), log_path=str(tmp_path / 'launcher.log'))
+    console.say('stopping the session')                # no exception
+    assert 'stopping the session' in (tmp_path / 'launcher.log').read_text()
+
+
+def test_the_one_session_lock_is_held_for_the_supervisors_life(tmp_path):
+    state_file = str(tmp_path / 'state.json')
+    package = os.path.dirname(os.path.dirname(sv.__file__))
+    code = ('import sys\nsys.path.insert(0, %r)\n'
+            'from ranger_xarm_teleop_session import procs\n'
+            'print(procs.take_lock(%r), flush=True)\n') % (package, state_file)
+    holder = subprocess.Popen([sys.executable, '-c', code + 'import time\ntime.sleep(30)\n'],
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == 'True'
+        other = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
+                               timeout=30)
+        assert other.stdout.strip() == 'False'
+    finally:
+        holder.kill()
+        holder.wait()
+    again = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
+                           timeout=30)
+    assert again.stdout.strip() == 'True'              # released when its holder ended
 
 
 def test_descendants_by_parent_pid():
