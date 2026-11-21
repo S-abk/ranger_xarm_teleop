@@ -263,6 +263,11 @@ def test_a_recording_that_cannot_be_read_fails_its_replay_not_the_player(stand_i
     player = InputPlayer(env, tmp_path / 'input_player.log')
     try:
         player.wait_event('up', 60.0)
+        # Matched first, as its neighbours are: frames played before the consumer has
+        # matched the player's publishers can be lost, and "the first frames" below would
+        # then wait for frames that never come.
+        player.send(cmd='match', consumer=TELEOP_NODE, timeout=30.0)
+        assert player.wait_event('matched', 40.0)['ok']
         missing = player.play(tmp_path / 'no_such_recording.jsonl')
         assert missing.wait(10.0) == 1, missing.output()
         assert 'no_such_recording' in missing.output()
