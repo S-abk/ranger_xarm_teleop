@@ -88,6 +88,9 @@ def headset_streams(record_profile: dict) -> List[str]:
 # ------------------------------------------------------------------ before the stack
 def plan_item(profile: str, role: str, parts: Dict[str, bool], sim: Optional[dict]) -> Item:
     """Return the profile, the role and which optional parts are on (always shown)."""
+    if role == 'relay':
+        return Item('plan', 'Session', INFO, 'role relay: the relay only, for a stack on another '
+                    'machine (no ROS here)')
     on = ', '.join(f'{k} {"on" if v else "off"}' for k, v in parts.items())
     text = f'profile {profile}, role {role}' + (f'; {on}' if on else '')
     if sim:

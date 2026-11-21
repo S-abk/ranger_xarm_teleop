@@ -567,8 +567,13 @@ class Supervisor:
         self.start_step(pl.build_plan(self.opts, checkout=self.checkout)[0])
         self.wait_relay()
         host = self.opts.listen
-        self.say(f'the bridge on the robot computer connects with:  --relay '
-                 f'ws://{host if not pl.is_loopback(host) else "<this PC>"}:{self.opts.port}/ws')
+        if pl.is_loopback(host):
+            self.say('the relay listens on this machine only (the headset over USB). For the '
+                     "Wi-Fi set-up, start it with --listen <this PC's address on that network>")
+        else:
+            shown = "<this PC's address>" if host in ('0.0.0.0', '::') else host
+            self.say(f'on the robot computer:  tools/teleop_session start --profile <profile> '
+                     f'--relay ws://{shown}:{self.opts.port}/ws')
         self.set_phase('relay_ready')
         self.watch_headset()
 

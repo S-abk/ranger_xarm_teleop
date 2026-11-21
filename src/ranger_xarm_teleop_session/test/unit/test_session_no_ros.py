@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -76,6 +77,35 @@ def test_the_front_command_runs_without_ros(tmp_path):
     done = subprocess.run([sys.executable, '-I', tool, 'start', '--help'], env=env,
                           capture_output=True, text=True, timeout=60)
     assert done.returncode == 0 and '--role {stack,relay}' in done.stdout
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(CHECKOUT, '.venv', 'bin', 'python')),
+                    reason="the relay's .venv is not set up (tools/relay_setup.sh)")
+def test_the_relay_role_starts_and_stops_without_ros(tmp_path):
+    env = {'HOME': os.environ.get('HOME', str(tmp_path)), 'PATH': '/usr/bin:/bin',
+           'TELEOP_SESSION_STATE_DIR': str(tmp_path / 'state'),
+           'ROS_LOG_DIR': str(tmp_path / 'log'), 'TELEOP_SESSION_NO_ADB': '1'}
+    tool = os.path.join(CHECKOUT, 'tools', 'teleop_session')
+    out = open(tmp_path / 'out.txt', 'w+')
+    start = subprocess.Popen([sys.executable, '-I', tool, 'start', '--role', 'relay', '--port',
+                              str(18470 + os.getpid() % 20), '--yes'], env=env, stdout=out,
+                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    try:
+        end = time.monotonic() + 30
+        while 'listens on this machine only' not in open(tmp_path / 'out.txt').read():
+            assert time.monotonic() < end and start.poll() is None, \
+                open(tmp_path / 'out.txt').read()
+            time.sleep(0.2)
+        done = subprocess.run([sys.executable, '-I', tool, 'stop'], env=env,
+                              capture_output=True, text=True, timeout=60)
+        assert done.returncode == 0 and 'PASS' in done.stdout, done.stdout + done.stderr
+        assert start.wait(30) == 0
+    finally:
+        if start.poll() is None:
+            start.kill()
+            start.wait()
+    text = open(tmp_path / 'out.txt').read()
+    assert 'role relay: the relay only' in text and 'stopping relay' in text
 
 
 def test_the_stack_role_says_plainly_that_it_needs_ros(tmp_path):

@@ -129,6 +129,16 @@ def test_the_relay_listens_on_this_machine_unless_asked():
     assert pl.Options().listen == '127.0.0.1'
 
 
+def test_listening_beyond_this_machine_is_said_in_one_line():
+    assert pl.listen_warning(pl.Options()) is None
+    assert pl.listen_warning(pl.Options(role='relay', listen='127.0.0.1')) is None
+    line = pl.listen_warning(pl.Options(role='relay', listen='192.168.1.4'))
+    assert 'no authentication' in line and 'anything on that network can connect' in line
+    assert '\n' not in line
+    assert pl.listen_warning(pl.Options(listen='0.0.0.0')) is not None     # stack role, here
+    assert pl.listen_warning(pl.Options(listen='0.0.0.0', relay_url='ws://x:1/ws')) is None
+
+
 def test_the_relay_role_starts_the_relay_only():
     steps = pl.build_plan(pl.Options(role='relay'), checkout=CHECKOUT)
     assert [s.name for s in steps] == ['relay']

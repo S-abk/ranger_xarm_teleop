@@ -190,10 +190,9 @@ def start_command(args, checkout: Optional[str], state_file: str, argv) -> int:
     console.say(f'session {session}; logs in {log_dir}')
     for w in warnings:
         console.say(f'note: {w}')
-    relay_here = opts.role == 'relay' or not opts.relay_url
-    if relay_here and not pl.is_loopback(opts.listen):
-        console.say(f'the relay listens on {opts.listen}: it has no authentication, so anything '
-                    'on that network can connect to it')
+    warning = pl.listen_warning(opts)
+    if warning:
+        console.say(warning)
     if args.yes:
         policy = 'yes'
     elif args.strict or not sys.stdin.isatty():

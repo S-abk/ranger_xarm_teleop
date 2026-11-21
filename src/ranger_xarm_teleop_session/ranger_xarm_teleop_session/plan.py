@@ -118,6 +118,14 @@ def is_loopback(host: str) -> bool:
     return host in ('localhost', '::1') or host.startswith('127.')
 
 
+def listen_warning(opts: 'Options') -> Optional[str]:
+    """Return the line said when the relay started here listens beyond this machine, or None."""
+    if (opts.role == 'relay' or not opts.relay_url) and not is_loopback(opts.listen):
+        return (f'the relay listens on {opts.listen}: it has no authentication, so anything on '
+                'that network can connect to it')
+    return None
+
+
 def local_relay_url(port: int) -> str:
     """Return the bridge's URL for a relay on this machine."""
     return f'ws://127.0.0.1:{port}/ws'

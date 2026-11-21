@@ -13,8 +13,9 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 | `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, damped least-squares solver, MoveIt Servo joint-jog commands), command mux node, gripper relay node, and the pure modules behind them with their tests |
 | `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator (`record:=true` adds the recorder), simulation-only limit values |
 | `src/ranger_xarm_teleop_record` | Demonstration episodes: episode node (left controller, rosbag2 recorder control, sidecar), deployment profiles, the pure checker, consistency check and fixed-rate export, and session tools (see Recording demonstrations) |
+| `src/ranger_xarm_teleop_session` | The session launcher behind `tools/teleop_session`: start order, pre-flight (pure, no ROS), log watching, stop; the short-lived probe node |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
-| `tools/` | No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py`, `servo_rigid_pairs.py` |
+| `tools/` | `teleop_session` (start, check and stop a session; the relay role needs no ROS). No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py`, `servo_rigid_pairs.py` |
 | `recordings/` | Local headset recordings (git-ignored) |
 
 ## Build and test
@@ -32,6 +33,95 @@ outside the relay's own virtual environment. The teleop packages need the robot 
 (`ranger_xarm_ws`), `moveit_servo` and `ros2_control` sourced. `colcon test` starts a mock
 execution stack (no simulator); the Gazebo tests are opt-in:
 `TELEOP_TEST_GAZEBO=1 python3 -m pytest src/ranger_xarm_teleop_bringup/test/test_gazebo_stack.py`.
+
+## Start a session with one command
+
+`tools/teleop_session` starts the same processes as the manual sequence below, in the same
+order and with the same arguments. It checks what a session needs and says plainly what is
+missing, and it stops everything cleanly. The manual sequence keeps working; the launcher is a
+convenience over it. It never arms, calibrates, switches the arm's owner or moves anything.
+
+```bash
+# everything on one simulation workstation (window on, cameras on, NVIDIA card if there is one):
+tools/teleop_session start --profile gazebo
+tools/teleop_session start --profile mock              # mock execution, no simulator
+# Wi-Fi set-up. On the operator PC (headset on USB; needs no ROS, only tools/relay_setup.sh once):
+tools/teleop_session start --role relay --listen <operator PC address>
+# ...and on the robot computer, with the address it printed:
+tools/teleop_session start --profile gazebo --relay ws://<operator PC address>:8443/ws
+# stop: Ctrl-C where it runs, or from any terminal
+tools/teleop_session stop
+tools/teleop_session status
+```
+
+The stack role needs ROS sourced, as for the manual sequence.
+
+**Options.**
+- Recording, operator feedback and the reset are on for the simulation profiles; switch them
+  off with `--no-record`, `--no-feedback` and `--no-reset`.
+- For the simulator: `--headless`, `--no-cameras`, and `--gpu auto|nvidia|default` (`auto`
+  renders on the NVIDIA card when the machine has one and says when it has not).
+- `--no-rviz` (mock) and `--data-dir`.
+- Recording with the cameras off is refused before anything starts: the Gazebo profile requires
+  both camera streams.
+- A missing item asks "continue anyway?". `--yes` goes on past missing items; `--strict` stops at
+  the first one.
+
+**Order and checks.**
+1. It asks for the task label and operator. They are written only into the data directory,
+   never into a log.
+2. It runs `adb reverse tcp:8443 tcp:8443` once, only when a headset is listed and the mapping
+   is missing, and prints what it ran. It runs no other adb command.
+3. It starts, in order: the relay, the simulator, `record_commission --simulator` (with the
+   window and cameras as the session uses them), the teleop stack, and the bridge.
+4. It waits until every process of the launches has started and the controller spawners have
+   ended.
+5. A short-lived probe node then looks at the stack and leaves.
+6. **STACK READY** is printed: from then on nothing joins or leaves the ROS graph.
+7. The headset items are then judged from the bridge's and the relay's own logs, until
+   **SESSION READY**.
+
+Each item is printed as `ok`, `MISSING` or `UNKNOWN`, with what to do. An unknown is never shown
+as ok. The items:
+- the GPU and the simulator's speed;
+- disk space, the labels, and the commits of both trees, and whether either is dirty;
+- `adb reverse`;
+- the required streams at their rates;
+- disarmed with MoveIt as owner;
+- MoveIt Servo's rigid self-collision pairs;
+- the recorder, the operator feedback node, and the reset node with its watchdog;
+- the headset connected and sending input;
+- the page version, which is ok only when this launcher started the relay; otherwise the panel
+  footer must say `client feedback-6`.
+
+Once the headset is on, the panel shows the session's live state as before.
+
+A correct start ends with:
+
+```text
+STACK READY: the probe has left; nothing joins the ROS graph from here.
+Put on the headset now.
+[     ok] Headset connected and sending input: 72 frames/s reach the bridge
+[     ok] Headset page version: client feedback-6: the page sending frames was loaded from this relay after it started
+SESSION READY
+```
+
+**Stopping.**
+- Each step gets one SIGINT, in this order: the bridge (the arm holds on stale input), the
+  teleop stack with the recorder (an episode in progress is marked interrupted), the simulator,
+  then the relay.
+- It escalates only past a timeout, and the stop report says so.
+- Only processes carrying the session's own mark (`TELEOP_SESSION_MARK` in their environment)
+  are ever signalled.
+- `stop` also works when the launcher itself was killed: it stops the processes from its state
+  file (`$XDG_RUNTIME_DIR/teleop_session/`).
+- One session runs at a time per machine. A stale state file is reported and cleared.
+
+**Logs and the relay.**
+- Every process's output is in `$ROS_LOG_DIR/teleop_session/<session>/` (default
+  `~/.ros/log`), with `launcher.log`, `sim_check.json`, `probe.json` and `stop_report.txt`.
+- The relay has no authentication. It listens on 127.0.0.1 unless `--listen` names another
+  address, and then the launcher says that anything on that network can connect to it.
 
 ## Run the headset input bridge
 
