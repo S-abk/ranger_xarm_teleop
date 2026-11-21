@@ -545,6 +545,32 @@ def test_no_new_goal_while_a_given_up_goal_is_being_cancelled():
     assert rig.hold(0.6) is not None                # a press works again
 
 
+def test_a_given_up_goal_turning_up_during_the_dwell_needs_a_fresh_press():
+    """Review finding: the stick held through it must not start a goal afterwards."""
+    rig = Rig()
+    goal = give_up(rig)
+    rig.hold(0.1, 0.0)
+    rig.hold(0.2)                                   # in the dwell
+    assert rig.r.state == rs.WAITING
+    rig.r.on_goal_answer(rig.now, goal, True)       # the given-up goal turns up
+    rig.r.cancel_sent(rig.now, goal)
+    rig.r.cancel_answered(rig.now, goal, 0, 1)
+    rig.r.on_status(rig.now, goal, 5)
+    assert rig.hold(3.0) is None and len(rig.sent) == 1    # held on: nothing sent
+    rig.hold(0.1, 0.0)
+    assert rig.hold(0.6) is not None                # a fresh press does
+
+
+def test_a_given_up_goal_seen_twice_is_one_stop_and_one_event():
+    rig = Rig()
+    goal = give_up(rig)
+    count = rig.r.event_count
+    rig.r.on_status(rig.now, goal, 2)               # listed first ...
+    rig.r.on_goal_answer(rig.now, goal, True)       # ... then the late answer
+    assert rig.r.event_count == count + 1
+    assert rig.r.orphans[goal].statuses == [2]      # what was seen is kept
+
+
 def test_a_given_up_goal_listed_ended_is_forgotten():
     rig = Rig()
     goal = give_up(rig)

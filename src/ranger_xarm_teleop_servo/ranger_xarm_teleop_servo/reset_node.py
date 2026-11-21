@@ -369,7 +369,7 @@ class ResetNode(Node):
         """Return True while the watchdog's sign of life is fresh and echoes this node's beat."""
         echoed = self.watchdog[2]
         return (self._fresh(WATCHDOG_TOPIC, WATCHDOG_TIMEOUT_S, now)
-                and echoed > 0 and self.beat_seq - echoed <= ECHO_LAG_BEATS)
+                and echoed > 0 and 0 <= self.beat_seq - echoed <= ECHO_LAG_BEATS)
 
     def _cycle(self) -> None:
         now = time.monotonic()

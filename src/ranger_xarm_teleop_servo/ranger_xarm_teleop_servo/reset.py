@@ -391,6 +391,7 @@ class Reset:
                 stop.status(now, status)
             elif status in ACTIVE:
                 self._turned_up(now, goal_id, 'listed as running')
+                self.orphans[goal_id].status(now, status)       # what showed it is kept
             elif status in TERMINAL:
                 del self.orphans[goal_id]           # it has ended: nothing to watch
             return
@@ -407,6 +408,9 @@ class Reset:
 
     def _turned_up(self, now: float, goal_id: bytes, how: str) -> None:
         """Cancel a goal given up as never arrived that turns up, and stop what moves now."""
+        if self.orphans.get(goal_id) is not None:
+            return                                  # already being cancelled
+        self.need_release = True                    # whatever was held: a new press next
         if not any(stop is not None for stop in self.orphans.values()):
             self.orphan_watch.mark(now)
         stop = GoalStop(goal_id, self.params.cancel_answer_s)

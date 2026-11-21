@@ -401,6 +401,17 @@ def test_a_watchdog_that_does_not_hear_the_heartbeat_counts_as_absent(rig):
     assert not r.state().watchdog_alive
 
 
+def test_an_echo_of_a_later_heartbeat_than_this_node_sent_is_not_alive(rig):
+    """After a restart of the reset node, an echo of the old node's seq proves nothing."""
+    r = rig()
+    r.watchdog = False
+    r.hold(1.2, 0.0)
+    r.node._on_watchdog(ResetWatchdog(seq=1, heartbeat_seq=r.node.beat_seq + 1000))
+    assert not r.node.watchdog_alive(r.clock.t)
+    r.node._on_watchdog(ResetWatchdog(seq=2, heartbeat_seq=r.node.beat_seq))
+    assert r.node.watchdog_alive(r.clock.t)
+
+
 def test_a_goal_accepted_after_it_was_given_up_is_cancelled_and_announced(rig):
     """The late answer comes before its status: the heartbeat names it, cancels follow."""
     r = rig()
