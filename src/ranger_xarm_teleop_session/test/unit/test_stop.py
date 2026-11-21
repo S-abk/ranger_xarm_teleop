@@ -170,6 +170,28 @@ def test_a_launch_is_signalled_only_once_it_has_started_its_first_process(
     assert launch.wait(5) is not None
 
 
+# A launch that ends on SIGINT and leaves its child running (gz's front end and its server).
+LEAVES_CHILD = (
+    'import subprocess, sys, time\n'
+    'child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])\n'
+    'print(f"[INFO] [gazebo-1]: process started with pid [{child.pid}]", flush=True)\n'
+    'time.sleep(60)\n')
+
+
+def test_a_process_that_outlives_its_launch_gets_the_sigint_a_terminal_would_give(
+        mark, started, tmp_path):
+    log = tmp_path / 'simulator.log'
+    launch = started(LEAVES_CHILD, mark, stdout=open(log, 'w'))
+    found = wait_marked(mark, 2)
+    launch.extra = [p.pid for p in found if p.pid != launch.pid]
+    notes = []
+    problems = sv.stop_processes(mark, [dict(entry('simulator', launch), log=str(log))],
+                                 lambda s: None, lambda: launch.poll(), notes=notes)
+    assert problems == []
+    assert len(notes) == 1 and 'outlived its launch' in notes[0], notes
+    assert procs.marked(mark) == []
+
+
 def test_a_launch_that_says_it_took_the_sigint_is_left_to_do_its_work(mark, started, tmp_path):
     log = tmp_path / 'stack.log'
     log.write_text('[WARNING] [launch]: user interrupted with ctrl-c (SIGINT)\n')

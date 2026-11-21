@@ -99,8 +99,8 @@ def tool(env, *args, timeout=600.0):
     return done.returncode, done.stdout + done.stderr
 
 
-def environment(tmp):
-    env = child_environment(offset=OFFSET)
+def environment(tmp, offset=OFFSET):
+    env = child_environment(offset=offset)
     env[procs.STATE_DIR_VAR] = str(tmp / 'state')
     env['TELEOP_SESSION_NO_ADB'] = '1'
     return env

@@ -189,6 +189,28 @@ def _members(mark: str, root: int) -> List[int]:
     return sorted(group)
 
 
+def _wait_outliving(root: int, members: Callable[[], List[int]], mark: str, timeout: float,
+                    reap: Callable[[], None], name: str, say: Callable[[str], None],
+                    notes: List[str], signalled: bool = False) -> List[int]:
+    """
+    Wait for a step's processes to end; return those left after ``timeout``.
+
+    A process that outlives the step's own process (gz's server, once the launch has ended its
+    ``gz`` front end) is given the SIGINT a terminal's Ctrl-C would have given it, once.
+    """
+    end = time.monotonic() + timeout
+    while True:
+        left = _wait_gone(members, mark, min(0.5, max(0.0, end - time.monotonic())), reap)
+        if not left or time.monotonic() >= end:
+            return left
+        if not signalled and root not in left:
+            signalled = True
+            notes.append(f'{name}: {len(left)} processes outlived its launch; SIGINT sent to '
+                         "them, as a terminal's Ctrl-C would have")
+            say(notes[-1])
+            _signal_marked(left, signal.SIGINT, mark)
+
+
 def _launch_running(path: Optional[str]) -> bool:
     """Return True once a launch has started its first process (its signal handling is up)."""
     try:
@@ -272,7 +294,8 @@ def stop_processes(mark: str, children: List[dict], say: Callable[[str], None],
             say(f'stopping {name}: its first process has ended; SIGINT to the {len(group)} '
                 'processes left')
             _signal_marked(group, signal.SIGINT, mark)
-        left = _wait_gone(members, mark, waits.get(name, 15.0), reap)
+        left = _wait_outliving(child['pid'], members, mark, waits.get(name, 15.0), reap,
+                               name, say, notes, signalled=child['pid'] not in group)
         for sig, wait, word in ((signal.SIGTERM, TERM_WAIT_S, 'SIGTERM'),
                                 (signal.SIGKILL, KILL_WAIT_S, 'SIGKILL')):
             if not left:
