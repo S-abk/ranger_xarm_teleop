@@ -32,8 +32,8 @@ import sys
 import threading
 import time
 
-from ranger_xarm_teleop_interfaces.msg import (EpisodeState, InputStatus, ResetState,
-                                               ResetWatchdog)
+from ranger_xarm_teleop_interfaces.msg import (EpisodeState, Haptic, InputStatus,
+                                               OperatorStatus, ResetState, ResetWatchdog)
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from stack_helpers import ARM_JOINTS, node_pids, READY, replay_file, SERVO_FIXTURES
 
@@ -103,11 +103,38 @@ class ResetWatcher:
         self.states = []            # (monotonic, ResetState)
         self.alive = []             # (monotonic, ResetWatchdog)
         self.frames = []            # (monotonic, session id, seq) of every input status
+        self.haptics = []           # (monotonic, Haptic) of every vibration request
+        self.panel = []             # (monotonic, OperatorStatus)
         probe.node.create_subscription(InputStatus, '/teleop/input/status', self._on_frame, 50)
+        probe.node.create_subscription(Haptic, '/teleop/haptic', self._on_haptic, RESET_QOS)
+        probe.node.create_subscription(OperatorStatus, '/teleop/operator/status',
+                                       self._on_panel, LIVENESS_QOS)
         probe.node.create_subscription(ResetState, '/teleop/reset/state', self._on_state,
                                        RESET_QOS)
         probe.node.create_subscription(ResetWatchdog, '/teleop/reset/watchdog', self._on_alive,
                                        LIVENESS_QOS)
+
+    def _on_haptic(self, msg):
+        with self.lock:
+            self.haptics.append((time.monotonic(), msg))
+
+    def _on_panel(self, msg):
+        with self.lock:
+            self.panel.append((time.monotonic(), msg))
+
+    def felt(self, t, source='reset'):
+        """Return the events of the vibrations of ``source`` requested since ``t``."""
+        with self.lock:
+            return [m.event for w, m in self.haptics if w >= t and m.source == source]
+
+    def hands(self, t, source='reset'):
+        with self.lock:
+            return {m.hand for w, m in self.haptics if w >= t and m.source == source}
+
+    def shown(self, t):
+        """Return the reset lines the panel status carried since ``t``."""
+        with self.lock:
+            return [m.reset_text for w, m in self.panel if w >= t and m.reset_valid]
 
     def _on_frame(self, msg):
         with self.lock:
@@ -291,6 +318,7 @@ def play(stack, name, phases, wait=True):
     begins = write_recording(path, phases)
     stack['count'] = stack['watch'].count()      # events before this recording
     start = time.monotonic()
+    stack['start'] = start
     process = replay_file(stack['env'], path, str(stack['logs'] / f'{name}.log'),
                           start_delay=0.0)
     if wait:
@@ -347,14 +375,19 @@ def refused(stack, name, reason, goal=False):
     return start
 
 
-def kill(stack, executable):
+def node_pid(stack, executable):
+    """Return the pid of the stack's process running ``executable``."""
     pids = node_pids(executable, pgid=os.getpgid(stack['launch'].proc.pid))
     assert len(pids) == 1, (executable, pids)
-    os.kill(pids[0], signal.SIGKILL)
+    return pids[0]
+
+
+def kill(stack, executable):
+    os.kill(node_pid(stack, executable), signal.SIGKILL)
     return time.monotonic()
 
 
 __all__ = ['ARM_JOINTS', 'S', 'play', 'ready_after', 'gripper', 'stopped_midway', 'refused',
-           'kill', 'READY', 'phase', 'write_recording', 'ResetWatcher', 'describe',
+           'kill', 'node_pid', 'READY', 'phase', 'write_recording', 'ResetWatcher', 'describe',
            'EpisodeStandIn', 'stop_measure', 'at', 'off_ready', 'contact_paths', 'STATE',
            'REASON']

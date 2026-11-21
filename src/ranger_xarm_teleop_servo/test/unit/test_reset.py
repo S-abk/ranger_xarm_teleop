@@ -360,6 +360,33 @@ def test_the_watchdog_cancelling_this_goal_is_a_late_heartbeat():
     check_stopping(rig, goal, rs.HEARTBEAT_LATE)
 
 
+@pytest.mark.parametrize('first', ['preempted', 'stale'])
+def test_a_stop_the_watchdog_made_is_named_heartbeat_late(first):
+    """Seen first as move_group's "preempted", or as stale input after a stall of this node."""
+    rig = Rig()
+    goal = rig.moving()
+    if first == 'preempted':
+        rig.r.on_result(rig.now, goal, rs.MOVEIT_PREEMPTED)
+        assert rig.r.reason == rs.CANCELLED_ELSEWHERE
+    else:
+        rig.hold(0.14, frame=False)
+        assert rig.r.reason == rs.INPUT_STALE
+    count = rig.r.event_count
+    rig.step(0.0, watchdog_goal=goal)               # the watchdog names the goal it cancelled
+    assert rig.r.state == rs.STOPPING and rig.r.reason == rs.HEARTBEAT_LATE
+    assert rig.r.last_event_reason == rs.HEARTBEAT_LATE and rig.r.event_count == count
+    finish_stop(rig, goal)
+    rig.hold(1.3, 0.0)
+    assert rig.r.state == rs.STOPPED and rig.r.reason == rs.HEARTBEAT_LATE
+
+
+def test_another_goal_the_watchdog_cancelled_does_not_rename_this_stop():
+    rig = Rig()
+    rig.moving()
+    rig.step(0.0, watchdog_goal=bytes([9] * 16))
+    assert rig.r.reason == rs.RELEASED
+
+
 def test_a_goal_without_an_answer_is_stopped_as_unknown():
     rig = Rig()
     goal = rig.press_to_goal()

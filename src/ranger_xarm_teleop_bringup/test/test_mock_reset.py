@@ -24,14 +24,15 @@ rested. The last tests kill the reset node and then the watchdog, so they run la
 """
 
 import os
+import signal
 import time
 
 import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, EpisodeState, ResetState
-from reset_helpers import (at, contact_paths, describe, EpisodeStandIn, gripper, kill, off_ready,
-                           phase, play, ready_after, refused, ResetWatcher, stop_measure,
-                           stopped_midway)
+from reset_helpers import (at, contact_paths, describe, EpisodeStandIn, gripper, kill,
+                           node_pid, off_ready, phase, play, ready_after, refused, ResetWatcher,
+                           stop_measure, stopped_midway)
 from stack_helpers import (arm_by_replay, assert_stack_nodes, child_environment,
                            MOCK_STACK_NODES, Probe, Process, READY, start_input)
 
@@ -101,6 +102,12 @@ def test_held_the_arm_reaches_the_ready_posture_from_another_posture(stack, inde
     assert not any(s.state == S.STATE_STOPPING for _, s in watch.since(start, stack['count']))
     events = [s.last_event for _, s in watch.since(start, stack['count'])]
     assert S.EVENT_START in events and events[-1] == S.EVENT_ARRIVED
+    # The operator feedback node: one buzz at the start, one long at the arrival, right hand.
+    probe.wait_for(lambda: watch.felt(start) == ['START', 'ARRIVED'], 3.0,
+                   f'START and ARRIVED felt (felt {watch.felt(start)})')
+    assert watch.hands(start) == {'right'}
+    probe.wait_for(lambda: any(t.startswith('Reset: at ready') for t in watch.shown(start)),
+                   3.0, f'the panel line at the arrival (shown {set(watch.shown(start))})')
     note(stack, f'reach {index}: arrived {when - start:.2f} s after the recording began')
 
 
@@ -108,6 +115,9 @@ def test_release_midway_stops_the_arm_within_a_measured_distance(stack):
     travel, rest, delay = stopped_midway(
         stack, 'release', [phase(0.3), phase(2.6, 1.0), phase(3.0, 0.0)], S.REASON_RELEASED)
     assert delay < 0.2 and travel < 0.1 and rest < 1.0, (delay, travel, rest)
+    watch, start = stack['watch'], stack['start']
+    assert watch.felt(start) == ['START']               # a release is not felt
+    assert any(t.startswith('Reset stopped: released') for t in watch.shown(start))
 
 
 def test_stale_input_stops_the_arm(stack):
@@ -186,6 +196,12 @@ def test_a_press_while_armed_is_refused(stack):
     before = probe.joint_positions()
     start = refused(stack, 'armed', S.REASON_ARMED)
     assert probe.max_joint_change(start, before) < 1e-3
+    watch = stack['watch']
+    probe.wait_for(lambda: watch.felt(start) == ['REFUSED'], 3.0,
+                   f'one REFUSED felt (felt {watch.felt(start)})')
+    probe.wait_for(lambda: any(t.startswith('Reset refused: disarm first (B)')
+                               for t in watch.shown(start)), 3.0,
+                   f'the refusal on the panel (shown {set(watch.shown(start))})')
     probe.disarm()
 
 
@@ -227,6 +243,43 @@ def test_a_posture_moveit_considers_in_collision_moves_nothing_and_says_so(stack
     assert 'retreat_arm.py' in state.reason_text and 'did not move' in state.reason_text
     assert probe.max_joint_change(start, before) < 1e-3
     ready_after(stack, READY)
+
+
+def test_a_stall_of_the_reset_node_is_stopped_by_the_watchdog_as_heartbeat_late(stack):
+    """
+    The reset node frozen for 0.4 s mid-motion (as a join stall can freeze a publisher).
+
+    The watchdog cancels at 0.2 s; the node, running again with the stick still held, says
+    "heartbeat late" and starts nothing.
+    """
+    probe, watch = stack['probe'], stack['watch']
+    ready_after(stack, stack['far'])
+    start, _, process = play(stack, 'stall', [phase(0.3), phase(8.0, 1.0)], wait=False)
+    try:
+        watch.wait(start, S.STATE_MOVING, 5.0, after=stack['count'])
+        probe.wait_for(lambda: probe.max_joint_change(start, FAR) > 0.1, 5.0, 'motion')
+        pid = node_pid(stack, 'reset_node')
+        os.kill(pid, signal.SIGSTOP)
+        stalled = time.monotonic()
+        try:
+            time.sleep(0.4)                 # the stall itself: longer than the 0.2 s limit
+        finally:
+            os.kill(pid, signal.SIGCONT)
+        travel, rest, speed, tool = stop_measure(probe, stalled)
+        _, stopped = watch.wait(start, S.STATE_STOPPED, 10.0, S.REASON_HEARTBEAT_LATE,
+                                after=stack['count'])
+        probe.wait_for(lambda: any(t.startswith('Reset stopped: heartbeat late')
+                                   for t in watch.shown(stalled)), 3.0,
+                       f'the panel line (shown {set(watch.shown(stalled))})')
+        process.wait(10.0)                  # held to the end of the recording: no restart
+    finally:
+        process.stop()
+    note(stack, f'reset node stalled 0.4 s: joint speed then {speed:.3f} rad/s; joints '
+                f'travelled {travel:.4f} rad and the tool {tool * 1000.0:.1f} mm after the stall '
+                f'began; rest {rest:.2f} s after it')
+    assert speed > 0.05 and not at(probe, READY, 0.05)
+    assert len(watch.goals_since(start)) == 1 and not watch.last().goal_out
+    assert rest < 1.0, rest
 
 
 def test_the_reset_node_killed_midway_is_stopped_by_the_watchdog(stack):

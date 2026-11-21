@@ -66,6 +66,16 @@ LEGACY = {
         'RIHS01_362d040e8f527f2257cfe2363217cb2d0268490374e587d0f44664650025149f':
             (b'\0' * 8, ('measured_tool_pose_stamp',)),
     },
+    'ranger_xarm_teleop_interfaces/msg/OperatorStatus': {
+        # Before the reset part (reset_valid bool, reset_age float64, reset_state uint8,
+        # reset_reason uint8, reset_text string, reset_event_age float64). The old message ends
+        # with a float64, so its end is 8-aligned and the padding is the same for every
+        # message: 1 + 7 pad, 8, 1 + 1, 2 pad, an empty string (length 1, NUL), 7 pad, 8.
+        'RIHS01_3f696d9029b87656c81b77a84b7ccf0b499ef5edeaa9e87fc4a5fc5de8507759':
+            (b'\0' * 16 + b'\0\0' + b'\0\0' + b'\x01\0\0\0' + b'\0' + b'\0' * 7 + b'\0' * 8,
+             ('reset_valid', 'reset_age', 'reset_state', 'reset_reason', 'reset_text',
+              'reset_event_age')),
+    },
 }
 
 

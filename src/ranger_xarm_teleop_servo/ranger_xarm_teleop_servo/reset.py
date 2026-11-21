@@ -527,6 +527,7 @@ class Reset:
             self.need_release = False
         held = broken == NONE and stick >= self.params.hold_threshold
         self._watch_orphans(now)
+        self._heartbeat_late(world)
         if self.state in (PLANNING, MOVING):
             self._watch_goal(now, world, broken, held)
             return None
@@ -574,7 +575,7 @@ class Reset:
         return goal_id
 
     def _watch_goal(self, now: float, world: World, broken: int, held: bool) -> None:
-        if world.watchdog_stopping and world.watchdog_goal == self.goal_id:
+        if world.watchdog_goal == self.goal_id:          # the watchdog cancelled this goal
             self._begin_stop(now, HEARTBEAT_LATE)
             return
         if broken != NONE:
@@ -620,6 +621,23 @@ class Reset:
         self.need_release = True
         self._event(EVENT_RELEASED if reason == RELEASED else EVENT_STOPPED, reason, now)
         self.log.append(f'stopping: {REASON_TEXT[reason]}' + (f' ({detail})' if detail else ''))
+
+    def _heartbeat_late(self, world: World) -> None:
+        """
+        Name the stop "heartbeat late" once the watchdog says it cancelled this goal.
+
+        The watchdog cancels only when this node's heartbeat was late (a stall, as when a
+        process joins the graph). Whatever this node saw first when it ran again (stale input,
+        or move_group's "preempted"), that is the cause the operator is told. The event was
+        already counted (and felt); only its reason changes.
+        """
+        if (self.goal_id is None or world.watchdog_goal != self.goal_id
+                or self.state not in (STOPPING, STOPPED) or self.reason == HEARTBEAT_LATE):
+            return
+        self.log.append(f'the watchdog cancelled goal {self.goal_id.hex()}: the stop '
+                        f'({REASON_TEXT[self.reason]}) is a late heartbeat')
+        self.reason = self.stop_reason = HEARTBEAT_LATE
+        self.last_event_reason = HEARTBEAT_LATE
 
     def _watch_orphans(self, now: float) -> None:
         motion = self.orphan_watch.motion(now)

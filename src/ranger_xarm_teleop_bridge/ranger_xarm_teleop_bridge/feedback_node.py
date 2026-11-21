@@ -193,8 +193,12 @@ class FeedbackNode(Node):
         msg.missed = int(r.missed)
         self.haptic_pub.publish(msg)
         self.sent += 1
-        self.get_logger().info(f'haptic {r.event} ({source} event {r.source_count}) to the '
-                               f'{hand} controller')
+        if source == 'episode':             # the episode's line as it was before the reset
+            self.get_logger().info(f'haptic {r.event} (event {r.source_count}) to the {hand} '
+                                   'controller')
+        else:
+            self.get_logger().info(f'haptic {r.event} ({source} event {r.source_count}) to the '
+                                   f'{hand} controller')
 
     def publish_status(self) -> None:
         snap = self.tracker.snapshot(time.monotonic(), time.time())

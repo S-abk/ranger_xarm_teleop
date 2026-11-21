@@ -1,7 +1,7 @@
 # State of a headset-started planned motion (G-16): the return to a named posture, published by
 # the reset node (contract: /teleop/reset/state, 10 Hz and on change). Hold-to-run: the arm moves
 # along a MoveIt plan only while the operator holds the control. Information for the operator
-# feedback node and the recording; nothing commands the arm from it.
+# feedback node (panel and vibration); nothing commands the arm from it.
 
 std_msgs/Header header
 float64 wall_time               # host wall clock (s) at publication
