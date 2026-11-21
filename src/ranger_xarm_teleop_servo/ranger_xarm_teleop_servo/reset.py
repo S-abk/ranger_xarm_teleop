@@ -112,6 +112,9 @@ REASON_TEXT = {
     STATE_UNKNOWN: 'a state the motion depends on went stale',
 }
 
+# What a stall of this node can make it see first when it runs again (``_heartbeat_late``).
+STALL_REASONS = (INPUT_STALE, CANCELLED_ELSEWHERE, NO_ANSWER, WATCHDOG_LOST)
+
 # ResetState.EVENT_*.
 EVENT_NONE, EVENT_START, EVENT_ARRIVED, EVENT_REFUSED, EVENT_STOPPED, EVENT_RELEASED = range(6)
 
@@ -333,6 +336,7 @@ class Reset:
         self.last_event_wall = math.nan
         self.log: List[str] = []            # lines for the node to log, taken by the node
         self._wall_offset = math.nan        # host wall clock minus the node's clock
+        self._watchdog_noted: Optional[bytes] = None   # the goal whose watchdog cancel was seen
 
     # ---- input ----
 
@@ -627,12 +631,21 @@ class Reset:
         Name the stop "heartbeat late" once the watchdog says it cancelled this goal.
 
         The watchdog cancels only when this node's heartbeat was late (a stall, as when a
-        process joins the graph). Whatever this node saw first when it ran again (stale input,
-        or move_group's "preempted"), that is the cause the operator is told. The event was
-        already counted (and felt); only its reason changes.
+        process joins the graph). What this node then sees first when it runs again is one of
+        ``STALL_REASONS`` (stale input, move_group's "preempted", no answer in time, the
+        watchdog's sign of life late); such a stop is renamed. A stop that began for another
+        cause keeps it. The event was already counted (and felt); only its reason changes.
         """
         if (self.goal_id is None or world.watchdog_goal != self.goal_id
-                or self.state not in (STOPPING, STOPPED) or self.reason == HEARTBEAT_LATE):
+                or self.state not in (STOPPING, STOPPED) or self.reason == HEARTBEAT_LATE
+                or self._watchdog_noted == self.goal_id):
+            return
+        self._watchdog_noted = self.goal_id
+        if self.reason not in STALL_REASONS:
+            # The stop began for its own cause (a release, teleop armed, ...): that stays what
+            # the operator is told; the watchdog's cancel during the stop is only logged.
+            self.log.append(f'the watchdog also cancelled goal {self.goal_id.hex()} during the '
+                            f'stop ({REASON_TEXT[self.reason]})')
             return
         self.log.append(f'the watchdog cancelled goal {self.goal_id.hex()}: the stop '
                         f'({REASON_TEXT[self.reason]}) is a late heartbeat')

@@ -380,6 +380,19 @@ def test_a_stop_the_watchdog_made_is_named_heartbeat_late(first):
     assert rig.r.state == rs.STOPPED and rig.r.reason == rs.HEARTBEAT_LATE
 
 
+def test_a_stop_with_its_own_cause_keeps_it_when_the_watchdog_cancels_too():
+    """Review: a release (or teleop armed) then a watchdog cancel stays a release."""
+    for world, reason in (({}, rs.RELEASED),
+                          ({'armed': True, 'owner': OWNER_TELEOP}, rs.TELEOP_ARMED)):
+        rig = Rig()
+        goal = rig.moving()
+        rig.step(0.0 if not world else 1.0, **world)
+        assert rig.r.reason == reason
+        rig.step(0.0, watchdog_goal=goal)
+        assert rig.r.reason == reason and rig.r.last_event_reason == reason
+        assert any('also cancelled' in line for line in rig.r.take_log())
+
+
 def test_another_goal_the_watchdog_cancelled_does_not_rename_this_stop():
     rig = Rig()
     rig.moving()
