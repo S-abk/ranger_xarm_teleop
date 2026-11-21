@@ -285,10 +285,13 @@ def test_move_arm_says_why_the_goal_was_rejected(stack):
     start = time.monotonic()
     process = Process(tool('move_arm.py'), env, str(logs / 'move_arm.log'))
     try:
-        assert process.wait(60.0) == 1, process.output()
+        # With a command mux the tool needs MoveIt as the owner before any goal goes out
+        # (session.may_recover): refused, no goal sent, and it says what to do.
+        assert process.wait(60.0) == 4, process.output()
     finally:
         process.stop()
-    assert 'goal REJECTED: teleop owns the arm: disarm first' in process.output()
+    assert 'REFUSED, no motion goal sent' in process.output()
+    assert 'teleop owns the arm: disarm first' in process.output()
     assert probe.max_joint_change(start, before) < 1e-6
 
 

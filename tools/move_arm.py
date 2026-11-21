@@ -66,8 +66,8 @@ from ranger_xarm_teleop_servo import calls as rules  # noqa: E402
 from ranger_xarm_teleop_servo.session import (ARM_JOINTS, choose_arm_controller,  # noqa: E402
                                               describe_controllers, direct_case,
                                               may_move_directly, NO_TELEOP_AFTER_S,
-                                              READY_POSTURE, rejection_reason, STATE_FRESH_S,
-                                              TELEOP_CONTROLLER)
+                                              OWNER_MOVEIT, READY_POSTURE, rejection_reason,
+                                              STATE_FRESH_S, TELEOP_CONTROLLER)
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
 
 READY = list(READY_POSTURE)
@@ -173,6 +173,8 @@ def main() -> int:
                 return False, f'still looking for {missing}', ''
             owner_now, armed = fresh()
             may, why = may_move_directly(mux, owner_now, armed, running)
+            if not may and mux and owner_now is not None and owner_now != OWNER_MOVEIT:
+                why += f': {rejection_reason(owner_now)}'     # what to do about it
             return may, why, direct_case(mux, armed)
         calls.spin(10.0, lambda: bool(description))
         try:
