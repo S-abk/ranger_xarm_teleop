@@ -33,10 +33,12 @@ import uuid
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 'src', 'ranger_xarm_teleop_servo'))
 from ranger_xarm_teleop_servo import calls as rules  # noqa: E402
+from ranger_xarm_teleop_servo import goal_stop  # noqa: E402
 
 READ_S = 3.0                # a read without an answer for this long is asked again
 READ_ATTEMPTS = 3
 GOAL_ANSWER_S = 10.0        # the action server answers a goal within this, or its state is unknown
+CANCEL_ANSWER_S = 2.0       # a cancel request without an answer for this long is asked again
 SETTLE_S = 10.0             # how long the joints are watched for coming to rest after a cancel
 NO_SERVICE, NO_ANSWER = 'no service', 'no answer'
 
@@ -237,8 +239,23 @@ class Goal:
         cancel nothing else: a goal that is already being cancelled, or has ended, is answered
         as no longer cancellable, and one the server has forgotten as unknown.
         """
-        answer = self._cancel(self.goal_id, 2.0, READ_ATTEMPTS)
-        return None if answer is None else (int(answer.return_code), len(answer.goals_canceling))
+        stop = goal_stop.GoalStop(bytes(self.goal_id.uuid), answer_s=CANCEL_ANSWER_S,
+                                  attempts=READ_ATTEMPTS)
+        request = self._cancel_type.Request()
+        request.goal_info.goal_id = self.goal_id
+        while stop.due(time.monotonic()):
+            future = self.cancel_client.call_async(request)
+            stop.sent(time.monotonic())
+            if self.calls.spin(CANCEL_ANSWER_S, future.done):
+                answer = future.result()
+                stop.answered(time.monotonic(), answer.return_code, len(answer.goals_canceling))
+                continue
+            self.cancel_client.remove_pending_request(future)
+            stop.timed_out()
+            print(f'no answer from {self.cancel_client.srv_name} within {CANCEL_ANSWER_S:g} s'
+                  + ('; asking again' if stop.sent_count < READ_ATTEMPTS
+                     else f' ({READ_ATTEMPTS} requests)'), flush=True)
+        return stop.cancel_answer()
 
     def stop(self):
         """Cancel the goal and watch the joints come to rest; return (cancel, motion)."""

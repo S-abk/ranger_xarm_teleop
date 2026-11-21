@@ -19,6 +19,9 @@ any goal goes out; with no teleop node at all a recovery still works, and the to
 which of the two cases it is in; a motion is stopped when teleop is armed during it. The
 tool is run against a stand-in (``fake_recovery.py``) for move_group, the command mux's
 report and the teleop node.
+
+``tools/move_arm.py`` follows the same rule where a command mux runs, and refuses a goal when
+a teleop node runs without a mux (its section at the end).
 """
 
 import os
@@ -120,3 +123,72 @@ def test_teleop_armed_during_the_motion_stops_it(env, tmp_path):
     assert 0.02 < float(moved.group(1)) < 0.1
     assert re.search(r'cancel request: the goal, cancelled at 0\.0\d+ rad', fake), fake
     assert 'goal reached' not in fake
+
+
+# ---- tools/move_arm.py: a goal straight to MoveIt's controller ----
+#
+# With a command mux, the rule of recover_arm.py (may_recover) and the same stop; with no mux
+# and no teleop node, as before; with no mux but a teleop node, no goal. Run against
+# fake_controller.py (the trajectory controller) and fake_teleop_side.py (the mux's report
+# and the teleop node).
+
+def run_move(env, tmp_path, mux, teleop, seconds):
+    """Run move_arm.py against the two stand-ins; return (exit, tool, controller, side)."""
+    controller = Process(['python3', os.path.join(HERE, 'fake_controller.py'), 'stand_in',
+                          'answer'], env, str(tmp_path / 'controller.log'))
+    side = Process(['python3', os.path.join(HERE, 'fake_teleop_side.py'), mux, teleop],
+                   env, str(tmp_path / 'side.log'))
+    try:
+        end = time.monotonic() + 20.0
+        while not ('ready:' in controller.output() and 'ready:' in side.output()) \
+                and time.monotonic() < end:
+            time.sleep(0.05)
+        assert 'ready:' in controller.output(), controller.output()
+        assert 'ready:' in side.output(), side.output()
+        tool = Process(['python3', os.path.join(TOOLS, 'move_arm.py'), '--controller',
+                        'stand_in', '--seconds', str(seconds), *TARGET],
+                       env, str(tmp_path / 'tool.log'))
+        try:
+            code = tool.wait(90.0)
+        finally:
+            tool.stop()
+        time.sleep(0.3)
+        return code, tool.output(), controller.output(), side.output()
+    finally:
+        side.stop()
+        controller.stop()
+
+
+def test_move_arm_with_a_mux_moves_after_hearing_that_teleop_is_not_armed(env, tmp_path):
+    code, tool, controller, _ = run_move(env, tmp_path, 'mux', 'disarmed', 1.0)
+    assert code == 0, tool
+    assert ('the command mux reports that MoveIt owns the arm, teleop reports that it is not '
+            'armed') in tool
+    assert 'goal succeeded' in tool and 'goal reached' in controller
+
+
+def test_move_arm_with_a_mux_stops_when_teleop_is_armed_during_the_motion(env, tmp_path):
+    code, tool, controller, side = run_move(env, tmp_path, 'mux', 'arms', 10.0)
+    assert code == 1, tool
+    assert 'armed' in side
+    assert 'goal STOPPED: teleop was armed during the motion' in tool, tool
+    assert 'the server is cancelling the goal' in tool
+    moved = re.search(r'the joints moved by up to (\d+\.\d+) rad and are still now', tool)
+    assert moved, tool
+    assert 0.02 < float(moved.group(1)) < 0.15          # well short of 0.3 rad
+    assert 'goal reached' not in controller and 'every goal' not in controller
+
+
+def test_move_arm_without_a_mux_or_a_teleop_node_moves_as_before(env, tmp_path):
+    code, tool, controller, _ = run_move(env, tmp_path, 'none', 'none', 1.0)
+    assert code == 0, tool
+    assert 'no command mux and no teleop node are running' in tool
+    assert 'goal succeeded' in tool and 'goal reached' in controller
+
+
+def test_move_arm_without_a_mux_but_with_a_teleop_node_sends_no_goal(env, tmp_path):
+    code, tool, controller, _ = run_move(env, tmp_path, 'none', 'disarmed', 1.0)
+    assert code == 4, tool
+    assert ('REFUSED, no motion goal sent: a teleop node is running but no command mux reports '
+            'who owns the arm') in tool
+    assert 'accepted' not in controller and 'goal reached' not in controller

@@ -548,7 +548,10 @@ arm before running the tool again.
 Before any goal, `recover_arm.py` and `retreat_arm.py` need a fresh report that teleop is not
 armed whenever a teleop node is running; without one they send nothing and say that it is not
 known. `recover_arm.py` also works with no teleop node at all, and says which of the two cases
-it is in. Both stop their motion if teleop is armed during it.
+it is in. Both stop their motion if teleop is armed during it. `move_arm.py` follows the same
+rule where a command mux runs (and stops likewise); with neither a mux nor a teleop node it
+moves as before; with a teleop node but no mux it sends nothing, since nothing says who owns
+the arm.
 
 (simulation only, like `tools/move_arm.py`, which prints why a goal was rejected). Without
 `--controller`, `move_arm.py` asks the command mux which controller is MoveIt's (failing that,
