@@ -30,7 +30,11 @@ It never switches controllers and never asks the mux for ownership itself, and i
 no motion goal unless step 2 succeeded. **Simulation only**, like ``tools/move_arm.py``:
 nothing is sent unless every ros2_control hardware plugin in ``/robot_description`` is a
 simulator (exit status 3). Exit status 0 only when the arm reached the posture; 4 when
-the arm was not handed back to MoveIt (nothing moved).
+the arm was not handed back to MoveIt (no motion goal sent).
+
+The goal is sent once. Without an answer to it, or to the request for its result, its
+state is unknown, not rejected: move_group is asked to cancel it, and what move_group
+listed and what the joints did is printed (exit status 1).
 """
 
 import argparse
@@ -38,9 +42,12 @@ import os
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOOLS = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(TOOLS)
 sys.path.insert(0, os.path.join(REPO, 'src', 'ranger_xarm_teleop_servo'))
+sys.path.insert(0, TOOLS)
 
+from _calls import Calls, Goal, GOAL_ANSWER_S  # noqa: E402
 from ranger_xarm_teleop_servo.session import ARM_JOINTS, may_recover  # noqa: E402
 from ranger_xarm_teleop_servo.session import READY_POSTURE, STATE_FRESH_S  # noqa: E402
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
@@ -64,7 +71,6 @@ def main() -> int:
     from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
     from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
     import rclpy
-    from rclpy.action import ActionClient
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
     from std_msgs.msg import String
     from std_srvs.srv import Trigger
@@ -80,14 +86,6 @@ def main() -> int:
     def on_state(msg) -> None:
         seen.update(armed=bool(msg.armed), state_at=time.monotonic())
 
-    def spin(seconds: float, until=lambda: False) -> bool:
-        end = time.monotonic() + seconds
-        while time.monotonic() < end:
-            if until():
-                return True
-            rclpy.spin_once(node, timeout_sec=0.05)
-        return until()
-
     def fresh():
         """Return the owner and the armed flag, None for each that is not fresh."""
         now = time.monotonic()
@@ -96,6 +94,8 @@ def main() -> int:
         return owner, armed
 
     try:
+        calls = Calls(node)
+        spin = calls.spin
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         node.create_subscription(String, '/robot_description',
@@ -103,7 +103,7 @@ def main() -> int:
         node.create_subscription(ArmOwner, '/teleop/mux/owner', on_owner, 1)   # newest only
         node.create_subscription(TeleopState, '/teleop/state', on_state, 1)   # newest only
         disarm = node.create_client(Trigger, args.disarm_service)
-        move = ActionClient(node, MoveGroup, '/move_action')
+        move = Goal(calls, MoveGroup, '/move_action', ARM_JOINTS)
         spin(10.0, lambda: seen['description'] is not None)
         try:
             require_simulator(seen['description'] or '')
@@ -111,12 +111,14 @@ def main() -> int:
             print(f'REFUSED, nothing sent: {err}')
             return 3
 
-        # 1. Disarm (the only thing this tool asks of the teleop side).
-        if disarm.wait_for_service(timeout_sec=3.0):
+        # 1. Disarm (the only thing this tool asks of the teleop side). Asked once: whether
+        # it took effect is read back in step 2, with or without an answer.
+        if spin(3.0, disarm.service_is_ready):
             call = disarm.call_async(Trigger.Request())
             spin(5.0, call.done)
             answer = call.result() if call.done() else None
-            print('disarm: ' + (answer.message if answer is not None else 'no answer'))
+            print('disarm: ' + (answer.message if answer is not None else
+                                'no answer; reading the state back'))
         else:
             print(f'disarm: no {args.disarm_service} service (teleop node not running?)')
 
@@ -125,14 +127,17 @@ def main() -> int:
             return may_recover(*fresh())[0]
 
         if not spin(args.wait, handed_back):
-            print(f'NOT RECOVERED, nothing moved: {may_recover(*fresh())[1]} after '
+            print(f'NOT RECOVERED, no motion goal sent: {may_recover(*fresh())[1]} after '
                   f'{args.wait:.0f} s. If the arm is still moving, wait and run this again.')
             return 4
         print('MoveIt owns the arm')
 
         # 3. Plan and execute through move_group.
-        if not move.wait_for_server(10.0):
-            print('NOT RECOVERED: no move_group action server (/move_action)')
+        if not move.ready(10.0):
+            print('NOT RECOVERED, no motion goal sent: '
+                  + ('move_group did not answer on the cancel path of /move_action, so a '
+                     'motion could not be stopped' if move.client.server_is_ready() else
+                     'no move_group action server (/move_action)'))
             return 2
         goal = MoveGroup.Goal()
         request = goal.request
@@ -154,18 +159,22 @@ def main() -> int:
         spin(2.0, handed_back)
         allowed, why = may_recover(*fresh())
         if not allowed:
-            print(f'NOT RECOVERED, nothing moved: {why}')
+            print(f'NOT RECOVERED, no motion goal sent: {why}')
             return 4
-        sent = move.send_goal_async(goal)
-        spin(10.0, sent.done)
-        handle = sent.result() if sent.done() else None
-        if handle is None or not handle.accepted:
-            print('NOT RECOVERED: move_group rejected the goal')
+        answer = move.send(goal)
+        if answer == 'unknown':
+            print('NOT RECOVERED: ' + move.unanswered('the goal', GOAL_ANSWER_S))
             return 1
-        result = handle.get_result_async()
-        spin(120.0, result.done)
-        done = result.result() if result.done() else None
-        code = done.result.error_code.val if done is not None else None
+        if answer == 'rejected':
+            print('NOT RECOVERED: move_group rejected the goal; '
+                  + calls.watch(limit=0.0).text())
+            return 1
+        done, why = move.result(120.0)
+        if done is None:
+            print('NOT RECOVERED: ' + move.unanswered("the request for the goal's result",
+                                                      120.0))
+            return 1
+        code = done.result.error_code.val
         if code == MoveItErrorCodes.SUCCESS:
             print('recovered: the arm is at ' + ' '.join(f'{v:g}' for v in args.joints))
             return 0

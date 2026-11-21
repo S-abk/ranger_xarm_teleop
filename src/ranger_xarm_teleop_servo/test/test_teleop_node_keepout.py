@@ -211,13 +211,175 @@ def test_arming_is_refused_without_the_joint_states_the_model_needs(node):
     assert not math.isnan(n.arming_conditioning(READY))
 
 
+class _Request:
+    """A request that is out: answered when the test says so, or never."""
+
+    def __init__(self, names):
+        self.names, self.callbacks, self.values = list(names), [], None
+
+    def add_done_callback(self, callback):
+        self.callbacks.append(callback)
+
+    def result(self):
+        from types import SimpleNamespace as NS
+        return NS(values=[NS(string_value=v) for v in self.values])
+
+    def answer(self, *values):
+        self.values = values
+        for callback in self.callbacks:
+            callback(self)
+
+
+class _ParameterClient:
+    """MoveIt Servo's parameter service as the node's client sees it; it answers nothing."""
+
+    def __init__(self):
+        self.out, self.removed, self.ready = [], [], True
+
+    def service_is_ready(self):
+        return self.ready
+
+    def call_async(self, request):
+        self.out.append(_Request(request.names))
+        return self.out[-1]
+
+    def remove_pending_request(self, request):
+        self.removed.append(request)
+
+
+def _asking(node):
+    """Give ``node`` a silent parameter client, a clock and a log; return (client, clock, log)."""
+    from types import SimpleNamespace as NS
+    client, clock, log = _ParameterClient(), {'t': 100.0}, []
+    node.servo_description_client = client
+    node.mono = lambda: clock['t']
+    node.get_logger = lambda: NS(
+        warning=lambda text, **_: log.append(text), info=lambda text, **_: log.append(text),
+        error=lambda text, **_: log.append(text))
+    return client, clock, log
+
+
+def _later(node, clock, seconds):
+    clock['t'] += seconds
+    node.watch_servo_reads(clock['t'])
+
+
 def test_teleop_waits_for_servos_robot_description_once_asked(node):
     n = node(robot_urdf())
     n._on_tf_static(teleop_node.TFMessage(transforms=[]))
-    n.servo_description_pending = True
-    assert not n.solver_checks(0.0, None)[0]
-    n.servo_description_pending = False
+    client, clock, log = _asking(n)
     assert n.solver_checks(0.0, None)[0] or n.arm is None
+    n.compare_servo_description()
+    assert [r.names for r in client.out] == [['robot_description']]     # asked at once
+    assert not n.solver_checks(0.0, None)[0]
+    n.compare_servo_description()                                        # once only
+    assert len(client.out) == 1
+    client.out[0].answer(n.urdf)
+    assert n.solver_checks(0.0, None)[0] or n.arm is None
+    assert not n.keepout_fault and not client.removed
+
+
+def test_an_unanswered_description_request_is_asked_again_and_says_so(node):
+    n = node(robot_urdf())
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    client, clock, log = _asking(n)
+    n.compare_servo_description()
+    _later(n, clock, teleop_node.DESCRIPTION_TIMEOUT_S - 0.02)
+    assert len(client.out) == 1 and not log and not client.removed       # still waiting
+    _later(n, clock, 0.02)
+    # Given up, dropped from the client (a late answer is then not delivered), said in the
+    # log with its effect, and asked again in the same cycle.
+    assert client.removed == [client.out[0]]
+    assert len(client.out) == 2 and client.out[1].names == ['robot_description']
+    assert len(log) == 1 and 'did not answer the request for its robot description' in log[0]
+    assert 'asked 1 time)' in log[0] and 'asking again' in log[0]
+    assert 'teleop stays disabled until it answers' in log[0]
+    assert not n.solver_checks(0.0, None)[0]                             # still not ready
+    client.out[1].answer(n.urdf)
+    assert n.solver_checks(0.0, None)[0] or n.arm is None
+    _later(n, clock, 10.0)
+    assert len(client.out) == 2 and len(log) == 1                        # answered: asked no more
+
+
+def test_a_description_request_is_asked_for_as_long_as_no_answer_comes(node):
+    n = node(robot_urdf())
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    client, clock, log = _asking(n)
+    n.compare_servo_description()
+    for attempt in range(1, 31):
+        _later(n, clock, teleop_node.DESCRIPTION_TIMEOUT_S)
+        assert len(client.out) == attempt + 1 and len(log) == attempt
+        assert f'asked {attempt} time' in log[-1]
+        assert not n.solver_checks(0.0, None)[0]       # never ready on an unanswered request
+    assert client.removed == client.out[:-1]
+
+
+def test_a_late_answer_to_a_request_given_up_is_not_used(node):
+    n = node(robot_urdf())
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    client, clock, log = _asking(n)
+    n.compare_servo_description()
+    _later(n, clock, teleop_node.DESCRIPTION_TIMEOUT_S)
+    # rclpy does not deliver an answer to a request removed from the client. Even if it
+    # did, an answer with another robot's geometry to the request given up changes nothing:
+    client.out[0].answer(robot_urdf().replace('0.05', '0.06'))
+    assert not n.keepout_fault and not n.solver_checks(0.0, None)[0]
+    client.out[1].answer(n.urdf)
+    assert not n.keepout_fault
+    assert n.solver_checks(0.0, None)[0] or n.arm is None
+
+
+def test_a_description_with_other_geometry_still_disables_teleop_after_a_retry(node):
+    n = node(robot_urdf())
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    client, clock, log = _asking(n)
+    n.compare_servo_description()
+    _later(n, clock, teleop_node.DESCRIPTION_TIMEOUT_S)
+    other = robot_urdf().replace('0.05', '0.06')
+    assert other != n.urdf
+    client.out[1].answer(other)
+    assert 'does not match the link keep-out model' in n.keepout_fault
+    assert not n.solver_checks(0.0, None)[0]
+
+
+def test_the_description_request_waits_for_the_service_and_says_so(node):
+    n = node(robot_urdf())
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    client, clock, log = _asking(n)
+    client.ready = False
+    n.compare_servo_description()
+    assert not client.out and not n.solver_checks(0.0, None)[0]
+    assert len(log) == 1 and "waiting for MoveIt Servo's parameter service" in log[0]
+    client.ready = True
+    _later(n, clock, 0.02)
+    assert len(client.out) == 1
+
+
+def test_the_rigid_pairs_request_is_asked_again_and_holds_nothing_up(node):
+    n = node(robot_urdf())
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    client, clock, log = _asking(n)
+    ready_before = n.solver_checks(0.0, None)[0]
+    n.check_servo_rigid_pairs()
+    names = ['robot_description', 'robot_description_semantic', 'moveit_servo.move_group_name']
+    assert [r.names for r in client.out] == [names]
+    assert n.solver_checks(0.0, None)[0] == ready_before          # nothing waits on this one
+    _later(n, clock, teleop_node.DESCRIPTION_TIMEOUT_S)
+    assert [r.names for r in client.out] == [names, names] and client.removed == [client.out[0]]
+    assert len(log) == 1 and 'its robot description and SRDF' in log[0]
+    assert 'asking again' in log[0] and 'teleop stays disabled' not in log[0]
+    client.out[1].answer('', '', '')                              # answered, though with nothing
+    assert 'were not checked' in log[-1]
+    _later(n, clock, 10.0)
+    assert len(client.out) == 2
+
+
+def test_the_clients_of_servos_parameter_service_keep_a_deep_reply_queue(node):
+    from ranger_xarm_teleop_servo import calls
+    n = node(robot_urdf())
+    for client in (n.servo_params_client, n.servo_description_client):
+        assert client.srv_name.endswith('/get_parameters')
+        assert client.qos_profile.depth == calls.PARAMETER_REPLY_DEPTH >= 1000
 
 
 def test_the_floor_monitor_reports_only_a_real_drop(node):

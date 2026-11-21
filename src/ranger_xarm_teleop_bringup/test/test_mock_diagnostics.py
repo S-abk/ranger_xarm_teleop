@@ -29,9 +29,12 @@ import time
 from moveit_msgs.msg import ServoStatus
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
-from stack_helpers import (assert_stack_nodes, child_environment, MOCK_STACK_NODES, Probe, Process,
-                           READY, replay, start_input)
+from stack_helpers import (assert_stack_nodes, child_environment, JOIN_LOOK_AHEAD_S,
+                           join_stall, keep_record, MOCK_STACK_NODES, pauses_around, Probe,
+                           Process, READY, replay, start_input)
+from trajectory_msgs.msg import JointTrajectory
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, '..', '..', '..', 'tools')
@@ -99,9 +102,50 @@ def test_recorder_refuses_to_start_without_a_teleop_state(tmp_path):
         process.stop()
 
 
+def wait_for_any(process, texts, timeout):
+    """Return the first of ``texts`` to appear in the process's output, or None."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        output = process.output()
+        found = [text for text in texts if text in output]
+        if found:
+            return min(found, key=output.index)
+        time.sleep(0.05)
+    return None
+
+
+REFUSED = 'REFUSED, nothing recorded: the clutch is engaged'
+STARTED = 'recording to'
+
+
 def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
+    """
+    The recorder never starts and never stops a recording while the clutch is engaged.
+
+    One second into a six second engagement a second recorder is started and the first is
+    asked to stop. Asserted, as the tool's own doing:
+
+    * the second one refuses with its reason and writes nothing, as long as the clutch is
+      engaged when it looks;
+    * the first one goes on, and its file covers the engagement to its end;
+    * neither leaves the graph before the clutch is released.
+
+    Not asserted: that the engagement outlasts the second process joining the graph. A
+    process that joins can stall an existing node for about a third of a second, and the gate
+    then releases the clutch on stale data, as it must (interface contract: every process of
+    a session starts before arming). The test prints which of the two happened, and a join
+    stall is recorded with the test's logs where the logs of failed tests are kept
+    (``stack_helpers.keep_record``); a run without such a record outlasted the join. A
+    release with any other cause fails the test (``stack_helpers.join_stall``).
+    """
     probe, env, logs, _ = stack
     probe.disarm()
+    servo_output = []           # when MoveIt Servo's output arrived, a fourth stream
+    # A second of it is kept, so that a pause of this process loses none of it.
+    watch = probe.node.create_subscription(
+        JointTrajectory, '/teleop_arm_controller/joint_trajectory',
+        lambda msg: servo_output.append(time.monotonic()),
+        QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT))
     recorder, path = start_recorder(env, logs, 'circle')
     late = None
     player = replay(env, 'clutch_circle', str(logs / 'replay_circle.log'))    # grip held 6 s
@@ -109,33 +153,86 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
         probe.wait_for(lambda: probe.state().clutch_engaged, 40.0, 'the clutch to engage')
         engaged_at = time.monotonic()
         time.sleep(1.0)
-        # A second recorder started now must refuse, and the first asked to stop must go on.
+        # A second recorder is started now, and the first is asked to stop.
+        joined_at = time.monotonic()
         late = Process(tool('record_session.py', 'record', 'late', '--dir', str(logs)),
                        env, str(logs / 'late.log'))
         os.killpg(recorder.proc.pid, signal.SIGINT)
-        assert wait_for_text(late, 'REFUSED, nothing recorded: the clutch is engaged', 20.0), \
-            late.output()
-        assert wait_for_text(recorder, 'still recording', 5.0), recorder.output()
-        time.sleep(1.0)
-        assert probe.state().clutch_engaged
-        assert recorder.proc.poll() is None and late.proc.poll() is None    # both still on
-        probe.wait_for(lambda: not probe.state().clutch_engaged, 20.0, 'the release')
-        released_at = time.monotonic()
-        # The refused recorder joined the graph and stayed on; the first was asked to
-        # stop: neither cost the engagement. The grip is held for 6.0 s in the fixture.
+        # While the clutch is engaged neither may leave. When the second one gives its
+        # verdict is noted, to compare with the release.
+        left, verdict_at = [], None
+        end = time.monotonic() + 20.0
+        while probe.state().clutch_engaged and time.monotonic() < end:
+            if verdict_at is None and any(t in late.output() for t in (REFUSED, STARTED)):
+                verdict_at = time.monotonic()
+            for name, process in (('the first recorder', recorder), ('the second', late)):
+                if process.proc.poll() is not None and name not in left:
+                    time.sleep(0.2)             # the probe may be a state behind the tool
+                    if probe.state().clutch_engaged:
+                        left.append(name)
+            time.sleep(0.02)
+        assert not probe.state().clutch_engaged, 'the clutch was still engaged after 20 s'
+        assert not left, f'{" and ".join(left)} left while the clutch was engaged'
+        verdict = wait_for_any(late, (REFUSED, STARTED), 20.0)
+        if verdict_at is None:
+            verdict_at = time.monotonic()
+        # The recording to its end and a while more: a pause that released the clutch can
+        # outlast the release, and is looked for on both sides of it.
+        assert player.wait(30.0) == 0, player.output()
+        time.sleep(JOIN_LOOK_AHEAD_S)
+
+        # How the engagement ended. The grip is held for 6.0 s in the fixture.
         during = probe.timed_states_since(engaged_at - 0.5)
         held = [when for when, s in during if s.clutch_engaged]
-        assert max(held) - min(held) > 5.7, max(held) - min(held)
-        release = next(s for when, s in during if when > max(held))
-        assert release.hold_reason == TeleopState.HOLD_CLUTCH_RELEASED, release.hold_reason
-        # Neither recorder left the graph before the release.
-        assert 'staying on until the grip is released' in late.output()
-        assert late.proc.poll() is None or late.proc.returncode == 2
+        released_at, release = next((when, s) for when, s in during if when > max(held))
+        lasted = max(held) - min(held)
+        outlasted = lasted > 5.7 and release.hold_reason == TeleopState.HOLD_CLUTCH_RELEASED
+        if outlasted:
+            print(f'the engagement outlasted the joining recorder ({lasted:.2f} s)')
+        else:
+            stalled, how = join_stall(joined_at, released_at, release.hold_reason,
+                                      pauses_around(probe, released_at, servo_output))
+            assert stalled, (
+                f'the clutch was released after {lasted:.2f} s with hold_reason '
+                f'{release.hold_reason}, and not by the stall of a joining process: {how}')
+            record = (f'JOIN STALL: the clutch was released after {lasted:.2f} s with '
+                      f'hold_reason {release.hold_reason}: {how}')
+            print(record)
+            print('recorded in ' + (keep_record(record, 'join_stall') or 'this output only'))
+
+        # The second recorder.
+        assert verdict is not None, late.output()
+        if verdict == REFUSED:
+            # It looked while the clutch was engaged: refused with its reason, stayed on (it
+            # was not among those that left), wrote nothing.
+            assert 'staying on until the grip is released' in late.output()
+            assert late.wait(10.0) == 2, late.output()
+            assert not os.path.exists(logs / 'late.jsonl')
+            print('the second recorder was refused while the clutch was engaged')
+        else:
+            # It may record only if the clutch was released when it looked, which here only
+            # a join stall can have done; never while the clutch was engaged.
+            assert not outlasted, ('the second recorder started during the engagement: '
+                                   + late.output())
+            assert verdict_at >= released_at - 0.2, (
+                f'the second recorder started {released_at - verdict_at:.2f} s before the '
+                f'clutch was released: {late.output()}')
+            os.killpg(late.proc.pid, signal.SIGINT)
+            assert late.wait(15.0) == 0, late.output()
+            # By its own file too: the first state it recorded shows a released clutch.
+            with open(logs / 'late.jsonl', encoding='utf-8') as handle:
+                recorded = [json.loads(line) for line in handle]
+            first = next((row for row in recorded if row['k'] == 'state'), None)
+            assert first is not None, 'the second recorder recorded no teleop state'
+            assert not first['engaged'], 'the second recorder started while the clutch was engaged'
+            print('the second recorder started after the join stall had released the clutch')
+
+        # The first recorder: asked to stop a second into the engagement, it went on to the
+        # release (it was not among those that left) and stopped then.
+        assert 'still recording' in recorder.output(), recorder.output()
         assert recorder.wait(10.0) == 0, recorder.output()
-        assert late.wait(10.0) == 2, late.output()
-        assert not os.path.exists(logs / 'late.jsonl')
-        assert player.wait(30.0) == 0, player.output()
     finally:
+        probe.node.destroy_subscription(watch)
         player.stop()
         recorder.stop()
         if late is not None:
@@ -146,7 +243,7 @@ def test_recorder_neither_starts_nor_stops_while_the_clutch_is_engaged(stack):
     assert {'description', 'state', 'target', 'input', 'joints', 'servo', 'owner'} <= kinds
     engaged = [row['t'] for row in rows if row['k'] == 'state' and row['engaged']]
     # The file covers the engagement to its end, although the stop was asked for early.
-    assert engaged and max(engaged) - min(engaged) > 0.8 * (released_at - engaged_at)
+    assert engaged and max(engaged) - min(engaged) > 0.8 * lasted
     probe.disarm()
 
 
@@ -207,7 +304,7 @@ def test_recovery_moves_nothing_while_teleop_keeps_the_arm(stack):
         assert process.wait(60.0) == 4, process.output()
     finally:
         process.stop()
-    assert 'NOT RECOVERED, nothing moved' in process.output()
+    assert 'NOT RECOVERED, no motion goal sent' in process.output()
     assert 'owner: TELEOP' in process.output()
     time.sleep(0.5)
     assert probe.max_joint_change(start, before) < 1e-6

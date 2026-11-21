@@ -32,6 +32,10 @@ move the arm through MoveIt. The goal is rejected while teleop owns the arm (the
 controller is then inactive); that rejection is what the command mux relies on. A
 rejection is printed with its reason; ``tools/recover_arm.py`` disarms and then moves.
 Exit status 0 only when the goal was accepted and succeeded.
+
+The goal is sent once. Without an answer to it, or to the request for its result, its
+state is unknown, not rejected: the controller is asked to cancel it, and what the
+controller listed and what the joints did is printed (exit status 1).
 """
 
 import argparse
@@ -41,53 +45,58 @@ import sys
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 import rclpy
-from rclpy.action import ActionClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                'src', 'ranger_xarm_teleop_servo'))
-from ranger_xarm_teleop_servo.session import (choose_arm_controller,  # noqa: E402
+TOOLS = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(TOOLS), 'src', 'ranger_xarm_teleop_servo'))
+sys.path.insert(0, TOOLS)
+from _calls import Calls, Goal, GOAL_ANSWER_S  # noqa: E402, I100
+from ranger_xarm_teleop_servo.session import (ARM_JOINTS, choose_arm_controller,  # noqa: E402
                                               describe_controllers, READY_POSTURE,
                                               rejection_reason, TELEOP_CONTROLLER)
 from ranger_xarm_teleop_servo.simcheck import NotASimulator, require_simulator  # noqa: E402
 
 READY = list(READY_POSTURE)
 MUX_NODE = '/arm_mux'
+CONTROLLER_MANAGER = '/controller_manager'
 
 
-def _call(node, client, request, seconds: float):
-    """Return the response of one service call, or None."""
-    if not client.wait_for_service(timeout_sec=seconds):
-        return None
-    future = client.call_async(request)
-    rclpy.spin_until_future_complete(node, future, timeout_sec=seconds)
-    return future.result() if future.done() else None
+def list_client(node, manager: str = CONTROLLER_MANAGER):
+    """Return a client of the controller manager's list service (made when a tool starts)."""
+    from controller_manager_msgs.srv import ListControllers
+    return node.create_client(ListControllers, f'{manager.rstrip("/")}/list_controllers')
 
 
-def mux_controllers(node):
+def mux_controllers(calls: Calls, client):
     """Return the command mux's (moveit, teleop, controller manager) names, or Nones."""
     from rcl_interfaces.srv import GetParameters
     names = ['moveit_controller', 'teleop_controller', 'controller_manager']
-    answer = _call(node, node.create_client(GetParameters, f'{MUX_NODE}/get_parameters'),
-                   GetParameters.Request(names=names), 2.0)
+    answer = calls.read(client, GetParameters.Request(names=names), 2.0)
     if answer is None or len(answer.values) != len(names):
         return None, None, None
     values = [v.string_value or None for v in answer.values]
     return values[0], values[1], values[2]
 
 
-def loaded_controllers(node, manager: str):
+def loaded_controllers(calls: Calls, client):
     """Return (name, type, state, required command interfaces) per controller, or None."""
     from controller_manager_msgs.srv import ListControllers
-    answer = _call(node, node.create_client(ListControllers,
-                                            f'{manager.rstrip("/")}/list_controllers'),
-                   ListControllers.Request(), 3.0)
+    answer = calls.read(client, ListControllers.Request(), 3.0)
     if answer is None:
         return None
     return [(c.name, c.type, c.state, list(c.required_command_interfaces))
             for c in answer.controller]
+
+
+def controllers_of(calls: Calls, mux_client, default_list_client):
+    """Return (moveit, teleop, loaded controllers), asking the manager the mux names."""
+    moveit, teleop, manager = mux_controllers(calls, mux_client)
+    client = default_list_client
+    if manager and manager.rstrip('/') != CONTROLLER_MANAGER:
+        client = list_client(calls.node, manager)      # known only now; a read, asked again
+    return moveit, teleop, loaded_controllers(calls, client)
 
 
 def main() -> int:
@@ -104,6 +113,9 @@ def main() -> int:
     node = rclpy.create_node('move_arm')
     code = 1
     try:
+        calls = Calls(node)
+        mux_client = calls.parameter_client(MUX_NODE)
+        controllers_client = list_client(node)
         description = []
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -117,17 +129,13 @@ def main() -> int:
                                      lambda msg: owner.append(msg.owner), 10)
         except ImportError:
             pass
-        for _ in range(100):
-            if description:
-                break
-            rclpy.spin_once(node, timeout_sec=0.1)
+        calls.spin(10.0, lambda: bool(description))
         try:
             require_simulator(description[0] if description else '')
         except NotASimulator as err:
             print(f'REFUSED, nothing sent: {err}')
             return 3
-        moveit, teleop, manager = mux_controllers(node)
-        controllers = loaded_controllers(node, manager or '/controller_manager')
+        moveit, teleop, controllers = controllers_of(calls, mux_client, controllers_client)
         name, why = (args.controller, '') if args.controller else choose_arm_controller(
             controllers, moveit, teleop)
         if name is None:
@@ -141,32 +149,38 @@ def main() -> int:
         print(f'controller: {name}' + ('' if args.controller else
                                        ' (from the command mux)' if moveit else
                                        " (the only arm trajectory controller besides teleop's)"))
-        client = ActionClient(node, FollowJointTrajectory, f'/{name}/follow_joint_trajectory')
-        if not client.wait_for_server(10.0):
-            print(f'no action server /{name}/follow_joint_trajectory. Loaded controllers:')
-            print(describe_controllers(controllers))
+        action = Goal(calls, FollowJointTrajectory, f'/{name}/follow_joint_trajectory',
+                      ARM_JOINTS)
+        if not action.ready(10.0):
+            if action.client.server_is_ready():
+                print(f'no goal sent: the action server /{name}/follow_joint_trajectory did '
+                      'not answer on its cancel path, so a motion could not be stopped')
+            else:
+                print(f'no action server /{name}/follow_joint_trajectory. Loaded controllers:')
+                print(describe_controllers(controllers))
             return 2
         goal = FollowJointTrajectory.Goal()
-        goal.trajectory.joint_names = [f'xarm_joint{i}' for i in range(1, 7)]
+        goal.trajectory.joint_names = list(ARM_JOINTS)
         seconds = int(args.seconds)
         goal.trajectory.points = [JointTrajectoryPoint(
             positions=list(args.joints), velocities=[0.0] * 6,
             time_from_start=Duration(sec=seconds,
                                      nanosec=int((args.seconds - seconds) * 1e9)))]
-        sent = client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(node, sent, timeout_sec=10.0)
-        handle = sent.result()
-        if handle is None or not handle.accepted:
-            for _ in range(20):         # the mux reports its owner several times a second
-                if owner:
-                    break
-                rclpy.spin_once(node, timeout_sec=0.1)
-            print(f'goal REJECTED: {rejection_reason(owner[-1] if owner else None)}')
+        answer = action.send(goal)
+        if answer == 'unknown':
+            print('goal UNKNOWN: ' + action.unanswered('the goal', GOAL_ANSWER_S))
             return 1
-        result = handle.get_result_async()
-        rclpy.spin_until_future_complete(node, result, timeout_sec=args.seconds + 30.0)
-        done = result.result()
-        ok = done is not None and done.result.error_code == 0 and done.status == 4
+        if answer == 'rejected':
+            calls.spin(2.0, lambda: bool(owner))    # the mux reports it several times a second
+            print(f'goal REJECTED: {rejection_reason(owner[-1] if owner else None)}; '
+                  + calls.watch(limit=0.0).text())
+            return 1
+        wait = args.seconds + 30.0
+        done, why = action.result(wait)
+        if done is None:
+            print('goal UNKNOWN: ' + action.unanswered("the request for the goal's result", wait))
+            return 1
+        ok = done.result.error_code == 0 and done.status == 4
         print('goal succeeded' if ok else f'goal FAILED: {done}')
         code = 0 if ok else 1
     finally:

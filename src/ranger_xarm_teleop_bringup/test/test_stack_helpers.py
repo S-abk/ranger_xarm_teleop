@@ -556,3 +556,237 @@ def test_keep_logs_copies_what_the_module_registered(tmp_path, monkeypatch):
                   for d, _, files in os.walk(target) for f in files)
     assert kept == ['00_launch.log', os.path.join('01_ros_log', 'run1', 'teleop_node.log')]
     assert os.path.basename(target).endswith('test_mock_x.py__test_a')
+
+
+def _mock_reports(periods, speed, start=0.0):
+    """Return joint states as mock execution reports them: each update, the command before."""
+    stamps, commands = [start], [0.0]
+    for period in periods:
+        stamps.append(stamps[-1] + period)
+        commands.append(commands[-1] + speed * period)      # commanded over this period
+    # The state stamped at update k carries the command of update k - 1.
+    return [(stamps[k], [commands[k - 1], 0.0]) for k in range(1, len(stamps))]
+
+
+def _own_stamp_speed(samples):
+    return max(abs(q1[0] - q0[0]) / (s1 - s0) for (s0, q0), (s1, q1) in zip(samples, samples[1:]))
+
+
+def test_mock_execution_speed_is_each_step_over_the_period_it_was_commanded_in():
+    # A steady 1.9 rad/s with the uneven periods measured on the mock stack (ms), one doubled.
+    periods = [p * 1e-3 for p in (6.67, 7.04, 6.37, 6.25, 7.08, 13.7, 1.95, 6.67, 6.66, 6.9)]
+    samples = _mock_reports(periods, 1.9)
+    assert stack_helpers.commanded_period_speed(samples) == pytest.approx(1.9, abs=1e-9)
+    # The same states by each step's own stamp difference: the ratio of neighbouring periods.
+    assert _own_stamp_speed(samples) > 2.05
+
+
+def test_mock_execution_speed_still_shows_a_real_overshoot():
+    # Ten updates at 1.9 rad/s, then twenty at 2.3 rad/s, at an even period.
+    stamps, commands = [0.0], [0.0]
+    for k in range(30):
+        stamps.append(stamps[-1] + 6.67e-3)
+        commands.append(commands[-1] + (1.9 if k < 10 else 2.3) * 6.67e-3)
+    samples = [(stamps[k], [commands[k - 1], 0.0]) for k in range(1, len(stamps))]
+    assert stack_helpers.commanded_period_speed(samples) == pytest.approx(2.3, abs=1e-9)
+
+
+def test_mock_execution_speed_reads_too_high_never_too_low_when_a_state_is_missing():
+    samples = _mock_reports([6.67e-3] * 20, 1.9)
+    del samples[8]                              # one joint state never reached the probe
+    assert stack_helpers.commanded_period_speed(samples) > 2.0 * 1.9 - 1e-6
+
+
+def test_mock_execution_speed_needs_three_states_and_skips_a_repeated_stamp():
+    assert stack_helpers.commanded_period_speed([]) == 0.0
+    assert stack_helpers.commanded_period_speed([(0.0, [0.0]), (0.01, [0.5])]) == 0.0
+    repeated = [(0.0, [0.0]), (0.0, [0.0]), (0.01, [0.5]), (0.02, [0.5 + 0.019])]
+    assert stack_helpers.commanded_period_speed(repeated) == pytest.approx(1.9)
+
+
+# ---- a release when a process joins: the stall and nothing else ----
+
+BY_INPUT = TeleopState.HOLD_INPUT_STALE
+BY_POSE = TeleopState.HOLD_TOOL_POSE_STALE
+BY_SERVO = TeleopState.HOLD_SERVO_NOT_READY
+INPUT, TELEOP = stack_helpers.INPUT_PAUSE, stack_helpers.TELEOP_PAUSE
+JOINT, SERVO = stack_helpers.JOINT_PAUSE, stack_helpers.SERVO_PAUSE
+QUIET = {INPUT: (0.012, []), TELEOP: (0.021, []), JOINT: (0.008, []), SERVO: (0.020, [])}
+RELEASE = 102.4             # with the process started at 100.0
+
+
+def paused(stream, length, began=None, witness=JOINT):
+    """Return QUIET with one silence of ``stream``: begun 0.2 s before the release by default."""
+    began = RELEASE - 0.2 if began is None else began
+    witness = TELEOP if stream == JOINT and witness == JOINT else witness
+    return {**QUIET, stream: (length, [(length, began, began + length, witness)])}
+
+
+def test_a_stale_release_after_the_join_with_a_pause_of_stall_length_is_the_join_stall():
+    # The forms: the input source paused, the teleop node, the robot side.
+    for reason, stream, gap in (
+            (BY_INPUT, INPUT, 0.335), (BY_INPUT, TELEOP, 0.347), (BY_SERVO, TELEOP, 0.349),
+            (BY_POSE, JOINT, 0.333), (BY_POSE, TELEOP, 0.34), (BY_SERVO, SERVO, 0.66),
+            (BY_INPUT, INPUT, 1.0)):                # three sleeps in a row
+        stalled, text = stack_helpers.join_stall(100.0, RELEASE, reason, paused(stream, gap))
+        assert stalled, text
+        assert '2.40 s after the process was started' in text and stream in text
+        assert f'{gap * 1000.0:.0f} ms while ' in text and 'kept arriving' in text
+
+
+@pytest.mark.parametrize('reason', [
+    TeleopState.HOLD_POSE_ABSENT, TeleopState.HOLD_HEAD_ABSENT, TeleopState.HOLD_SERVO_HALTED,
+    TeleopState.HOLD_CLUTCH_RELEASED, TeleopState.HOLD_NOT_OWNER, TeleopState.HOLD_SOLVER,
+    TeleopState.HOLD_INPUT_JUMP, TeleopState.HOLD_SEQ_BACKWARDS, TeleopState.HOLD_NOT_ARMED])
+def test_a_release_for_any_other_reason_is_not_the_join_stall(reason):
+    stalled, text = stack_helpers.join_stall(100.0, RELEASE, reason, paused(INPUT, 0.33))
+    assert not stalled and f'hold_reason {reason} is not what a stalled node causes' in text
+
+
+def test_a_stale_release_before_the_join_or_long_after_it_is_not_the_join_stall():
+    stalled, text = stack_helpers.join_stall(100.0, 99.6, BY_INPUT,
+                                             paused(INPUT, 0.33, began=99.4))
+    assert not stalled and '0.40 s before the process was started' in text
+    late = 100.0 + stack_helpers.JOIN_WINDOW_S + 0.5
+    stalled, text = stack_helpers.join_stall(100.0, late, BY_INPUT,
+                                             paused(INPUT, 0.33, began=late - 0.2))
+    assert not stalled and 'after the process was started, not within' in text
+
+
+def test_a_stale_release_without_a_pause_of_stall_length_is_not_the_join_stall():
+    # Nothing paused; a silence too short for a stall and one too long are no pauses at all.
+    others = {JOINT: [k * 0.007 for k in range(300)]}
+    short = stack_helpers.silences([0.0, 0.24, 0.25], others)
+    long = stack_helpers.silences([0.0, 1.5, 1.51], others)
+    assert short == (pytest.approx(0.24), []) and long == (pytest.approx(1.5), [])
+    for pauses in (QUIET, {**QUIET, INPUT: short}, {**QUIET, INPUT: long}):
+        stalled, text = stack_helpers.join_stall(100.0, RELEASE, BY_INPUT, pauses)
+        assert not stalled and 'no pause of stall length' in text
+        assert f'{INPUT} for' in text       # the longest of each stream is listed
+
+
+def test_a_pause_of_a_stream_that_does_not_cause_the_reason_is_not_the_join_stall():
+    # A stale input is caused by the input source or the teleop node, not by the robot side;
+    # a stale tool pose not by the input source or MoveIt Servo; and so on.
+    for reason, stream in ((BY_INPUT, JOINT), (BY_INPUT, SERVO), (BY_POSE, INPUT),
+                           (BY_POSE, SERVO), (BY_SERVO, INPUT), (BY_SERVO, JOINT)):
+        stalled, text = stack_helpers.join_stall(100.0, RELEASE, reason, paused(stream, 0.33))
+        assert not stalled, (reason, stream)
+        assert f'{stream} for 330 ms, which does not cause hold_reason {reason}' in text
+
+
+def test_a_pause_that_began_after_the_release_or_ended_long_before_it_is_not_its_cause():
+    after = paused(INPUT, 0.33, began=RELEASE + 0.3)
+    stalled, text = stack_helpers.join_stall(100.0, RELEASE, BY_INPUT, after)
+    assert not stalled and 'but only from 0.30 s after the release' in text
+    before = paused(INPUT, 0.33, began=RELEASE - 1.4)       # ended 1.07 s before
+    stalled, text = stack_helpers.join_stall(100.0, RELEASE, BY_INPUT, before)
+    assert not stalled and 'which had ended 1.07 s before the release' in text
+    # During the pause, and up to half a second after its end, it is.
+    for began in (RELEASE - 0.33, RELEASE - 0.05, RELEASE - 0.33 - 0.45):
+        assert stack_helpers.join_stall(100.0, RELEASE, BY_INPUT,
+                                        paused(INPUT, 0.33, began=began))[0], began
+
+
+def test_a_silence_of_every_stream_at_once_is_the_probes_own_and_not_the_join_stall():
+    stalled, text = stack_helpers.join_stall(100.0, RELEASE, BY_INPUT,
+                                             paused(TELEOP, 0.27, witness=''))
+    assert not stalled and 'no other stream kept arriving meanwhile' in text
+    assert "not shown to be the sender's pause" in text
+
+
+def test_the_longest_shown_pause_is_named_when_more_than_one_fits():
+    both = {**QUIET, INPUT: paused(INPUT, 0.33)[INPUT], TELEOP: paused(TELEOP, 0.66)[TELEOP]}
+    stalled, text = stack_helpers.join_stall(100.0, RELEASE, BY_INPUT, both)
+    assert stalled and f'{TELEOP} for 660 ms while joint states kept arriving' in text
+
+
+def ticks(begin, end, period):
+    return [begin + k * period for k in range(int(round((end - begin) / period)) + 1)]
+
+
+def test_a_stalled_node_is_a_stream_that_went_silent_while_another_kept_arriving():
+    # As measured when the teleop node stalled in a publish for 326 ms: its states every
+    # 20 ms, then none for 347 ms (the one it was publishing came out at the end), the next
+    # 3 ms later; joint states every 6.7 ms and input frames every 11 ms throughout.
+    states = ticks(9.0, 10.0, 0.02) + [10.347, 10.350] + ticks(10.37, 11.0, 0.02)
+    others = {JOINT: ticks(9.0, 11.0, 1 / 150.0), INPUT: ticks(9.0, 11.0, 1 / 90.0)}
+    longest, found = stack_helpers.silences(states, others)
+    assert longest == pytest.approx(0.347) and len(found) == 1
+    assert found[0] == (pytest.approx(0.347), pytest.approx(10.0), pytest.approx(10.347), JOINT)
+    # Seen from the other streams, nothing paused.
+    joints = stack_helpers.silences(others[JOINT], {TELEOP: states})
+    assert joints == (pytest.approx(1 / 150.0), [])
+    # The first state after the stall carries the release.
+    pauses = {TELEOP: (longest, found), JOINT: (1 / 150.0, []), INPUT: (1 / 90.0, [])}
+    stalled, text = stack_helpers.join_stall(8.2, 10.350, BY_INPUT, pauses)
+    assert stalled and f'{TELEOP} for 347 ms while joint states kept arriving' in text
+
+
+def test_a_stalled_probe_is_every_stream_silent_at_once_and_shows_nothing():
+    # As measured when the probe's own process stalled: every stream silent for 264 to
+    # 270 ms, then all of it at once. No stream is a witness for another.
+    def stalled_probe(period):
+        late = [10.27 + k * 0.0001 for k in range(int(0.27 / period))]
+        return ticks(9.0, 10.0, period) + late + ticks(10.28, 11.0, period)
+    streams = {TELEOP: stalled_probe(0.02), JOINT: stalled_probe(1 / 150.0),
+               INPUT: stalled_probe(1 / 90.0)}
+    for name, times in streams.items():
+        longest, found = stack_helpers.silences(
+            times, {other: taken for other, taken in streams.items() if other != name})
+        assert longest == pytest.approx(0.27) and [f[3] for f in found] == [''], name
+        pauses = {**QUIET, name: (longest, found)}
+        reason = BY_POSE if name == JOINT else BY_INPUT
+        stalled, text = stack_helpers.join_stall(8.2, 10.28, reason, pauses)
+        assert not stalled and 'the probe paused itself or everything did' in text
+
+
+def test_a_stream_that_is_absent_or_stops_is_no_witness():
+    states = ticks(9.0, 10.0, 0.02) + ticks(10.34, 11.0, 0.02)
+    # No other stream at all, one that ended before the silence, one that paused inside it.
+    for others in ({}, {INPUT: ticks(9.0, 9.9, 0.011)},
+                   {JOINT: ticks(9.0, 10.1, 0.007) + ticks(10.25, 11.0, 0.007)}):
+        assert [f[3] for f in stack_helpers.silences(states, others)[1]] == ['']
+    assert stack_helpers.kept_arriving(ticks(9.0, 11.0, 0.05), 10.0, 10.34)
+    assert not stack_helpers.kept_arriving(ticks(9.0, 11.0, 0.12), 10.0, 10.34)
+
+
+def test_pauses_are_looked_for_in_each_stream_around_the_release():
+    from types import SimpleNamespace as NS
+
+    class _Probe:
+        lock = __import__('threading').Lock()
+        # The input source paused from 9.01 to 9.33; states and joint states kept arriving.
+        stamped_joints = [(t, None, None) for t in ticks(7.0, 11.0, 0.01)]
+
+        def inputs_since(self, t):
+            return [a for a in ticks(8.0, 9.01, 0.01) + ticks(9.33, 10.5, 0.01) if a >= t]
+
+        def timed_states_since(self, t):
+            return [(a, NS()) for a in ticks(7.0, 11.0, 0.02) if a >= t]
+
+    pauses = stack_helpers.pauses_around(_Probe(), 9.3, servo_output=[7.0, 9.1, 9.12, 12.0])
+    longest, found = pauses[INPUT]
+    assert longest == pytest.approx(0.32) and len(found) == 1
+    assert found[0][:3] == pytest.approx((0.32, 9.01, 9.33)) and found[0][3] in (TELEOP, JOINT)
+    assert pauses[TELEOP] == (pytest.approx(0.02), [])
+    assert pauses[JOINT] == (pytest.approx(0.01), [])
+    # Only what arrived around the release counts; a stream that ended is no pause.
+    assert pauses[SERVO] == (pytest.approx(0.02), [])
+    stalled, text = stack_helpers.join_stall(7.5, 9.3, BY_INPUT, pauses)
+    assert stalled and f'{INPUT} for 320 ms while' in text
+
+
+def test_a_record_of_a_test_that_did_not_fail_is_kept_with_its_logs(tmp_path, monkeypatch):
+    log = tmp_path / 'launch.log'
+    log.write_text('a line of the stack')
+    stack_helpers.register_log(str(log))
+    monkeypatch.delenv(stack_helpers.KEEP_LOGS_ENV, raising=False)
+    assert stack_helpers.keep_record('JOIN STALL: something', 'join_stall') == ''
+    monkeypatch.setenv(stack_helpers.KEEP_LOGS_ENV, str(tmp_path / 'kept'))
+    kept = stack_helpers.keep_record('JOIN STALL: something', 'join_stall')
+    assert os.path.basename(kept).endswith(
+        'test_a_record_of_a_test_that_did_not_fail_is_kept_with_its_logs__join_stall')
+    with open(os.path.join(kept, 'RECORD.txt'), encoding='utf-8') as handle:
+        assert handle.read() == 'JOIN STALL: something\n'
+    assert any(name.endswith('launch.log') for name in os.listdir(kept))

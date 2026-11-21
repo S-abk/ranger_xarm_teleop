@@ -170,7 +170,9 @@ def test_singularity_replay_passes_through_without_a_halt(stack):
     assert all(s.lead_translation <= LEAD + 1e-9 for s in engaged)
     assert all(s.commanded_linear_speed <= 0.25 + 1e-9 for s in engaged)
     assert all(s.commanded_angular_speed <= 1.0 + 1e-9 for s in engaged)
-    assert probe.joint_speeds_since(start) <= 2.0 + 0.05
+    # Mock execution: each step over the period it was commanded in (stack_helpers).
+    speed = probe.joint_speeds_in_mock_execution_since(start)
+    assert speed <= 2.0 + 0.05, (speed, probe.joint_speeds_since(start))
     # Position held while the wrist absorbed the loss (orientation error reported).
     assert max(s.solver_error_translation for s in engaged) < 0.01
     probe.disarm()
@@ -276,7 +278,15 @@ def _clean_run(probe, env, logs, fixture, engaged_s, posture=READY):
     assert not any(s.servo_status in HALTS for s in engaged), fixture
     assert all(s.lead_translation <= LEAD + 1e-9 for s in engaged)
     assert all(s.commanded_linear_speed <= 0.25 + 1e-9 for s in engaged)
-    assert probe.joint_speeds_since(start) <= 2.0 + 0.05
+    # The joint speed limit is 2.0 rad/s. In mock execution the hardware reports at each
+    # controller update the position commanded at the update before, so a step between two
+    # joint states is measured over the period it was commanded in, the previous stamp
+    # difference: the controller's period is uneven here, and the step's own stamp
+    # difference read up to a tenth too high (2.10 for a true 1.90) or too low
+    # (stack_helpers.commanded_period_speed). Gazebo measures positions at their stamps and
+    # keeps Probe.joint_speeds_since.
+    speed = probe.joint_speeds_in_mock_execution_since(start)
+    assert speed <= 2.0 + 0.05, (fixture, speed, probe.joint_speeds_since(start))
     return timed, start
 
 

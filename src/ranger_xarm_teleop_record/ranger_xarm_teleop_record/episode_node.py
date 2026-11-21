@@ -35,9 +35,10 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 from ranger_xarm_teleop_interfaces.msg import EpisodeState, InputStatus, TeleopState
+from ranger_xarm_teleop_servo.calls import PARAMETER_REPLY_DEPTH
 from ranger_xarm_teleop_servo.rotations import Pose
 from rcl_interfaces.msg import ParameterType
-from rcl_interfaces.srv import GetParameters, ListParameters
+from rcl_interfaces.srv import GetParameters, GetParameterTypes, ListParameters
 import rclpy
 import rclpy.executors
 from rclpy.node import Node
@@ -54,6 +55,7 @@ from . import metadata as md
 from .episode import buttons_from_joy, Control, Event, State
 from .extrinsics import Frames
 from .linkstats import link_quality
+from .parameters import NAMES, ParameterRead, TYPES, VALUES
 from .profile import load_checks, load_profile, recorded
 from .provenance import git_info, sha256_file, sha256_text
 from .streams import FieldPresence, OPTIONAL_FIELDS
@@ -72,6 +74,11 @@ COUNT_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                        history=HistoryPolicy.KEEP_LAST, depth=50)
 STATE_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST,
                        depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+# A parameter service answers every client of it on one topic: a deep reply queue, so that
+# another node's reading does not push this node's replies out (calls.py in the servo package).
+PARAMETER_CLIENT_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                                  history=HistoryPolicy.KEEP_LAST, depth=PARAMETER_REPLY_DEPTH,
+                                  durability=DurabilityPolicy.VOLATILE)
 
 FAULT_HOLDS = {3, 4} | set(range(6, 21))      # TeleopState.HOLD_*: not 0, 1, 2 (disarm), 5 (grip)
 HOLD_NAMES = {v: k[len('HOLD_'):] for k, v in vars(TeleopState).items()
@@ -240,14 +247,21 @@ class EpisodeNode(Node):
         self.split_cli = self.create_client(SplitBagfile, f'{rec}/split_bagfile')
         self.create_subscription(WriteSplitEvent, '/events/write_split', self.on_split,
                                  RELIABLE_QOS)
+        # The limits in force: every parameter of the teleop node, MoveIt Servo and the mux,
+        # each read once in three requests (parameters.py).
         self.param_clients = {}
+        self.param_reads: Dict[str, ParameterRead] = {}
+        self.param_requests: Dict[str, tuple] = {}      # key -> (client, the request out)
         for key in ('teleop_node', 'servo_node', 'mux_node'):
             target = str(gp(key).value).rstrip('/')
-            self.param_clients[key] = (
-                target,
-                self.create_client(ListParameters, f'{target}/list_parameters'),
-                self.create_client(GetParameters, f'{target}/get_parameters'))
-        self.parameters: Dict[str, object] = {}     # key -> request time, or 'done'
+            self.param_clients[key] = (target, {
+                NAMES: self.create_client(ListParameters, f'{target}/list_parameters',
+                                          qos_profile=PARAMETER_CLIENT_QOS),
+                TYPES: self.create_client(GetParameterTypes, f'{target}/get_parameter_types',
+                                          qos_profile=PARAMETER_CLIENT_QOS),
+                VALUES: self.create_client(GetParameters, f'{target}/get_parameters',
+                                           qos_profile=PARAMETER_CLIENT_QOS)})
+            self.param_reads[key] = ParameterRead()
         self.state_pub = self.create_publisher(EpisodeState, '/teleop/episode/state', STATE_QOS)
         self.session = self._session_record(gp)
         self._write_session()
@@ -849,52 +863,68 @@ class EpisodeNode(Node):
     def fetch_parameters(self) -> None:
         """Read the teleop, Servo and mux parameters once each (limits in force)."""
         now = time.monotonic()
-        for key, (target, list_cli, get_cli) in self.param_clients.items():
-            started = self.parameters.get(key)
-            if started == 'done' or not list_cli.service_is_ready():
+        for key, (target, clients) in self.param_clients.items():
+            read = self.param_reads[key]
+            if not read.due(now) or not all(c.service_is_ready() for c in clients.values()):
                 continue
-            if started is not None and now - started < 3.0:
-                continue                      # a response can be lost before discovery settles
-            self.parameters[key] = now
-            req = ListParameters.Request()
-            list_cli.call_async(req).add_done_callback(
-                lambda f, k=key, c=get_cli: self._listed(k, c, f))
+            silent = read.begin(now)
+            if silent is not None:
+                # A reply can be lost (before discovery settles, or pushed out of the reply
+                # queue): the request is given up and the read starts again.
+                client, request = self.param_requests.pop(key, (None, None))
+                if request is not None:
+                    client.remove_pending_request(request)
+                self.get_logger().warning(
+                    f'no answer from {target} to the request for its parameter {silent} '
+                    f'within {read.timeout_s:g} s; asking again')
+            self._ask_parameters(key, NAMES, ListParameters.Request())
 
-    def _listed(self, key, get_cli, future) -> None:
+    def _ask_parameters(self, key, step, request) -> None:
+        client = self.param_clients[key][1][step]
+        future = client.call_async(request)
+        self.param_requests[key] = (client, future)
+        future.add_done_callback(lambda done: self._parameters_answered(key, step, done))
+
+    def _parameters_answered(self, key, step, future) -> None:
+        if self.param_requests.get(key, (None, None))[1] is not future:
+            return                                      # a request that was given up
+        del self.param_requests[key]
+        read = self.param_reads[key]
+        target = self.param_clients[key][0]
+
+        def again(why: str) -> None:
+            # The read starts again from the names at the next tick of the timer.
+            self.get_logger().info(f'the parameters of {target} are not read yet ({why}); '
+                                   'asking again')
+
         if future.exception() is not None or future.result() is None:
-            self.parameters.pop(key, None)
+            read.failed()
+            again(f'the request for its parameter {step} failed')
             return
-        names = list(future.result().result.names)
-        if len(names) <= 2:                  # only use_sim_time and the like: not set up yet
-            self.parameters.pop(key, None)
-            return
-        # A parameter declared without a value makes a whole get_parameters reply empty, so
-        # read in chunks and fall back to one name at a time.
-        chunks = [names[i:i + 10] for i in range(0, len(names), 10)]
-        self._read_chunks(key, get_cli, chunks, {}, [])
-
-    def _read_chunks(self, key, get_cli, chunks, values, unset) -> None:
-        if not chunks:
-            self._got(key, values, unset)
-            return
-        chunk, rest = chunks[0], chunks[1:]
-        req = GetParameters.Request()
-        req.names = chunk
-        get_cli.call_async(req).add_done_callback(
-            lambda f: self._chunk_done(key, get_cli, chunk, rest, values, unset, f))
-
-    def _chunk_done(self, key, get_cli, chunk, rest, values, unset, future) -> None:
-        if future.exception() is not None or future.result() is None:
-            self.parameters.pop(key, None)            # retried from the timer
-            return
-        got = list(future.result().values)
-        if len(got) == len(chunk):
-            values.update({n: _param_value(v) for n, v in zip(chunk, got)})
-        elif len(chunk) > 1:
-            rest = [[n] for n in chunk] + rest
+        now = time.monotonic()
+        result = future.result()
+        if step == NAMES:
+            names = read.listed(result.result.names, now)
+            if names is None:
+                again(f'it lists {len(result.result.names)} so far')
+            else:
+                self._ask_parameters(key, TYPES, GetParameterTypes.Request(names=names))
+        elif step == TYPES:
+            asked = len(read.asked)
+            having = read.typed(result.types, now)
+            if having:
+                self._ask_parameters(key, VALUES, GetParameters.Request(names=having))
+            elif read.done:
+                self._got(key, {}, read.unset)
+            else:
+                again(f'{len(result.types)} types came back for {asked} names')
         else:
-            unset.append(chunk[0])
-        self._read_chunks(key, get_cli, rest, values, unset)
+            asked = len(read.asked)
+            if read.valued(result.values):
+                self._got(key, {n: _param_value(v) for n, v in read.values.items()},
+                          read.unset)
+            else:
+                again(f'{len(result.values)} values came back for {asked} names')
 
     def _got(self, key, values, unset) -> None:
         if key == 'servo_node':
@@ -906,7 +936,6 @@ class EpisodeNode(Node):
                     handle.write(semantic)
                 self.session['robot'].update({'semantic_sha256': sha256_text(semantic),
                                               'semantic_file': 'robot_description.srdf'})
-        self.parameters[key] = 'done'
         name = {'teleop_node': 'teleop', 'servo_node': 'servo', 'mux_node': 'mux'}[key]
         self.session['limits']['parameters'][name] = values
         # Declared without a value: the node's built-in default applies, which the recorded

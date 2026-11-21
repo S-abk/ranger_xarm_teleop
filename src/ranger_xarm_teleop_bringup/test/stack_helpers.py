@@ -115,6 +115,26 @@ def keep_logs(module: str, test: str, destination: str) -> str:
     return target
 
 
+def keep_record(text: str, label: str) -> str:
+    """
+    Keep the logs of the running test although it has not failed, with ``text`` beside them.
+
+    For an outcome that is worth reading afterwards and is no failure: a passing test's
+    output is not kept by anything else. Like the logs of a failed test, only when
+    TELEOP_TEST_KEEP_LOGS names a directory. Returns the new directory (its name ends in
+    ``label``; the text is in RECORD.txt), or '' when nothing is kept.
+    """
+    destination = os.environ.get(KEEP_LOGS_ENV)
+    if not destination:
+        return ''
+    current = os.environ.get('PYTEST_CURRENT_TEST', '')
+    test = current.split('::')[-1].split(' ')[0]
+    target = keep_logs(_current_module(), f'{test}__{label}', destination)
+    with open(os.path.join(target, 'RECORD.txt'), 'w', encoding='utf-8') as handle:
+        handle.write(text + '\n')
+    return target
+
+
 def child_environment(offset: int) -> dict:
     """
     Return an environment for child processes and this test's own ROS context.
@@ -459,6 +479,15 @@ class Probe:
             if dt > 1e-4:
                 best = max(best, max(abs(a - b) for a, b in zip(q1, q0)) / dt)
         return best
+
+    def joint_speeds_in_mock_execution_since(self, t):
+        """Return the largest joint speed since ``t`` as mock execution moves (rad/s)."""
+        with self.lock:
+            rows = [(when, stamp.sec + stamp.nanosec * 1e-9, q)
+                    for when, stamp, q in self.stamped_joints]
+        first = next((i for i, row in enumerate(rows) if row[0] >= t), len(rows))
+        # One state before ``t`` as well: the first step's period ends at the first state.
+        return commanded_period_speed([(stamp, q) for _, stamp, q in rows[max(0, first - 1):]])
 
     def max_joint_change(self, since, reference):
         return max((max(abs(a - b) for a, b in zip(q, reference))
@@ -1151,6 +1180,186 @@ def replay_with_clean_input(probe, env, log_path, fixture, expected_engaged_s, a
         discarded.append(f'attempt {attempt + 1}: {what}: late on its way')
         print(f'discarded replay of {fixture}: {discarded[-1]}')
     return start, discarded
+
+
+# ---- a process that joins the graph during an engagement ----
+#
+# A process that joins can stall an existing node for about a third of a second: the
+# middleware sleeps 333 ms, up to three times, while a node opens the newcomer's shared-memory
+# port (interface contract, "Service and action calls": every process of a session starts
+# before arming). The gate then releases the clutch on stale data, as it must.
+#
+# What a stall looks like from the probe was measured: 200 joins of a process on one mock
+# stack, with 10 stalls of the teleop node timed inside it and 10 of the controller's and the
+# input source's processes. A stalled node is stuck in a publish. The message it was
+# publishing comes out at the end of the stall, so the probe goes without that node's stream
+# for the length of the stall (334 to 349 ms for one sleep, 681 ms for two) while another
+# stream kept arriving (never silent for more than 22 ms; a third was at times silent or
+# absent). The stamps do not show it the same way: the late message was stamped before the
+# stall. When the probe's own process
+# stalls, every stream is silent over the same stretch (264 to 270 ms seen) and then arrives
+# in a burst. Once, two nodes stalled over the same stretch while no third stream was
+# running: the rule below does not show that one.
+
+INPUT_PAUSE = 'no input frame arrived'
+TELEOP_PAUSE = 'no teleop state arrived'
+JOINT_PAUSE = 'no joint state arrived'
+SERVO_PAUSE = "none of MoveIt Servo's output arrived"
+JOIN_STREAMS = {INPUT_PAUSE: 'input frames', TELEOP_PAUSE: 'teleop states',
+                JOINT_PAUSE: 'joint states', SERVO_PAUSE: "MoveIt Servo's output"}
+# The streams whose pause causes each reason. A stall of the teleop node itself can cause any
+# of them.
+JOIN_STALL_STREAMS = {
+    TeleopState.HOLD_INPUT_STALE: (INPUT_PAUSE, TELEOP_PAUSE),
+    TeleopState.HOLD_TOOL_POSE_STALE: (JOINT_PAUSE, TELEOP_PAUSE),
+    TeleopState.HOLD_SERVO_NOT_READY: (SERVO_PAUSE, TELEOP_PAUSE),
+}
+JOIN_STALL_REASONS = tuple(JOIN_STALL_STREAMS)
+JOIN_STALL_MIN_S = 0.25     # one sleep is 0.333 s
+JOIN_STALL_MAX_S = 1.2      # three in a row are 1.0 s
+JOIN_WINDOW_S = 5.0         # a newcomer has been discovered up to 3 s after its start
+JOIN_LOOK_AHEAD_S = 1.5     # a pause outlasts the release it causes: longer than the longest
+JOIN_ALIVE_S = 0.1          # a stream kept arriving when it was never silent for this long
+JOIN_EARLY_S = 0.05         # a pause has begun by the release, give or take this
+JOIN_AFTER_PAUSE_S = 0.5    # a release comes during the pause that causes it or this soon after
+JOIN_LOOK_BACK_S = JOIN_STALL_MAX_S + JOIN_AFTER_PAUSE_S + 0.3      # the longest, ended before
+
+
+def kept_arriving(arrivals, began, ended):
+    """Return whether a stream was never silent for JOIN_ALIVE_S between two times."""
+    inside = [began] + [t for t in arrivals if began < t < ended] + [ended]
+    return max(b - a for a, b in zip(inside, inside[1:])) < JOIN_ALIVE_S
+
+
+def silences(arrivals, others):
+    """
+    Return the longest silence of a stream and its silences of stall length.
+
+    ``arrivals`` is when the probe took each message of the stream, in order; ``others`` the
+    same for the other streams, by name. A silence of stall length is two messages in a row
+    that the probe took JOIN_STALL_MIN_S to JOIN_STALL_MAX_S apart:
+    ``(length, began, ended, witness)``. ``witness`` names another stream that kept arriving
+    through it, which shows that the probe was taking messages and that it was the sender
+    that paused. It is '' when none did: then the probe paused itself, or every sender did
+    at once, and the two are not told apart.
+    """
+    longest, found = 0.0, []
+    for began, ended in zip(arrivals, arrivals[1:]):
+        longest = max(longest, ended - began)
+        if JOIN_STALL_MIN_S <= ended - began <= JOIN_STALL_MAX_S:
+            witness = next((name for name, times in others.items()
+                            if kept_arriving(times, began, ended)), '')
+            found.append((ended - began, began, ended, witness))
+    return longest, found
+
+
+def pauses_around(probe, when, servo_output=()):
+    """
+    Return ``silences`` of each stream the probe takes, around the time ``when``.
+
+    ``servo_output`` is when each message of MoveIt Servo's output arrived. A stream that
+    simply ended is no pause. Call this at least JOIN_LOOK_AHEAD_S after ``when``.
+    """
+    begin, end = when - JOIN_LOOK_BACK_S, when + JOIN_LOOK_AHEAD_S
+    with probe.lock:
+        joints = [arrival for arrival, _, _ in probe.stamped_joints if begin <= arrival <= end]
+    streams = {
+        INPUT_PAUSE: [t for t in probe.inputs_since(begin) if t <= end],
+        TELEOP_PAUSE: [t for t, _ in probe.timed_states_since(begin) if t <= end],
+        JOINT_PAUSE: joints,
+        SERVO_PAUSE: [t for t in servo_output if begin <= t <= end],
+    }
+    return {name: silences(times, {other: taken for other, taken in streams.items()
+                                   if other != name})
+            for name, times in streams.items()}
+
+
+def join_stall(joined_at, when, reason, pauses):
+    """
+    Return ``(True, text)`` when a release is the stall that a joining process causes.
+
+    ``joined_at`` is when the process was started, ``when`` and ``reason`` the release and
+    its ``hold_reason``, ``pauses`` the result of ``pauses_around``. All of this is needed:
+
+    * the release came after the process was started, within JOIN_WINDOW_S;
+    * its reason is one a stalled node causes: stale input, a stale tool pose, or MoveIt
+      Servo's output not following. Never a missing pose, a halt or anything else;
+    * a stream whose pause causes that reason (JOIN_STALL_STREAMS) did not arrive for the
+      length of a stall;
+    * another stream kept arriving meanwhile, so it was not the probe that paused;
+    * the pause had begun when the clutch was released and had not ended more than
+      JOIN_AFTER_PAUSE_S before.
+
+    Anything else is ``(False, why not)``. This shows a signature, not a cause: a pause of
+    the right stream and length that something else caused within the window would pass.
+    And it is the strict side of what it cannot see: a stall of a node whose streams the
+    probe does not take, or one during which the probe or every other sender stalled as
+    well, is not shown and fails the test that asks.
+    """
+    after = when - joined_at
+    if not 0.0 <= after <= JOIN_WINDOW_S:
+        return False, (f'it came {abs(after):.2f} s {"after" if after > 0.0 else "before"} the '
+                       f'process was started, not within {JOIN_WINDOW_S:g} s after it')
+    if reason not in JOIN_STALL_STREAMS:
+        return False, (f'hold_reason {reason} is not what a stalled node causes (stale input '
+                       f'{TeleopState.HOLD_INPUT_STALE}, stale tool pose '
+                       f'{TeleopState.HOLD_TOOL_POSE_STALE}, Servo output stopped '
+                       f'{TeleopState.HOLD_SERVO_NOT_READY})')
+    shown, not_shown = [], []
+    for name, (_, found) in pauses.items():
+        for length, began, ended, witness in found:
+            what = f'{name} for {length * 1000.0:.0f} ms'
+            if name not in JOIN_STALL_STREAMS[reason]:
+                not_shown.append(f'{what}, which does not cause hold_reason {reason}')
+            elif not witness:
+                not_shown.append(
+                    f'{what}, but no other stream kept arriving meanwhile, so the probe '
+                    "paused itself or everything did: not shown to be the sender's pause")
+            elif began > when + JOIN_EARLY_S:
+                not_shown.append(f'{what}, but only from {began - when:.2f} s after the release')
+            elif when > ended + JOIN_AFTER_PAUSE_S:
+                not_shown.append(
+                    f'{what}, which had ended {when - ended:.2f} s before the release')
+            else:
+                shown.append((length, name, witness))
+    if not shown:
+        listed = ', '.join(f'{name} for {longest * 1000.0:.0f} ms'
+                           for name, (longest, _) in pauses.items())
+        return False, (
+            f'no pause of stall length ({JOIN_STALL_MIN_S:g} to {JOIN_STALL_MAX_S:g} s) that '
+            'causes this release is shown around it'
+            + ('; seen: ' + '; '.join(not_shown) if not_shown else '')
+            + f'; the longest of each stream: {listed}')
+    length, name, witness = max(shown)
+    return True, (f'{after:.2f} s after the process was started {name} for '
+                  f'{length * 1000.0:.0f} ms while {JOIN_STREAMS[witness]} kept arriving')
+
+
+def commanded_period_speed(samples):
+    """
+    Return the largest joint speed in ``samples`` ((stamp in s, positions)) of mock execution.
+
+    Mock execution has no dynamics: at each controller update the hardware reports the
+    position commanded at the update before, stamped now. The step between two joint states
+    was therefore made during the period that ended at the first of them, and its speed is
+    the step over that period: the previous stamp difference, not the step's own.
+
+    The two differ here because the controller's period is uneven without real-time
+    scheduling (6.2 to 7.1 ms around 6.67, at times a doubled one). Dividing a step by its
+    own stamp difference reads the true speed times the ratio of two neighbouring periods,
+    up to a tenth too high or too low. Under Gazebo the positions are measured at their
+    stamps, and ``Probe.joint_speeds_since`` is the right measure there.
+
+    No state is left out. A joint state that never reached the probe makes one step two
+    periods long over a divisor of one period: that step reads twice the speed (the step
+    after it reads half), so the largest reading is too high and the bound fails.
+    """
+    best = 0.0
+    for (s0, _), (s1, q1), (_, q2) in zip(samples, samples[1:], samples[2:]):
+        period = s1 - s0
+        if period > 1e-4:
+            best = max(best, max(abs(a - b) for a, b in zip(q2, q1)) / period)
+    return best
 
 
 # ---- tool speed with the gripper open and closed (gripper_fix) ----
