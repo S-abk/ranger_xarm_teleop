@@ -107,12 +107,20 @@ def describe_controllers(controllers: Optional[Sequence[Tuple[str, str, str, Seq
     return '\n'.join(lines)
 
 
-def may_recover(owner: Optional[int], armed: Optional[bool]) -> Tuple[bool, str]:
+NO_TELEOP_AFTER_S = 5.0     # a tool takes a teleop node to be absent only this long after
+#                             its own start: a node that is there may not have shown yet
+
+
+def may_recover(owner: Optional[int], armed: Optional[bool],
+                teleop_running: bool) -> Tuple[bool, str]:
     """
-    Allow a recovery motion only when MoveIt owns the arm and teleop is not armed.
+    Allow a recovery motion only when MoveIt owns the arm and teleop is known not to be armed.
 
     ``owner`` is the command mux's fresh report (None: none received); ``armed`` the
-    teleop node's fresh state (None: no teleop node heard).
+    teleop node's fresh state (None: none at hand); ``teleop_running`` whether a teleop node
+    is there at all. With one running, "not armed" must have been heard: without a fresh
+    state it is not known, and nothing may move. With none there is nothing to arm, and a
+    recovery still works.
     """
     if owner != OWNER_MOVEIT:
         name = {OWNER_NONE: 'NONE', OWNER_TELEOP: 'TELEOP',
@@ -120,7 +128,16 @@ def may_recover(owner: Optional[int], armed: Optional[bool]) -> Tuple[bool, str]
         return False, f'MoveIt does not own the arm (owner: {name})'
     if armed:
         return False, 'teleop is still armed'
+    if armed is None and teleop_running:
+        return False, ('a teleop node is running and no fresh state of it is at hand, so '
+                       'whether teleop is armed is not known')
     return True, ''
+
+
+def recovery_case(armed: Optional[bool]) -> str:
+    """Say which of the two cases allows a recovery motion (after ``may_recover``)."""
+    return ('teleop reports that it is not armed' if armed is False else
+            'no teleop node is running')
 
 
 class ClutchWatch:
