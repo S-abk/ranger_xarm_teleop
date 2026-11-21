@@ -28,8 +28,8 @@ import os
 import re
 import time
 
+from fake_teleop_side import ARM_AFTER_RAD
 import pytest
-
 from stack_helpers import child_environment, Process
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -175,7 +175,10 @@ def test_move_arm_with_a_mux_stops_when_teleop_is_armed_during_the_motion(env, t
     assert 'the server is cancelling the goal' in tool
     moved = re.search(r'the joints moved by up to (\d+\.\d+) rad and are still now', tool)
     assert moved, tool
-    assert 0.02 < float(moved.group(1)) < 0.15          # well short of 0.3 rad
+    # It moved until teleop was armed, at the stand-in's trigger, and stopped well short of
+    # 0.3 rad. The stop can land exactly on the trigger; the figure is printed with three
+    # decimals, so it may read up to 0.0005 rad below it.
+    assert ARM_AFTER_RAD - 0.0005 <= float(moved.group(1)) < 0.15, tool
     assert 'goal reached' not in controller and 'every goal' not in controller
 
 

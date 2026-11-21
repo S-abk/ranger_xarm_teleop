@@ -20,8 +20,8 @@ MUX is ``mux`` (the mux's owner report, several times a second) or ``none``. TEL
 
     none      no ``/teleop/disarm`` service and no ``/teleop/state``
     disarmed  the service, and a state that says "not armed", 20 times a second
-    arms      as ``disarmed``, and "armed" once the arm's first joint has moved by 0.02 rad
-              from where it was first seen (the motion has begun)
+    arms      as ``disarmed``, and "armed" once the arm's first joint has moved by
+              ``ARM_AFTER_RAD`` from where it was first seen (the motion has begun)
 
 "Armed" is reported as the teleop node does: with teleop as the owner, in the state and in
 the mux's report. Nothing here moves the arm; ``fake_controller.py`` does.
@@ -33,6 +33,8 @@ from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 import rclpy
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
+
+ARM_AFTER_RAD = 0.02        # "arms": armed once the first joint has moved this far
 
 
 def main() -> int:
@@ -57,7 +59,8 @@ def main() -> int:
             return
         if seen['first'] is None:
             seen['first'] = msg.position[0]
-        if teleop == 'arms' and not seen['armed'] and abs(msg.position[0] - seen['first']) > 0.02:
+        moved = abs(msg.position[0] - seen['first'])
+        if teleop == 'arms' and not seen['armed'] and moved > ARM_AFTER_RAD:
             seen['armed'] = True
             print('armed', flush=True)
     node.create_subscription(JointState, '/joint_states', on_joints, 10)
