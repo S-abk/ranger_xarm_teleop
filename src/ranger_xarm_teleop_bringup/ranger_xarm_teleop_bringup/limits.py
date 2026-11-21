@@ -52,7 +52,9 @@ RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translat
             'joint_velocity_limit_names', 'joint_velocity_limits',
             # Gripper teleop: its switch and its safety values.
             'gripper_enabled', 'gripper_joint', 'gripper_open_position',
-            'gripper_closed_position', 'gripper_max_speed')
+            'gripper_closed_position', 'gripper_max_speed',
+            # The reset (G-16): its speed scaling.
+            'reset_speed_scaling')
 
 # Required in the limits file when gripper teleop is enabled (no default).
 GRIPPER_REQUIRED = ('gripper_open_position', 'gripper_closed_position', 'gripper_max_speed')

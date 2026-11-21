@@ -52,6 +52,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'record', default_value='false',
             description='Start the demonstration recorder and episode node (paused until X).'),
+        DeclareLaunchArgument(
+            'reset', default_value='false',
+            description='Hold the right thumbstick pulled back (disarmed) to return the arm to '
+                        'the ready posture (G-16).'),
         DeclareLaunchArgument('record_profile', default_value='gazebo'),
         DeclareLaunchArgument('record_data_dir', default_value=''),
         DeclareLaunchArgument('record_session', default_value=''),
@@ -73,6 +77,7 @@ def generate_launch_description():
                 'tool_frame': LaunchConfiguration('tool_frame'),
                 'teleop_params_file': LaunchConfiguration('teleop_params_file'),
                 'gripper_enabled': LaunchConfiguration('gripper_enabled'),
+                'reset': LaunchConfiguration('reset'),
                 'moveit_gripper_controller': 'xarm_xarm_gripper_traj_controller',
             }.items()),
         IncludeLaunchDescription(

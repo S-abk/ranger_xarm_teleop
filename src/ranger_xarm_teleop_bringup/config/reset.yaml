@@ -1,0 +1,21 @@
+# The reset (G-16): a hold-to-run return to a named posture from the headset, with teleop
+# disarmed. Read by the reset node when the stack is launched with reset:=true.
+#
+# The speed scaling is not here: it has no default and comes from the limits file
+# (reset_speed_scaling). The switch is the launch argument, not this file.
+# The postures are set per deployment: a project that mounts its own tool, or needs another
+# ready posture, passes its own file as reset_params_file.
+reset_node:
+  ros__parameters:
+    # The named postures a reset may go to (joint values in the order of arm_joints, rad),
+    # and the one the control goes to.
+    reset_posture_names: ['ready']
+    reset_postures:
+      ready: [0.0, -0.6, -0.7, 0.0, 1.3, 0.0]     # the arm tools' ready posture
+    reset_posture: ready
+    reset_group: xarm6
+    # The control: the right thumbstick pulled back past the press threshold for the dwell
+    # starts a reset; it stays held while above the hold threshold.
+    reset_press_threshold: 0.8
+    reset_hold_threshold: 0.5
+    reset_dwell_s: 0.5

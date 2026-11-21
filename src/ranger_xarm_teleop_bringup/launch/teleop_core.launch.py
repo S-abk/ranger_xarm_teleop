@@ -31,6 +31,13 @@ stack, before arming. It observes /teleop/state and /teleop/episode/state and pu
 /teleop/haptic and /teleop/operator/status, which the bridge forwards to the headset. It
 decides nothing for teleop; parameters from ``feedback_params_file`` (patterns, rates), and
 the gripper's range from the limits file.
+
+Reset (``reset``, default false, rule G-16): a hold-to-run return to a named posture from the
+headset, with teleop disarmed. Starts the reset node and its watchdog with the stack, before
+arming; with ``reset:=false`` neither starts. The postures and the control's thresholds come
+from ``reset_params_file`` (default: this package's config/reset.yaml); the speed scaling,
+which has no default, from the limits file (``reset_speed_scaling``). Simulation only: the
+reset node refuses every request unless the robot description shows simulator hardware only.
 """
 
 import os
@@ -43,7 +50,7 @@ from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from ranger_xarm_teleop_bringup.limits import (check_extra_params_file, check_gripper_limits,
-                                               check_limits_file)
+                                               check_limits_file, load_limits)
 import yaml
 
 
@@ -201,7 +208,26 @@ def launch_setup(context, *args, **kwargs):
             package='ranger_xarm_teleop_bridge', executable='feedback_node', output='screen',
             parameters=[params_file, limits_file, sim_time]))
 
-    return [spawner, servo_node, mux, teleop] + gripper_nodes + feedback_nodes
+    reset_nodes = []
+    if _true(arg('reset')):
+        speed = limits.get('reset_speed_scaling')
+        if not isinstance(speed, (int, float)) or isinstance(speed, bool):
+            raise ValueError(f'{limits_file}: reset_speed_scaling is required with reset:=true '
+                             'and has no default (G-16)')
+        reset_params = arg('reset_params_file') or os.path.join(share, 'config', 'reset.yaml')
+        check_extra_params_file(reset_params)                  # raises: no overriding
+        if 'enabled' in load_limits(reset_params):
+            raise ValueError(f'{reset_params} sets enabled: the reset is switched on by the '
+                             'launch argument reset:=true only')
+        reset_nodes.append(Node(
+            package='ranger_xarm_teleop_servo', executable='reset_watchdog_node',
+            output='screen', parameters=[sim_time]))
+        reset_nodes.append(Node(
+            package='ranger_xarm_teleop_servo', executable='reset_node', output='screen',
+            parameters=[reset_params, {'reset_speed_scaling': float(speed),
+                                       'enabled': True}, sim_time]))
+
+    return [spawner, servo_node, mux, teleop] + gripper_nodes + feedback_nodes + reset_nodes
 
 
 def generate_launch_description():
@@ -241,6 +267,15 @@ def generate_launch_description():
             'teleop_params_file', default_value='',
             description='Optional extra parameters of the teleop node (keep-out planes, '
                         'wrist frame, wrist-pivot offset, filter).'),
+        DeclareLaunchArgument(
+            'reset', default_value='false',
+            description='Start the reset node and its watchdog: hold the right thumbstick '
+                        'pulled back, disarmed, to return the arm to the ready posture (G-16; '
+                        'simulation only).'),
+        DeclareLaunchArgument(
+            'reset_params_file', default_value='',
+            description="Postures and control thresholds of the reset (empty: this package's "
+                        'config/reset.yaml).'),
         DeclareLaunchArgument(
             'feedback', default_value='true',
             description='Start the operator feedback node (vibration and panel status for the '
