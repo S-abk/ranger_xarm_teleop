@@ -24,24 +24,22 @@ rested. The last tests kill the reset node and then the watchdog, so they run la
 """
 
 import os
-import signal
 import time
 
 import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, EpisodeState, ResetState
-from reset_helpers import (at, contact_paths, describe, EpisodeStandIn, off_ready, phase,
-                           ResetWatcher, stop_measure, write_recording)
+from reset_helpers import (at, contact_paths, describe, EpisodeStandIn, gripper, kill, off_ready,
+                           phase, play, ready_after, refused, ResetWatcher, stop_measure,
+                           stopped_midway)
 from stack_helpers import (arm_by_replay, assert_stack_nodes, child_environment,
-                           MOCK_STACK_NODES, node_pids, Probe, Process, READY, replay_file,
-                           start_input)
+                           MOCK_STACK_NODES, Probe, Process, READY, start_input)
 
 S = ResetState
 STARTS = [off_ready([0.9, 0.3, 0.2, 0.3, -0.3, 0.4]),
           off_ready([-0.8, -0.2, 0.3, -0.4, 0.2, -0.5]),
           off_ready([0.5, -0.3, -0.3, 0.0, 0.3, 0.0])]
-FAR = off_ready([1.2, 0.0, 0.0, 0.0, 0.0, 0.0])     # one joint far: a motion of a few seconds
-RESULTS = []                                        # stop measurements, printed at the end
+FAR = off_ready([1.2, 0.0, 0.0, 0.0, 0.0, 0.0])     # one joint far: a few seconds of motion
 
 
 @pytest.fixture(scope='module')
@@ -53,6 +51,7 @@ def stack(tmp_path_factory):
                      env, str(logs / 'launch.log'))
     probe = Probe(env)
     episode = None
+    results = []
     try:
         watcher = ResetWatcher(probe)
         episode = EpisodeStandIn(probe)
@@ -64,38 +63,18 @@ def stack(tmp_path_factory):
                        and watcher.last().enabled, 60.0, 'the reset node and its watchdog')
         start_input(probe, env, logs)
         yield {'probe': probe, 'env': env, 'logs': logs, 'launch': launch, 'watch': watcher,
-               'episode': episode}
+               'episode': episode, 'far': FAR, 'results': results}
     finally:
         if episode is not None:
             episode.close()
         probe.close()
         launch.stop()
-        for line in RESULTS:
+        for line in results:
             print(line)
 
 
-def play(stack, name, phases, wait=True):
-    """Write and play a recording; return (start, phase begins, replay)."""
-    path = str(stack['logs'] / f'{name}.jsonl')
-    begins = write_recording(path, phases)
-    stack['count'] = stack['watch'].count()      # events before this recording
-    start = time.monotonic()
-    process = replay_file(stack['env'], path, str(stack['logs'] / f'{name}.log'),
-                          start_delay=0.0)
-    if wait:
-        assert process.wait(sum(p[0] for p in phases) + 20.0) == 0, process.output()
-    return start, begins, process
-
-
-def ready_after(stack, posture):
-    probe = stack['probe']
-    probe.move_to(posture, seconds=3.0)
-    assert at(probe, posture, 0.005)
-
-
-def gripper(probe):
-    state = probe.state()
-    return state.gripper_measured_valid, round(state.gripper_measured, 3)
+def note(stack, text):
+    stack['results'].append(text)
 
 
 def test_the_stack_runs_the_reset_node_and_its_watchdog(stack):
@@ -119,28 +98,7 @@ def test_held_the_arm_reaches_the_ready_posture_from_another_posture(stack, inde
     assert not any(s.state == S.STATE_STOPPING for _, s in watch.since(start, stack['count']))
     events = [s.last_event for _, s in watch.since(start, stack['count'])]
     assert S.EVENT_START in events and events[-1] == S.EVENT_ARRIVED
-    RESULTS.append(f'reach {index}: arrived {when - start:.2f} s after the recording began')
-
-
-def stopped_midway(stack, name, phases, reason):
-    """From FAR, hold, then end the hold the way ``phases`` say; return the stop's numbers."""
-    probe, watch = stack['probe'], stack['watch']
-    ready_after(stack, FAR)
-    start, begins, _ = play(stack, name, phases)
-    when, stopping = watch.wait(start, S.STATE_STOPPING, 5.0, after=stack['count'])
-    assert stopping.reason == reason, describe(stopping)
-    travel, rest, speed, tool = stop_measure(probe, when)
-    _, stopped = watch.wait(start, S.STATE_STOPPED, 10.0, after=stack['count'])
-    assert stopped.reason == reason, describe(stopped)
-    assert not at(probe, READY, 0.05), 'it ran on to the posture'
-    assert speed > 0.05, f'the arm was not moving when the hold ended ({speed:.3f} rad/s)'
-    release = start + begins[2]
-    RESULTS.append(
-        f'{name}: hold ended at {begins[2]:.2f} s; stop request {when - release:+.3f} s after '
-        f'it; joint speed then {speed:.3f} rad/s; joints travelled {travel:.4f} rad and the tool '
-        f'{tool * 1000.0:.1f} mm after the request; rest {rest:.2f} s after it (node: '
-        f'{stopped.stop_distance:.4f} rad, {stopped.stop_time:.2f} s)')
-    return travel, rest, when - release
+    note(stack, f'reach {index}: arrived {when - start:.2f} s after the recording began')
 
 
 def test_release_midway_stops_the_arm_within_a_measured_distance(stack):
@@ -197,8 +155,8 @@ def test_a_release_during_planning_cancels_the_goal(stack):
     watch.wait(start, S.STATE_STOPPED, 10.0, S.REASON_RELEASED, after=after)
     moved = probe.max_joint_change(start, before)
     seen = sorted({s.state for _, s in watch.since(start, stack['count'])})
-    RESULTS.append(f'release during planning: the joints moved {moved:.4f} rad; states seen '
-                   f'{seen} (mock planning can end before the release is seen)')
+    note(stack, f'release during planning: the joints moved {moved:.4f} rad; states seen '
+                f'{seen} (mock planning can end before the release is seen)')
     assert moved < 0.02, moved
 
 
@@ -208,16 +166,6 @@ def test_already_at_the_posture_nothing_is_sent(stack):
     start, _, _ = play(stack, 'already', [phase(0.3), phase(1.0, 1.0), phase(0.3)])
     watch.wait(start, S.STATE_ARRIVED, 5.0, S.REASON_ALREADY_THERE, after=stack['count'])
     assert not watch.goals_since(start)
-
-
-def refused(stack, name, reason, goal=False):
-    """Press and hold; expect a refusal for ``reason`` (``goal``: MoveIt refuses the goal)."""
-    watch = stack['watch']
-    start, _, _ = play(stack, name, [phase(0.3), phase(1.5, 1.0), phase(0.3)])
-    _, state = watch.wait(start, S.STATE_REFUSED, 5.0, after=stack['count'])
-    assert state.reason == reason, describe(state)
-    assert len(watch.goals_since(start)) == (1 if goal else 0)
-    return start
 
 
 def test_a_press_while_armed_is_refused(stack):
@@ -262,13 +210,6 @@ def test_a_posture_moveit_considers_in_collision_moves_nothing_and_says_so(stack
     ready_after(stack, READY)
 
 
-def kill(stack, executable):
-    pids = node_pids(executable, pgid=os.getpgid(stack['launch'].proc.pid))
-    assert len(pids) == 1, (executable, pids)
-    os.kill(pids[0], signal.SIGKILL)
-    return time.monotonic()
-
-
 def test_the_reset_node_killed_midway_is_stopped_by_the_watchdog(stack):
     probe, watch = stack['probe'], stack['watch']
     ready_after(stack, FAR)
@@ -284,9 +225,9 @@ def test_the_reset_node_killed_midway_is_stopped_by_the_watchdog(stack):
     finally:
         process.stop()
     report = next(m.last_report for _, m in reversed(watch.alive_since(killed)) if m.last_report)
-    RESULTS.append(f'reset node killed: joint speed then {speed:.3f} rad/s; joints travelled '
-                   f'{travel:.4f} rad and the tool {tool * 1000.0:.1f} mm after the kill; rest '
-                   f'{rest:.2f} s after it; watchdog: {report}')
+    note(stack, f'reset node killed: joint speed then {speed:.3f} rad/s; joints travelled '
+                f'{travel:.4f} rad and the tool {tool * 1000.0:.1f} mm after the kill; rest '
+                f'{rest:.2f} s after it; watchdog: {report}')
     assert speed > 0.05 and not at(probe, READY, 0.05)
     assert rest < 1.5 and travel < 0.3, (rest, travel)
     assert "for this goal's own id" in report
@@ -322,9 +263,9 @@ def test_the_watchdog_killed_midway_stops_the_motion(stack):
         watch.wait(killed, S.STATE_STOPPED, 10.0, S.REASON_WATCHDOG_LOST, after=stack['count'])
     finally:
         process.stop()
-    RESULTS.append(f'watchdog killed: stop request {when - killed:.2f} s after the kill; joints '
-                   f'travelled {travel:.4f} rad, tool {tool * 1000.0:.1f} mm; rest {rest:.2f} s '
-                   'after the kill')
+    note(stack, f'watchdog killed: stop request {when - killed:.2f} s after the kill; joints '
+                f'travelled {travel:.4f} rad, tool {tool * 1000.0:.1f} mm; rest {rest:.2f} s '
+                'after the kill')
     assert when - killed < 0.8 and not at(probe, READY, 0.05)
 
 

@@ -27,13 +27,14 @@ import itertools
 import json
 import math
 import os
+import signal
 import sys
 import threading
 import time
 
 from ranger_xarm_teleop_interfaces.msg import EpisodeState, ResetState, ResetWatchdog
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from stack_helpers import ARM_JOINTS, READY, SERVO_FIXTURES
+from stack_helpers import ARM_JOINTS, node_pids, READY, replay_file, SERVO_FIXTURES
 
 sys.path.insert(0, SERVO_FIXTURES)
 import make_fixtures as mf  # noqa: E402, I100
@@ -235,6 +236,74 @@ def contact_paths():
         return [json.loads(line) for line in handle if line.strip()]
 
 
-__all__ = ['ARM_JOINTS', 'READY', 'phase', 'write_recording', 'ResetWatcher', 'describe',
+# ---- steps of the stack tests; ``stack`` is the module fixture's dict ----
+
+S = ResetState
+
+
+def play(stack, name, phases, wait=True):
+    """Write and play a recording; return (start, phase begins, replay)."""
+    path = str(stack['logs'] / f'{name}.jsonl')
+    begins = write_recording(path, phases)
+    stack['count'] = stack['watch'].count()      # events before this recording
+    start = time.monotonic()
+    process = replay_file(stack['env'], path, str(stack['logs'] / f'{name}.log'),
+                          start_delay=0.0)
+    if wait:
+        assert process.wait(sum(p[0] for p in phases) + 20.0) == 0, process.output()
+    return start, begins, process
+
+
+def ready_after(stack, posture):
+    probe = stack['probe']
+    probe.move_to(posture, seconds=3.0)
+    assert at(probe, posture, 0.005)
+
+
+def gripper(probe):
+    state = probe.state()
+    return state.gripper_measured_valid, round(state.gripper_measured, 3)
+
+
+def stopped_midway(stack, name, phases, reason):
+    """From stack['far'], hold, then end the hold as ``phases`` say; return the stop's numbers."""
+    probe, watch = stack['probe'], stack['watch']
+    ready_after(stack, stack['far'])
+    start, begins, _ = play(stack, name, phases)
+    when, stopping = watch.wait(start, S.STATE_STOPPING, 5.0, after=stack['count'])
+    assert stopping.reason == reason, describe(stopping)
+    travel, rest, speed, tool = stop_measure(probe, when)
+    _, stopped = watch.wait(start, S.STATE_STOPPED, 10.0, after=stack['count'])
+    assert stopped.reason == reason, describe(stopped)
+    assert not at(probe, READY, 0.05), 'it ran on to the posture'
+    assert speed > 0.05, f'the arm was not moving when the hold ended ({speed:.3f} rad/s)'
+    release = start + begins[2]
+    stack['results'].append(
+        f'{name}: hold ended at {begins[2]:.2f} s; stop request {when - release:+.3f} s after '
+        f'it; joint speed then {speed:.3f} rad/s; joints travelled {travel:.4f} rad and the tool '
+        f'{tool * 1000.0:.1f} mm after the request; rest {rest:.2f} s after it (node: '
+        f'{stopped.stop_distance:.4f} rad, {stopped.stop_time:.2f} s)')
+    return travel, rest, when - release
+
+
+def refused(stack, name, reason, goal=False):
+    """Press and hold; expect a refusal for ``reason`` (``goal``: MoveIt refuses the goal)."""
+    watch = stack['watch']
+    start, _, _ = play(stack, name, [phase(0.3), phase(1.5, 1.0), phase(0.3)])
+    _, state = watch.wait(start, S.STATE_REFUSED, 5.0, after=stack['count'])
+    assert state.reason == reason, describe(state)
+    assert len(watch.goals_since(start)) == (1 if goal else 0)
+    return start
+
+
+def kill(stack, executable):
+    pids = node_pids(executable, pgid=os.getpgid(stack['launch'].proc.pid))
+    assert len(pids) == 1, (executable, pids)
+    os.kill(pids[0], signal.SIGKILL)
+    return time.monotonic()
+
+
+__all__ = ['ARM_JOINTS', 'S', 'play', 'ready_after', 'gripper', 'stopped_midway', 'refused',
+           'kill', 'READY', 'phase', 'write_recording', 'ResetWatcher', 'describe',
            'EpisodeStandIn', 'stop_measure', 'at', 'off_ready', 'contact_paths', 'STATE',
            'REASON']
