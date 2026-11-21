@@ -56,6 +56,9 @@ def generate_launch_description():
             'reset', default_value='false',
             description='Hold the right thumbstick pulled back (disarmed) to return the arm to '
                         'the ready posture (G-16).'),
+        DeclareLaunchArgument(
+            'feedback', default_value='true',
+            description='Start the operator feedback node (teleop_core.launch.py, feedback).'),
         DeclareLaunchArgument('record_profile', default_value='gazebo'),
         DeclareLaunchArgument('record_data_dir', default_value=''),
         DeclareLaunchArgument('record_session', default_value=''),
@@ -78,6 +81,7 @@ def generate_launch_description():
                 'teleop_params_file': LaunchConfiguration('teleop_params_file'),
                 'gripper_enabled': LaunchConfiguration('gripper_enabled'),
                 'reset': LaunchConfiguration('reset'),
+                'feedback': LaunchConfiguration('feedback'),
                 'moveit_gripper_controller': 'xarm_xarm_gripper_traj_controller',
             }.items()),
         IncludeLaunchDescription(

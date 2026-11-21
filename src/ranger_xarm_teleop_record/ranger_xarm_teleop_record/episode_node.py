@@ -31,7 +31,7 @@ import math
 import os
 import shutil
 import time
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional
 
 import numpy as np
 from ranger_xarm_teleop_interfaces.msg import EpisodeState, InputStatus, TeleopState
@@ -58,7 +58,8 @@ from .linkstats import link_quality
 from .parameters import NAMES, ParameterRead, TYPES, VALUES
 from .profile import load_checks, load_profile, recorded
 from .provenance import git_info, sha256_file, sha256_text
-from .streams import FieldPresence, OPTIONAL_FIELDS
+from .streams import FieldPresence
+from .streamwatch import StreamWatch
 
 # Joy as the teleop node reads it (contract: best effort): a lost message is not a release.
 JOY_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST,
@@ -84,7 +85,6 @@ FAULT_HOLDS = {3, 4} | set(range(6, 21))      # TeleopState.HOLD_*: not 0, 1, 2 
 HOLD_NAMES = {v: k[len('HOLD_'):] for k, v in vars(TeleopState).items()
               if k.startswith('HOLD_') and isinstance(v, int)}
 SUBSCRIBED_KINDS = ('teleop_state', 'joint_states', 'camera_info', 'input_status', 'joy')
-RATE_WINDOW_S = 2.0
 PUBLISH_PERIOD_S = 0.2
 CLOCK_PAIR_PERIOD_S = 1.0
 RECORDER_TIMEOUT_S = 5.0
@@ -106,58 +106,6 @@ def _param_value(value):
             ParameterType.PARAMETER_DOUBLE_ARRAY: lambda: list(value.double_array_value),
             ParameterType.PARAMETER_STRING_ARRAY: lambda: list(value.string_array_value),
             }.get(t, lambda: None)()
-
-
-class StreamWatch:
-    """Arrival stamps of one subscribed stream: rate for readiness, counts for an episode."""
-
-    def __init__(self, name: str, spec: dict):
-        """Watch the profile stream ``name``."""
-        self.name, self.spec = name, spec
-        self.recent: List[float] = []          # header stamps, last RATE_WINDOW_S
-        self.last_arrival: Optional[float] = None
-        self.episode: Optional[List[float]] = None
-        # Only joint states are fed field by field (on_joint_states); another kind gets no
-        # presence, so a required field there cannot hold START refused forever.
-        keys = OPTIONAL_FIELDS['joint_states'] if spec.get('kind') == 'joint_states' else ()
-        self.presence = FieldPresence(keys) if keys else None       # since start-up
-        self.episode_presence: Optional[FieldPresence] = None        # in the episode
-
-    def fields(self, values: Dict[str, Sequence[float]]) -> None:
-        """Note which optional fields of one message have a finite value."""
-        if self.presence is not None:
-            self.presence.add(values)
-            if self.episode_presence is not None:
-                self.episode_presence.add(values)
-
-    def add(self, stamp: float, arrival: float) -> None:
-        """Note one message."""
-        self.last_arrival = arrival
-        self.recent.append(stamp)
-        cut = stamp - RATE_WINDOW_S
-        while self.recent and (self.recent[0] < cut or self.recent[0] > stamp + 1.0):
-            self.recent.pop(0)
-        if self.episode is not None:
-            self.episode.append(stamp)
-
-    def problem(self, now: float) -> Optional[str]:
-        """Return why this stream is not usable now, or None."""
-        if self.last_arrival is None:
-            return f'{self.name}: no message on {self.spec["topic"]}'
-        if now - self.last_arrival > 1.0:
-            return f'{self.name}: silent for {now - self.last_arrival:.1f} s'
-        for key in self.spec.get('required_fields') or []:
-            if self.presence is not None and not self.presence.last.get(key, False):
-                return (f'{self.name}: required field {key} has no finite value in the '
-                        'newest message')
-        rate = self.spec.get('rate_hz')
-        if rate is None or len(self.recent) < 2:
-            return None if rate is None else f'{self.name}: too few messages to judge the rate'
-        span = self.recent[-1] - self.recent[0]
-        measured = (len(self.recent) - 1) / span if span > 0 else 0.0
-        if measured < 0.9 * float(rate):
-            return f'{self.name}: {measured:.1f} Hz, below its nominal {float(rate):g} Hz'
-        return None
 
 
 class EpisodeNode(Node):
