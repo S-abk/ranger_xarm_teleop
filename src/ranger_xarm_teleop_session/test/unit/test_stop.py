@@ -328,6 +328,48 @@ def test_after_stop_finds_open_files_and_episodes_still_recording(tmp_path):
     assert 'PROBLEMS' in report and 'PASS' not in report
 
 
+def test_no_probe_report_or_an_owner_not_ok_stops_the_session_whatever_the_policy():
+    ok = sv.pf.Item('owner', 'Teleop disarmed, MoveIt owns the arm', sv.pf.OK, 'x')
+    armed = sv.pf.Item('owner', 'Teleop disarmed, MoveIt owns the arm', sv.pf.MISSING,
+                       'armed True, owner MoveIt')
+    unknown = sv.pf.Item('owner', 'Teleop disarmed, MoveIt owns the arm', sv.pf.UNKNOWN, 'n')
+    assert sv.stack_refusal({'teleop': {}}, [ok]) is None
+    assert 'no report' in sv.stack_refusal(None, [ok])
+    assert 'armed True' in sv.stack_refusal({}, [armed])
+    assert 'disarmed with MoveIt' in sv.stack_refusal({}, [unknown])
+    assert sv.stack_refusal({}, []) is not None
+
+
+# A supervisor that, asked to stop, writes a report with a problem and ends.
+REPORTING = (
+    'import os, signal, sys, time\n'
+    'def stop(*_):\n'
+    '    open(os.path.join(sys.argv[1], "stop_report.txt"), "w").write('
+    '"STOP REPORT\\nPROBLEMS:\\n- stack: escalated")\n'
+    '    sys.exit(0)\n'
+    'signal.signal(signal.SIGINT, stop)\n'
+    'print("ready", flush=True)\n'
+    'time.sleep(60)\n')
+
+
+def test_stop_fails_when_the_supervisors_report_lists_a_problem(mark, tmp_path):
+    env = dict(os.environ, **{procs.MARK_VAR: mark})
+    sup = subprocess.Popen([sys.executable, '-c', REPORTING, str(tmp_path)], env=env,
+                           stdout=subprocess.PIPE, text=True)
+    try:
+        assert sup.stdout.readline().strip() == 'ready'
+        state_file = str(tmp_path / 'state.json')
+        procs.write_state(state_file, {'session': 'S', 'mark': mark, 'supervisor_pid': sup.pid,
+                                       'log_dir': str(tmp_path), 'children': []})
+        said = []
+        assert cli.stop_command(state_file, out=said.append) == sv.EXIT_FAILED
+        assert any('PROBLEMS' in s for s in said)
+        assert not os.path.exists(state_file)
+    finally:
+        sup.kill()
+        sup.wait()
+
+
 class HungUp:
     """A terminal after SIGHUP: every write fails."""
 

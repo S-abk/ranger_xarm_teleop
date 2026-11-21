@@ -634,15 +634,10 @@ class Supervisor:
         self.sleep(0.5)          # the rigid-pairs line, when the stack is slower than the probe
         items = self.stack_items(report)
         self.show(items)
-        if report is None:
-            raise Refused('the probe gave no report, so the stack could not be checked; its '
-                          f'log ends with:\n{probe.last_lines()}')
-        owner = next(i for i in items if i.key == 'owner')
-        if owner.status != pf.OK:
-            # INV-1: the stack must come up disarmed with MoveIt as owner. Not a matter of
-            # going on anyway (--yes): the launcher stops.
-            raise Refused(f'stopped: the stack did not come up disarmed with MoveIt as owner '
-                          f'({owner.detail})')
+        why = stack_refusal(report, items)
+        if why:
+            raise Refused(why + (f'; the probe log ends with:\n{probe.last_lines()}'
+                                 if report is None else ''))
         self.gate('at stack ready', items)
         self.set_phase('stack_ready')
         self.say('STACK READY: the probe has left; nothing joins the ROS graph from here.\n'
@@ -783,6 +778,22 @@ class Supervisor:
             pass
         procs.clear_state(self.state_file, self.mark)
         return problems
+
+
+def stack_refusal(report: Optional[dict], items: List[pf.Item]) -> Optional[str]:
+    """
+    Return why the session stops at the stack items whatever the policy, or None.
+
+    No probe report: the stack could not be checked. INV-1: the stack must come up disarmed with
+    MoveIt as owner; that is not a matter of going on anyway (--yes).
+    """
+    if report is None:
+        return 'stopped: the probe gave no report, so the stack could not be checked'
+    owner = next((i for i in items if i.key == 'owner'), None)
+    if owner is None or owner.status != pf.OK:
+        return ('stopped: the stack did not come up disarmed with MoveIt as owner ('
+                + (owner.detail if owner else 'not judged') + ')')
+    return None
 
 
 def stop_report(session_dir: Optional[str], problems: List[str], supervisor_gone: bool,

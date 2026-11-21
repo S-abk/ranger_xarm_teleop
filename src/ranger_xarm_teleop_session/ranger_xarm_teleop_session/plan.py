@@ -178,6 +178,9 @@ def check_options(opts: Options, record_profile: Optional[dict]) -> List[str]:
         raise PlanError(f'--role {opts.role!r}: one of {", ".join(ROLES)}')
     if not 0 < int(opts.port) < 65536:
         raise PlanError(f'--port {opts.port}: not a port')
+    if ':' in opts.listen:
+        raise PlanError(f'--listen {opts.listen}: an IPv4 address or a host name (an IPv6 '
+                        "address would not fit the bridge's relay_url)")
     warnings = []
     if opts.role == 'relay':
         if opts.relay_url:

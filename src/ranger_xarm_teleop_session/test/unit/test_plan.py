@@ -148,6 +148,11 @@ def test_the_bridge_reaches_a_relay_listening_on_another_address():
     assert pl.args_of(steps['bridge'].argv) == {}           # 127.0.0.1 reaches 0.0.0.0
 
 
+def test_an_ipv6_listen_address_is_refused():
+    with pytest.raises(pl.PlanError, match='IPv4 address or a host name'):
+        pl.check_options(pl.Options(role='relay', listen='::1'), None)
+
+
 def test_the_relay_role_starts_the_relay_only():
     steps = pl.build_plan(pl.Options(role='relay'), checkout=CHECKOUT)
     assert [s.name for s in steps] == ['relay']

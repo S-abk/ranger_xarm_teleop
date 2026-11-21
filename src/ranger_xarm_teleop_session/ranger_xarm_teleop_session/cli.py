@@ -228,6 +228,7 @@ def start_command(args, checkout: Optional[str], state_file: str, argv) -> int:
     sup.write_state()
     try:
         sup.critical = False
+        sup.check_stop()            # a signal that came while the handlers were being set
         local = local_items(opts, sup, record_profile, policy == 'ask' and not args.keep_labels)
         sim = sup_sim(opts)
         sup.critical = True         # until run() is in its own try
