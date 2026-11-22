@@ -111,3 +111,16 @@ def test_refuse_teleop_refuses_every_switch_to_teleop(ros):
         assert 'teleop motion is disabled' in detail and 'motion_enabled:=true' in detail
     finally:
         node.destroy_node()
+
+
+def test_a_request_before_the_timer_saw_the_outside_activation_is_refused(ros, monkeypatch):
+    """The refusal reads the controller states of the request, not the timer's last look."""
+    node, calls, published = make_mux(monkeypatch, [MuxStatus.OK] * 10)
+    try:
+        assert node.outside == ''                   # no timer tick since the reactivation
+        status, detail = node.set_owner(Owner.TELEOP)
+        assert status == MuxStatus.SWITCH_FAILED
+        assert 'active without a switch by the mux' in detail
+        assert calls == []
+    finally:
+        node.destroy_node()

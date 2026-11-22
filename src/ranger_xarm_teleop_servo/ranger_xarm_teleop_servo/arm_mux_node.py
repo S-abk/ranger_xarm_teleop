@@ -373,10 +373,16 @@ class ArmMuxNode(Node):
             return MuxStatus.SWITCH_FAILED, 'the controller manager did not answer'
         with self.lock:
             self.owner = current
-        if current == wanted:
-            if wanted == Owner.TELEOP and self.outside:
+        if wanted == Owner.TELEOP:
+            # Decided from the states just read, not from the timer's last look: an outside
+            # activation that happened since the last tick must be refused too (G-17).
+            teleop = [self.teleop_controller] + ([self.teleop_gripper] if self.gripper else [])
+            active = outside_activation(states, teleop, self.teleop_by_mux)
+            if active:
                 return MuxStatus.SWITCH_FAILED, (
-                    f'{self.outside}: it is deactivated before teleop may have the arm')
+                    f'{", ".join(active)} active without a switch by the mux (an outside '
+                    'switch): it is deactivated before teleop may have the arm')
+        if current == wanted:
             return MuxStatus.OK, ''
         # "Stopped" needs an unbroken run of still joint-state samples. If that run is
         # not long enough yet (the arm has just stopped, or the stream had a hole), wait

@@ -548,6 +548,8 @@ class TeleopNode(Node):
         self.gripper_state = grip.GripperState()
         self.owned_while_armed = False      # G-17: teleop owned the arm in this arming
         self.asked_for_arm = False          # teleop asked the mux for the arm (may hand it back)
+        self.owner_stamp_ns = 0             # stamp of the newest mux report
+        self.owner_answer_ns = 0            # ROS time of the last successful ownership answer
         self.gripper_output: Optional[grip.GripperOutput] = None
         self.gripper_tripped = False        # a frame since the last cycle tripped (any clutch)
         self.owner_gripper = False          # the mux swaps the gripper with the arm
@@ -929,6 +931,7 @@ class TeleopNode(Node):
             self._compare_description(msg.data, 'a later /robot_description')
 
     def _on_owner(self, msg: ArmOwner) -> None:
+        self.owner_stamp_ns = stamp_key(msg.header.stamp)
         self.owner = msg.owner
         self.owner_gripper = bool(msg.gripper)
         self.owner_arrival = self.mono()
@@ -1925,7 +1928,8 @@ class TeleopNode(Node):
         reported = (self.owner_arrival is not None
                     and now - self.owner_arrival <= OWNER_TIMEOUT_S)
         if (reported and owner != ArmOwner.OWNER_TELEOP and self.owner_request_since is None
-                and owner != ArmOwner.OWNER_SWITCHING):
+                and owner != ArmOwner.OWNER_SWITCHING
+                and self.owner_stamp_ns >= self.owner_answer_ns):
             # Not while a request is out: the mux's report from before the switch would clear
             # it, and an arm teleop asked for would then never be handed back.
             self.asked_for_arm = False
@@ -1983,6 +1987,8 @@ class TeleopNode(Node):
         self.mux_status = result.status
         if result.success:
             self.asked_for_arm = wanted == ArmOwner.OWNER_TELEOP
+            # A mux report stamped before this answer says nothing about the switch it made.
+            self.owner_answer_ns = self.get_clock().now().nanoseconds
             self.owner = result.owner
             self.owner_arrival = self.mono()
             self.get_logger().info(

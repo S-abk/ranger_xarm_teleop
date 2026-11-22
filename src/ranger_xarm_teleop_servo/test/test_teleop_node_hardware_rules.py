@@ -121,9 +121,11 @@ def armed_node(ros):
     return node
 
 
-def report(node, owner, now):
+def report(node, owner, now, stamp_ns=None):
     node.owner = owner
     node.owner_arrival = now
+    node.owner_stamp_ns = (node.get_clock().now().nanoseconds if stamp_ns is None
+                           else stamp_ns)
     node.manage_ownership(now, node.current_owner(now))
 
 
@@ -272,5 +274,23 @@ def test_with_no_owner_reported_an_arming_teleop_asks_the_mux(ros):
     try:
         report(node, ArmOwner.OWNER_NONE, 5.0)
         assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP]
+    finally:
+        node.close()
+
+
+def test_a_report_from_before_the_answer_does_not_cost_the_hand_back(ros):
+    """A MOVEIT report stamped before teleop's successful answer, processed after it."""
+    node = armed_node(ros)
+    try:
+        report(node, ArmOwner.OWNER_MOVEIT, 10.0)
+        stale = node.get_clock().now().nanoseconds        # the mux's report before the switch
+        node._owner_answered(_Done(ArmOwner.OWNER_TELEOP), ArmOwner.OWNER_TELEOP)
+        report(node, ArmOwner.OWNER_MOVEIT, 10.05, stamp_ns=stale)
+        assert node.asked_for_arm
+        report(node, ArmOwner.OWNER_TELEOP, 10.1)
+        node._disarm('test')
+        node.owner_retry_after = 0.0
+        report(node, ArmOwner.OWNER_TELEOP, 11.0)
+        assert node.owner_client.requests[-1] == ArmOwner.OWNER_MOVEIT
     finally:
         node.close()
