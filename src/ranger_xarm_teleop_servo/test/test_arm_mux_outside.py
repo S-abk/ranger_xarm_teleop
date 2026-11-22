@@ -124,3 +124,54 @@ def test_a_request_before_the_timer_saw_the_outside_activation_is_refused(ros, m
         assert calls == []
     finally:
         node.destroy_node()
+
+
+def activity(states):
+    """Return a ControllerManagerActivity with the given controller states."""
+    from controller_manager_msgs.msg import ControllerManagerActivity, NamedLifecycleState
+    from lifecycle_msgs.msg import State
+    msg = ControllerManagerActivity()
+    msg.controllers = [NamedLifecycleState(name=name, state=State(label=label))
+                       for name, label in states.items()]
+    return msg
+
+
+def test_a_deactivation_between_two_reads_is_seen_from_the_activity_topic(ros, monkeypatch):
+    """The driver switches everything off and on between two timer ticks: still outside."""
+    node, calls, published = make_mux(monkeypatch, [MuxStatus.REFUSED_MOVING] * 10)
+    try:
+        node.teleop_by_mux = True                   # the mux had switched the arm to teleop
+        node._on_activity(activity({'teleop_arm_controller': 'inactive',
+                                    'xarm6_traj_controller': 'inactive'}))
+        assert node.teleop_by_mux is False
+        node._on_activity(activity(OUTSIDE))        # the driver's reactivation
+        node.owner_from = lambda states: Owner.TELEOP
+        node._on_timer()
+        assert published[-1].owner == ArmOwner.OWNER_NONE
+        status, detail = node.set_owner(Owner.TELEOP)
+        assert status == MuxStatus.SWITCH_FAILED
+    finally:
+        node.destroy_node()
+
+
+def test_the_mux_own_switch_is_not_forgotten_while_teleop_stays_active(ros, monkeypatch):
+    node, calls, published = make_mux(monkeypatch, [MuxStatus.OK] * 10)
+    try:
+        node.teleop_by_mux = True
+        node._on_activity(activity(OUTSIDE))        # teleop active: still the mux's
+        assert node.teleop_by_mux is True
+    finally:
+        node.destroy_node()
+
+
+def test_only_the_arm_teleop_controller_counts_as_an_outside_activation(ros, monkeypatch):
+    """A gripper-only split stays the split rule's (reported, resolved to MoveIt on request)."""
+    node, calls, published = make_mux(monkeypatch, [MuxStatus.OK] * 10)
+    try:
+        split = {'xarm6_traj_controller': 'active', 'teleop_arm_controller': 'inactive',
+                 'teleop_gripper_controller': 'active'}
+        node.read_states = lambda: dict(split)
+        node.restore_order(dict(split))
+        assert node.outside == '' and calls == []
+    finally:
+        node.destroy_node()

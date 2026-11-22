@@ -55,6 +55,7 @@ import time
 from typing import Dict, Optional
 
 from action_msgs.msg import GoalStatusArray
+from controller_manager_msgs.msg import ControllerManagerActivity
 from controller_manager_msgs.srv import ListControllers, SwitchController
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
@@ -78,6 +79,11 @@ ACTION_STATUS_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                                history=HistoryPolicy.KEEP_LAST, depth=1,
                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
 TELEOP_STATE_TIMEOUT_S = 0.5
+# As the controller manager publishes ~/activity (reliable, transient local); deeper on this
+# side so that two switches in quick succession are both taken in.
+ACTIVITY_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                          history=HistoryPolicy.KEEP_LAST, depth=10,
+                          durability=DurabilityPolicy.TRANSIENT_LOCAL)
 DEFAULT_JOINTS = [f'xarm_joint{i}' for i in range(1, 7)]
 
 
@@ -166,6 +172,9 @@ class ArmMuxNode(Node):
                 lambda msg, name=controller: self._on_goal_status(name, msg),
                 ACTION_STATUS_QOS)
         self.observer.create_subscription(TeleopState, STATE_TOPIC, self._on_teleop_state, 10)
+        # Every controller switch, as the controller manager reports it (G-17 bookkeeping).
+        self.observer.create_subscription(ControllerManagerActivity, f'{manager}/activity',
+                                          self._on_activity, ACTIVITY_QOS)
         self.list_client = self.client.create_client(ListControllers,
                                                      f'{manager}/list_controllers')
         self.switch_client = self.client.create_client(SwitchController,
@@ -279,6 +288,29 @@ class ArmMuxNode(Node):
 
     # ---- an outside switch (G-17) ----
 
+    def note_states(self, states: Optional[Dict[str, str]]) -> None:
+        """
+        Forget that the mux switched the arm to teleop once any teleop controller is not active.
+
+        A teleop ownership the mux made has every teleop controller active; one of them seen
+        inactive means it ended, by the mux or not, and a later activation is not the mux's.
+        """
+        if not states:
+            return
+        teleop = [self.teleop_controller] + ([self.teleop_gripper] if self.gripper else [])
+        if not all(states.get(name) == 'active' for name in teleop):
+            with self.lock:
+                self.teleop_by_mux = False
+
+    def _on_activity(self, msg: ControllerManagerActivity) -> None:
+        """
+        Take in the controller manager's own report of every switch (observer thread).
+
+        Polling can miss a deactivation followed by a reactivation between two reads (a read
+        not answered, or the timer held up by a request); the manager publishes each switch.
+        """
+        self.note_states({c.name: c.state.label for c in msg.controllers})
+
     def restore_order(self, states: Dict[str, str]) -> None:
         """
         Report a teleop controller activated outside the mux; deactivate it once still.
@@ -286,10 +318,8 @@ class ArmMuxNode(Node):
         Only a deactivation is ever requested here, strict, and only with every arm joint
         still and no goal executing; nothing is activated in response.
         """
-        teleop = [self.teleop_controller] + ([self.teleop_gripper] if self.gripper else [])
-        if not any(states.get(name) == 'active' for name in teleop):
-            self.teleop_by_mux = False
-        active = outside_activation(states, teleop, self.teleop_by_mux)
+        self.note_states(states)
+        active = outside_activation(states, [self.teleop_controller], self.teleop_by_mux)
         if not active:
             if self.outside:
                 self.get_logger().info('the outside activation of the teleop controller is '
@@ -373,11 +403,11 @@ class ArmMuxNode(Node):
             return MuxStatus.SWITCH_FAILED, 'the controller manager did not answer'
         with self.lock:
             self.owner = current
+        self.note_states(states)
         if wanted == Owner.TELEOP:
             # Decided from the states just read, not from the timer's last look: an outside
             # activation that happened since the last tick must be refused too (G-17).
-            teleop = [self.teleop_controller] + ([self.teleop_gripper] if self.gripper else [])
-            active = outside_activation(states, teleop, self.teleop_by_mux)
+            active = outside_activation(states, [self.teleop_controller], self.teleop_by_mux)
             if active:
                 return MuxStatus.SWITCH_FAILED, (
                     f'{", ".join(active)} active without a switch by the mux (an outside '

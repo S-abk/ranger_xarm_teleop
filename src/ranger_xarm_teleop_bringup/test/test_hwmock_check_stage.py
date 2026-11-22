@@ -178,10 +178,17 @@ def test_the_check_tool_only_subscribes(stage2):
     process, data_dir = start_check(env, 'idle', logs, 'endpoints', '--seconds', '8',
                                     '--limits', stage2['limits'])
     try:
-        probe.wait_for(lambda: ('hw_check', '/') in probe.node.get_node_names_and_namespaces(),
-                       20.0, 'the check tool on the graph')
-        time.sleep(2.0)
         node = probe.node
+
+        def subscriptions():
+            try:
+                return {n for n, _ in node.get_subscriber_names_and_types_by_node('hw_check', '/')}
+            except Exception:  # noqa: B902 - the node is not on the graph yet
+                return set()
+        # Discovery shows a node before its endpoints: wait for the tool's own subscriptions.
+        probe.wait_for(lambda: '/joint_states' in subscriptions(), 20.0,
+                       "the check tool's subscriptions on the graph")
+        time.sleep(1.0)
         pubs = {n for n, _ in node.get_publisher_names_and_types_by_node('hw_check', '/')}
         services = node.get_service_names_and_types_by_node('hw_check', '/')
         clients = node.get_client_names_and_types_by_node('hw_check', '/')

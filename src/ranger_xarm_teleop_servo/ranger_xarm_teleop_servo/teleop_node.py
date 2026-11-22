@@ -547,9 +547,6 @@ class TeleopNode(Node):
         # Gripper teleop.
         self.gripper_state = grip.GripperState()
         self.owned_while_armed = False      # G-17: teleop owned the arm in this arming
-        self.asked_for_arm = False          # teleop asked the mux for the arm (may hand it back)
-        self.owner_stamp_ns = 0             # stamp of the newest mux report
-        self.owner_answer_ns = 0            # ROS time of the last successful ownership answer
         self.gripper_output: Optional[grip.GripperOutput] = None
         self.gripper_tripped = False        # a frame since the last cycle tripped (any clutch)
         self.owner_gripper = False          # the mux swaps the gripper with the arm
@@ -931,7 +928,6 @@ class TeleopNode(Node):
             self._compare_description(msg.data, 'a later /robot_description')
 
     def _on_owner(self, msg: ArmOwner) -> None:
-        self.owner_stamp_ns = stamp_key(msg.header.stamp)
         self.owner = msg.owner
         self.owner_gripper = bool(msg.gripper)
         self.owner_arrival = self.mono()
@@ -1927,12 +1923,6 @@ class TeleopNode(Node):
         armed = self.state.want_armed and self.params.motion_enabled
         reported = (self.owner_arrival is not None
                     and now - self.owner_arrival <= OWNER_TIMEOUT_S)
-        if (reported and owner != ArmOwner.OWNER_TELEOP and self.owner_request_since is None
-                and owner != ArmOwner.OWNER_SWITCHING
-                and self.owner_stamp_ns >= self.owner_answer_ns):
-            # Not while a request is out: the mux's report from before the switch would clear
-            # it, and an arm teleop asked for would then never be handed back.
-            self.asked_for_arm = False
         if not armed:
             self.owned_while_armed = False
         elif owner == ArmOwner.OWNER_TELEOP:
@@ -1948,11 +1938,11 @@ class TeleopNode(Node):
         if self.state.want_armed and self.params.motion_enabled:
             if owner != ArmOwner.OWNER_TELEOP:
                 wanted = ArmOwner.OWNER_TELEOP
-        elif (owner == ArmOwner.OWNER_TELEOP and self.asked_for_arm
+        elif (owner == ArmOwner.OWNER_TELEOP
               and self.servo_state in (SERVO_PAUSED, SERVO_UNKNOWN)):
-            # Only an arm teleop asked for is handed back. A teleop controller that became
-            # active some other way (G-17: the driver after an arm error) is the mux's to undo;
-            # asking for MoveIt here would activate MoveIt's controller in response to it.
+            # The mux reports TELEOP only for an arm it switched there itself: a teleop
+            # controller that became active some other way (G-17) is reported as no owner and
+            # is the mux's to undo, so handing back never answers an outside switch.
             wanted = ArmOwner.OWNER_MOVEIT
         if self.state.want_armed and not self.params.motion_enabled:
             self._disarm('motion_enabled is false')
@@ -1964,8 +1954,6 @@ class TeleopNode(Node):
                 self._disarm('the command mux is not available')
             return
         self.owner_request_since = now
-        if wanted == ArmOwner.OWNER_TELEOP:
-            self.asked_for_arm = True
         # Teleop's request window: opened when it asks for the arm, closed when it gives it back
         # (a later owner switch it did not ask for has no request: no held report counts).
         self.owner_request_ros_ns = (self.get_clock().now().nanoseconds
@@ -1986,9 +1974,6 @@ class TeleopNode(Node):
             return
         self.mux_status = result.status
         if result.success:
-            self.asked_for_arm = wanted == ArmOwner.OWNER_TELEOP
-            # A mux report stamped before this answer says nothing about the switch it made.
-            self.owner_answer_ns = self.get_clock().now().nanoseconds
             self.owner = result.owner
             self.owner_arrival = self.mono()
             self.get_logger().info(
@@ -2016,7 +2001,6 @@ class TeleopNode(Node):
             'switch outside the mux; teleop disarms and stays disarmed: press the arm button '
             'to arm again once the arm is ready')
         self.owned_while_armed = False
-        self.asked_for_arm = False
         self.owner_request_since = None
         self.owner_request_ros_ns = None
         # Teleop's own gripper command is not a reference any more: the next arming starts

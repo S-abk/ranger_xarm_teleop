@@ -121,11 +121,9 @@ def armed_node(ros):
     return node
 
 
-def report(node, owner, now, stamp_ns=None):
+def report(node, owner, now):
     node.owner = owner
     node.owner_arrival = now
-    node.owner_stamp_ns = (node.get_clock().now().nanoseconds if stamp_ns is None
-                           else stamp_ns)
     node.manage_ownership(now, node.current_owner(now))
 
 
@@ -174,13 +172,13 @@ def test_g17_a_silent_mux_holds_but_does_not_disarm(ros):
         node.close()
 
 
-def test_an_arm_teleop_did_not_ask_for_is_not_handed_back(ros):
-    """An outside activation while disarmed is the mux's to undo, not answered with MoveIt."""
+def test_an_outside_activation_reported_as_no_owner_is_not_answered(ros):
+    """The mux reports an outside activation as no owner: a disarmed teleop asks for nothing."""
     node = armed_node(ros)
     try:
         node.state = replace(node.state, want_armed=False)
         for t in (5.0, 6.0, 12.0):
-            report(node, ArmOwner.OWNER_TELEOP, t)
+            report(node, ArmOwner.OWNER_NONE, t)
         assert node.owner_client.requests == []
     finally:
         node.close()
@@ -257,7 +255,6 @@ def test_a_slow_switch_still_hands_the_arm_back_after_disarming(ros):
         assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP]
         for t in (10.02, 10.04, 10.1):                      # the switch takes a while
             report(node, ArmOwner.OWNER_MOVEIT, t)
-        assert node.asked_for_arm
         node._owner_answered(_Done(ArmOwner.OWNER_TELEOP), ArmOwner.OWNER_TELEOP)
         report(node, ArmOwner.OWNER_TELEOP, 10.2)
         node._disarm('test')
@@ -274,23 +271,5 @@ def test_with_no_owner_reported_an_arming_teleop_asks_the_mux(ros):
     try:
         report(node, ArmOwner.OWNER_NONE, 5.0)
         assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP]
-    finally:
-        node.close()
-
-
-def test_a_report_from_before_the_answer_does_not_cost_the_hand_back(ros):
-    """A MOVEIT report stamped before teleop's successful answer, processed after it."""
-    node = armed_node(ros)
-    try:
-        report(node, ArmOwner.OWNER_MOVEIT, 10.0)
-        stale = node.get_clock().now().nanoseconds        # the mux's report before the switch
-        node._owner_answered(_Done(ArmOwner.OWNER_TELEOP), ArmOwner.OWNER_TELEOP)
-        report(node, ArmOwner.OWNER_MOVEIT, 10.05, stamp_ns=stale)
-        assert node.asked_for_arm
-        report(node, ArmOwner.OWNER_TELEOP, 10.1)
-        node._disarm('test')
-        node.owner_retry_after = 0.0
-        report(node, ArmOwner.OWNER_TELEOP, 11.0)
-        assert node.owner_client.requests[-1] == ArmOwner.OWNER_MOVEIT
     finally:
         node.close()
