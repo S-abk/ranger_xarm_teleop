@@ -105,8 +105,7 @@ def test_format_results():
     text = rep.format_results([rules.Result('a', rules.PASS, '1', '2'),
                                rules.Result('b', rules.NOT_JUDGED, '3', '4', 'why')])
     lines = text.splitlines()
-    assert lines[0] == 'PASS  a: 1 (rule: 2)'
-    assert lines[1] == 'NOT JUDGED  b: 3 (rule: 4)' and 'why' in lines[2]
+    assert lines == ['PASS  a: 1 (rule: 2)', 'NOT JUDGED  b: 3 (rule: 4) -- to do: why']
 
 
 @pytest.mark.parametrize('module', PURE)
@@ -117,7 +116,7 @@ def test_pure_modules_do_not_import_ros_or_the_node(module):
              'ranger_xarm_teleop_interfaces', 'hw_check')
     pattern = r'^\s*(?:from|import)\s+(?:%s)\b' % '|'.join(map(re.escape, names))
     assert not re.search(pattern, source, re.MULTILINE)
-    assert 'import hw_check' not in source and 'from . import hw_check' not in source
+    assert not re.search(r'^\s*(?:from|import)\b.*\bhw_check\b', source, re.MULTILINE)
 
 
 def test_pure_modules_import_without_ros():
@@ -127,11 +126,12 @@ def test_pure_modules_import_without_ros():
                 for p in ('ranger_xarm_teleop_record', 'ranger_xarm_teleop_servo',
                           'ranger_xarm_teleop_bridge'))
             + 'import ranger_xarm_teleop_check.rules, ranger_xarm_teleop_check.report\n'
-              'bad = [m for m in sys.modules if m.split(".")[0] in ("rclpy", "rclpy_")]\n'
-              'sys.exit(1 if bad else 0)\n')
+              'bad = [m for m in sys.modules if m.split(".")[0] == "rclpy"]\n'
+              'bad += [m for m in sys.modules if m.endswith(".hw_check")]\n'
+              'print(bad)\nsys.exit(1 if bad else 0)\n')
     done = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
                           timeout=60)
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 0, done.stdout + done.stderr
 
 
 # INV-3: the tool only subscribes. These calls must never appear in the node module.
@@ -170,3 +170,32 @@ def test_the_node_has_no_parameter_services():
     assert 'start_parameter_services=False' in source
     assert len(re.findall(r'\bNode\(', source)) == 1
     assert source.count('create_subscription(') == 2      # the helper and the camera streams
+
+
+def _reject(constant):
+    raise ValueError('not JSON: ' + constant)
+
+
+def _populated_data():
+    from test_hw_check_rules import _cam, _teleop_data, arm_samples
+    data = _teleop_data()
+    data['arm'] = arm_samples(n=600, speed=0.5)
+    data['cameras'] = {'cam': _cam()}
+    return data
+
+
+@pytest.mark.parametrize('stage', rules.STAGES)
+def test_every_stage_report_round_trips(stage, tmp_path):
+    streams = [{'name': 'cam', 'topic': '/cam/image', 'rate_hz': 30.0,
+                'image': {'width': 848, 'height': 480, 'encoding': 'rgb8'}}]
+    opts = rules.Options(streams=streams, limits_given=True, tool_pose_timeout_s=1.0,
+                         max_lead_translation_m=0.05)
+    measures, results = rules.evaluate(stage, _populated_data(), opts)
+    start = datetime.datetime(2026, 1, 2, 3, 4, 5).astimezone()
+    doc = rep.build_report(stage, start, start, measures, results, {}, ['x'], [], 'abc',
+                           rules.exit_status(results))
+    path = rep.write_report(rep.report_path(str(tmp_path), stage, start), doc)
+    back = json.loads(open(path).read(), parse_constant=_reject)
+    assert back['stage'] == stage and len(back['rules']) == len(results)
+    assert all(r['verdict'] in ('PASS', 'FAIL', 'NOT JUDGED', 'INFO') for r in back['rules'])
+    assert stage != 'teleop' or 'lead' in back['measures']['teleop']

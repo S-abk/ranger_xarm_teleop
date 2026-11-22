@@ -60,8 +60,7 @@ def test_exit_status_order():
 
 def test_result_line_format():
     r = rules.Result('rate', FAIL, '10 Hz', '>= 5 Hz', 'do it')
-    assert r.line().splitlines()[0] == 'FAIL  rate: 10 Hz (rule: >= 5 Hz)'
-    assert 'do it' in r.line().splitlines()[1]
+    assert r.line() == 'FAIL  rate: 10 Hz (rule: >= 5 Hz) -- to do: do it'
     assert '\n' not in rules.Result('rate', PASS, '1', '2', 'x').line()
     assert rules.Result('r', NOT_JUDGED, 'm', 't', 'why').as_dict()['reason'] == 'why'
 

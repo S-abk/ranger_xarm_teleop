@@ -102,20 +102,15 @@ def stamp_offset(arrival: Sequence[float], stamps: Sequence[float]) -> Optional[
 
 # ---- stale repeats while moving -------------------------------------------------------
 
-# A sample is "moving" above this joint speed (rad/s), measured between distinct samples.
-MOVING_SPEED = 0.01
-# A moving span must last at least this long (s) to be judged.
-MIN_MOVING_SPAN = 0.5
-
-
-def stale_analysis(t: Sequence[float], pos: Sequence[Sequence[float]]) -> dict:
+def stale_analysis(t: Sequence[float], pos: Sequence[Sequence[float]],
+                   moving_speed: float, min_span: float) -> dict:
     """
     Find messages that repeat the previous positions exactly while the arm moves.
 
     A message is "moving" when the speed between the latest message whose positions differ
-    from their predecessor's (at or before it) and the next such message exceeds MOVING_SPEED
-    on any joint. Only moving spans of at least MIN_MOVING_SPAN count. A "stale repeat" is a
-    counted message whose positions equal the previous message's.
+    from their predecessor's (at or before it) and the next such message exceeds
+    ``moving_speed`` (rad/s) on any joint. Only moving spans of at least ``min_span`` (s)
+    count. A "stale repeat" is a counted message whose positions equal the previous message's.
 
     Returns: judged (a span was seen), moving_messages, moving_seconds, stale_count,
     longest_stale_messages, longest_stale_seconds, value_change_fraction (changed messages
@@ -148,7 +143,7 @@ def stale_analysis(t: Sequence[float], pos: Sequence[Sequence[float]]) -> dict:
         if dt <= 0:
             continue
         speed = max(abs(x - y) for x, y in zip(pos[b], pos[a])) / dt
-        moving[i] = speed > MOVING_SPEED
+        moving[i] = speed > moving_speed
     counted = [False] * n
     spans = 0
     seconds = 0.0
@@ -160,7 +155,7 @@ def stale_analysis(t: Sequence[float], pos: Sequence[Sequence[float]]) -> dict:
         j = i
         while j + 1 < n and moving[j + 1]:
             j += 1
-        if t[j] - t[i] >= MIN_MOVING_SPAN:
+        if t[j] - t[i] >= min_span:
             spans += 1
             seconds += t[j] - t[i]
             for k in range(i, j + 1):
@@ -245,14 +240,8 @@ def peak_acceleration(t: Sequence[float], vel: np.ndarray) -> List[Optional[floa
     return peaks
 
 
-# Oscillation: velocity sign changes only count above this speed (rad/s), within 1 s.
-OSCILLATION_SPEED = 0.02
-OSCILLATION_WINDOW = 1.0
-
-
-def sign_changes_per_window(t: Sequence[float], v: Sequence[float],
-                            min_speed: float = OSCILLATION_SPEED,
-                            window: float = OSCILLATION_WINDOW) -> int:
+def sign_changes_per_window(t: Sequence[float], v: Sequence[float], min_speed: float,
+                            window: float) -> int:
     """Return the most velocity sign changes (|v| above ``min_speed``) in any ``window`` s."""
     events = []
     last = 0
@@ -296,17 +285,14 @@ def nearest_match(times: Sequence[float], target_times: Sequence[float], tol: fl
     return out
 
 
-# Target and state share a stamp when a target is published in the cycle; allow a little more.
-MATCH_TOLERANCE = 0.010
-
-
 def lead_stats(state_t: Sequence[float], measured: Sequence[Tuple[float, float, float]],
                target_t: Sequence[float], target: Sequence[Tuple[float, float, float]],
-               tol: float = MATCH_TOLERANCE) -> dict:
+               tol: float) -> dict:
     """
     Return the translation lead (m) between target and measured tool pose, stamp-matched.
 
-    ``measured`` holds the valid measured positions at ``state_t``. Keys: count (matched
+    ``measured`` holds the valid measured positions at ``state_t``; stamps match within
+    ``tol`` seconds. Keys: count (matched
     pairs), p50, p99, max (None when no pair).
     """
     idx = nearest_match(state_t, target_t, tol)

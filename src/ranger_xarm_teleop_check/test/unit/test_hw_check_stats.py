@@ -16,9 +16,11 @@
 import math
 
 import numpy
-from ranger_xarm_teleop_check import stats
+from ranger_xarm_teleop_check import rules, stats
 
 ARM = list(stats.ARM_JOINTS)
+STALE = (rules.MOVING_SPEED, rules.MIN_MOVING_SPAN)
+OSC = (rules.OSCILLATION_SPEED, rules.OSCILLATION_WINDOW)
 
 
 def test_arm_message_classified_in_joint_order():
@@ -86,14 +88,14 @@ def _ramp(n=300, speed=0.5, hold=1, rate=150.0):
 
 def test_stale_fresh_values_pass():
     t, pos = _ramp(hold=1)
-    s = stats.stale_analysis(t, pos)
+    s = stats.stale_analysis(t, pos, *STALE)
     assert s['judged'] and s['stale_count'] == 0 and s['longest_stale_messages'] == 0
     assert s['value_change_fraction'] > 0.99
 
 
 def test_stale_every_30th_value_is_stale():
     t, pos = _ramp(hold=30)
-    s = stats.stale_analysis(t, pos)
+    s = stats.stale_analysis(t, pos, *STALE)
     assert s['judged'] and s['longest_stale_messages'] == 29
     assert s['value_change_fraction'] < 0.1
     assert s['longest_stale_seconds'] > 0.19
@@ -101,21 +103,21 @@ def test_stale_every_30th_value_is_stale():
 
 def test_stale_motionless_is_not_judged():
     t = [i / 150 for i in range(300)]
-    s = stats.stale_analysis(t, [(0.0,) * 6] * 300)
+    s = stats.stale_analysis(t, [(0.0,) * 6] * 300, *STALE)
     assert not s['judged'] and s['stale_count'] == 0
 
 
 def test_stale_short_motion_is_not_judged():
     t, pos = _ramp(n=60, hold=1)          # 0.4 s: less than the 0.5 s span
-    assert not stats.stale_analysis(t, pos)['judged']
-    assert not stats.stale_analysis([0.0], [(0.0,) * 6])['judged']
+    assert not stats.stale_analysis(t, pos, *STALE)['judged']
+    assert not stats.stale_analysis([0.0], [(0.0,) * 6], *STALE)['judged']
 
 
 def test_stale_motion_then_rest_counts_only_the_motion():
     t, pos = _ramp(n=300, hold=1)
     pos += [pos[-1]] * 200               # then still: identical repeats, not moving
     t += [300 / 150 + i / 150 for i in range(200)]
-    s = stats.stale_analysis(t, pos)
+    s = stats.stale_analysis(t, pos, *STALE)
     assert s['judged'] and s['stale_count'] == 0
 
 
@@ -142,14 +144,14 @@ def test_acceleration_of_a_constant_acceleration():
 def test_oscillation_counts_in_one_second():
     t = [i / 150 for i in range(300)]
     quiet = [0.1] * 300
-    assert stats.sign_changes_per_window(t, quiet) == 0
+    assert stats.sign_changes_per_window(t, quiet, *OSC) == 0
     # a 4 Hz sine: 8 sign changes per second
     fast = [0.5 * math.sin(2 * math.pi * 4 * x + 0.1) for x in t]
-    assert stats.sign_changes_per_window(t, fast) >= 7
+    assert stats.sign_changes_per_window(t, fast, *OSC) >= 7
     slow = [0.5 * math.sin(2 * math.pi * 1 * x + 0.1) for x in t]
-    assert stats.sign_changes_per_window(t, slow) <= 3
+    assert stats.sign_changes_per_window(t, slow, *OSC) <= 3
     tiny = [0.01 * math.sin(2 * math.pi * 4 * x + 0.1) for x in t]
-    assert stats.sign_changes_per_window(t, tiny) == 0
+    assert stats.sign_changes_per_window(t, tiny, *OSC) == 0
 
 
 def test_nearest_match_and_lead():
@@ -159,10 +161,10 @@ def test_nearest_match_and_lead():
     meas = [(0.0, 0.0, 0.0)] * 3
     tt = [1.0, 1.02, 1.04]
     tgt = [(0.03, 0.04, 0.0), (0.0, 0.0, 0.1), (0.0, 0.0, 0.0)]
-    lead = stats.lead_stats(st, meas, tt, tgt)
+    lead = stats.lead_stats(st, meas, tt, tgt, 0.01)
     assert lead['count'] == 3 and abs(lead['max'] - 0.1) < 1e-12
     assert abs(lead['p50'] - 0.05) < 1e-12
-    assert stats.lead_stats(st, meas, [], [])['count'] == 0
+    assert stats.lead_stats(st, meas, [], [], 0.01)['count'] == 0
 
 
 def test_lag_estimate_finds_the_delay():

@@ -62,6 +62,16 @@ OSCILLATION_LIMIT = 4
 # Cameras: rate share of nominal, and the share of frames after a gap of more than 2 periods.
 CAMERA_RATE_FRACTION = 0.95
 CAMERA_GAP_FRACTION = 0.01
+# A sample is "moving" above this joint speed (rad/s), measured between distinct samples; a
+# moving span must last at least this long (s) to be judged.
+MOVING_SPEED = 0.01
+MIN_MOVING_SPAN = 0.5
+# Wrist velocity sign changes only count above this speed (rad/s), within this window (s).
+OSCILLATION_SPEED = 0.02
+OSCILLATION_WINDOW = 1.0
+# A /teleop/state and a /teleop/target_pose stamp match within this many seconds (they share a
+# stamp when a target is published in the cycle).
+MATCH_TOLERANCE = 0.010
 # Wrist joints looked at for oscillation (index into the arm joints, 0-based).
 WRIST_JOINTS = (3, 5)
 
@@ -83,10 +93,10 @@ class Result:
     advice: str = ''
 
     def line(self) -> str:
-        """Return the printed result (a second line carries the advice of FAIL / NOT JUDGED)."""
+        """Return the result as one line; FAIL and NOT JUDGED end with what to do."""
         text = f'{self.verdict}  {self.rule}: {self.measured} (rule: {self.threshold})'
         if self.verdict in (FAIL, NOT_JUDGED) and self.advice:
-            text += f'\n      to do: {self.advice}'
+            text += f' -- to do: {self.advice}'
         return text
 
     def as_dict(self) -> dict:
@@ -410,9 +420,11 @@ def motion_measures(data: dict) -> dict:
     pos = [s[3] for s in arm]
     vel, source = stats.joint_velocities(t, pos, [s[4] for s in arm])
     peaks = stats.peak_acceleration(t, vel)
-    osc = {stats.ARM_JOINTS[j]: stats.sign_changes_per_window(t, vel[:, j])
+    osc = {stats.ARM_JOINTS[j]: stats.sign_changes_per_window(
+        t, vel[:, j], OSCILLATION_SPEED, OSCILLATION_WINDOW)
            for j in WRIST_JOINTS} if len(arm) else {}
-    return {'stale': stats.stale_analysis(t, pos), 'velocity_source': source,
+    return {'stale': stats.stale_analysis(t, pos, MOVING_SPEED, MIN_MOVING_SPAN),
+            'velocity_source': source,
             'peak_acceleration': dict(zip(stats.ARM_JOINTS, peaks)),
             'wrist_sign_changes_per_s': osc}
 
@@ -494,7 +506,7 @@ def teleop_measures(data: dict) -> dict:
     m = [s[4] for s in states]
     tt = [x[0] for x in targets]
     g = [x[1] for x in targets]
-    return {'lead': stats.lead_stats(st, m, tt, g),
+    return {'lead': stats.lead_stats(st, m, tt, g, MATCH_TOLERANCE),
             'lag_s': stats.lag_estimate(st, m, tt, g) if states and targets else None}
 
 
