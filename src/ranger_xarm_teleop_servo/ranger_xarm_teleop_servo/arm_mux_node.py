@@ -162,9 +162,6 @@ class ArmMuxNode(Node):
         sim_time = [self.get_parameter('use_sim_time')]
         self.observer = Node(f'{node_name}_observer', parameter_overrides=sim_time)
         self.client = Node(f'{node_name}_client', parameter_overrides=sim_time)
-        # The controller manager's switch reports on a node and thread of their own, so they
-        # are never queued behind the 150 Hz joint states of the observer.
-        self.activity = Node(f'{node_name}_activity', parameter_overrides=sim_time)
         self.switch_requested_ns = 0    # ROS time of this mux's newest switch request
         self.owner_pub = self.create_publisher(ArmOwner, OWNER_TOPIC, 10)
         # Deep enough that a stall of this process loses no sample (150 Hz for over 1 s).
@@ -177,8 +174,11 @@ class ArmMuxNode(Node):
                 ACTION_STATUS_QOS)
         self.observer.create_subscription(TeleopState, STATE_TOPIC, self._on_teleop_state, 10)
         # Every controller switch, as the controller manager reports it (G-17 bookkeeping).
-        self.activity.create_subscription(ControllerManagerActivity, f'{manager}/activity',
-                                          self._on_activity, ACTIVITY_QOS)
+        # On the client node's thread (no new node: the stack's set of nodes is fixed), so
+        # these reports are never queued behind the observer's 150 Hz joint states; that
+        # thread is otherwise busy only with this mux's own calls.
+        self.client.create_subscription(ControllerManagerActivity, f'{manager}/activity',
+                                        self._on_activity, ACTIVITY_QOS)
         self.list_client = self.client.create_client(ListControllers,
                                                      f'{manager}/list_controllers')
         self.switch_client = self.client.create_client(SwitchController,
@@ -309,7 +309,7 @@ class ArmMuxNode(Node):
 
     def _on_activity(self, msg: ControllerManagerActivity) -> None:
         """
-        Take in the controller manager's own report of every switch (observer thread).
+        Take in the controller manager's own report of every switch (client thread).
 
         Polling can miss a deactivation followed by a reactivation between two reads (a read
         not answered, or the timer held up by a request); the manager publishes each switch.
@@ -498,7 +498,7 @@ def main(args=None) -> None:
     rclpy.init(args=args)
     node = ArmMuxNode()
     threads = []
-    for other in (node.observer, node.client, node.activity):
+    for other in (node.observer, node.client):
         executor = SingleThreadedExecutor()
         executor.add_node(other)
         thread = threading.Thread(target=_spin, args=(executor,), daemon=True)
