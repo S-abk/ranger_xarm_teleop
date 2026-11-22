@@ -61,7 +61,10 @@ RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translat
             'gripper_enabled', 'gripper_joint', 'gripper_open_position',
             'gripper_closed_position', 'gripper_max_speed',
             # The reset (G-16): its speed scaling.
-            'reset_speed_scaling')
+            'reset_speed_scaling',
+            # The hardware path's guards: the node's check of the hardware values, and the
+            # mux's refusal of teleop while motion is disabled.
+            'hardware_limits', 'refuse_teleop')
 
 # Required in the limits file when gripper teleop is enabled (no default).
 GRIPPER_REQUIRED = ('gripper_open_position', 'gripper_closed_position', 'gripper_max_speed')

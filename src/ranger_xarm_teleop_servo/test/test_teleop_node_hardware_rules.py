@@ -27,8 +27,9 @@ import sys
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner
 from ranger_xarm_teleop_servo import gripper as grip
-from ranger_xarm_teleop_servo.teleop_node import (NoPublisher, PREVIEW_TOPIC, TARGET_TOPIC,
-                                                  TeleopNode)
+from ranger_xarm_teleop_servo import params
+from ranger_xarm_teleop_servo.teleop_node import (NoPublisher, PREVIEW_TOPIC, StartupRefused,
+                                                  TARGET_TOPIC, TeleopNode)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_teleop_node import LIMITS, overrides, ros  # noqa: E402, I100
@@ -90,10 +91,14 @@ class _Client:
     def call_async(self, request):
         self.requests.append(request.owner)
 
-        class _Future:
-            def add_done_callback(self, callback):
-                pass
         return _Future()
+
+
+class _Future:
+    """A request that is never answered."""
+
+    def add_done_callback(self, callback):
+        pass
 
 
 def armed_node(ros):
@@ -193,3 +198,25 @@ def test_g17_disarming_on_purpose_is_not_a_loss(ros):
         assert node.owner_client.requests[-1] == ArmOwner.OWNER_TELEOP
     finally:
         node.close()
+
+
+HARDWARE = {**LIMITS, 'tool_pose_timeout_s': 0.05, 'hardware_limits': True}
+
+
+def test_hardware_limits_complete_start_the_node(ros):
+    node = TeleopNode(node_name='teleop_hardware_complete',
+                      parameter_overrides=overrides(HARDWARE))
+    node.close()
+
+
+@pytest.mark.parametrize('missing', params.HARDWARE_REQUIRED)
+def test_hardware_limits_refuse_the_node_without_each_value(ros, missing):
+    values = {k: v for k, v in HARDWARE.items() if k != missing}
+    with pytest.raises(StartupRefused, match=missing):
+        TeleopNode(node_name='teleop_hardware_missing', parameter_overrides=overrides(values))
+
+
+def test_hardware_limits_refuse_simulation_only_values(ros):
+    values = {**HARDWARE, 'limits_are_simulation_only': True}
+    with pytest.raises(StartupRefused, match='never loads simulation-only'):
+        TeleopNode(node_name='teleop_hardware_sim', parameter_overrides=overrides(values))

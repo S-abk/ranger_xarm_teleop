@@ -88,9 +88,9 @@ from ranger_xarm_teleop_servo import calls
 from ranger_xarm_teleop_servo import gripper as grip
 from ranger_xarm_teleop_servo import keepout as ko
 from ranger_xarm_teleop_servo import params as gate_params
+from ranger_xarm_teleop_servo import preview
 from ranger_xarm_teleop_servo import rigid_pairs
 from ranger_xarm_teleop_servo import solver as dls
-from ranger_xarm_teleop_servo import preview
 from ranger_xarm_teleop_servo.gate import (Env, Frame, frame_fault, GateState, Hold, Limit,
                                            on_frame, tick)
 from ranger_xarm_teleop_servo.input_frames import (FrameAssembler, gate_frame, PAIR_WAIT_S,
@@ -346,6 +346,9 @@ class TeleopNode(Node):
         super().__init__(node_name, parameter_overrides=parameter_overrides)
         self.declare_parameter('motion_enabled', False)                 # G-1
         self.declare_parameter('limits_are_simulation_only', False)
+        # Set by the launch whenever the path is not a simulation (limits.RESERVED): then the
+        # simulation-only values are refused and every hardware value must be in the file.
+        self.declare_parameter('hardware_limits', False)
         for name in _REQUIRED_DOUBLES:
             self.declare_parameter(name, Parameter.Type.DOUBLE)         # no default (INV-10)
         for name, kind in _OPTIONAL.items():
@@ -382,6 +385,18 @@ class TeleopNode(Node):
         self.quest_frame = str(self.get_parameter('quest_frame').value)
         servo = str(self.get_parameter('servo_node').value).rstrip('/')
         self.simulation_only = bool(self.get_parameter('limits_are_simulation_only').value)
+        if bool(self.get_parameter('hardware_limits').value):
+            if self.simulation_only:
+                raise StartupRefused(
+                    'the hardware path never loads simulation-only limit values: pass your own '
+                    'limits file, filled in from hardware_limits_TEMPLATE.yaml')
+            missing = [name for name in gate_params.HARDWARE_REQUIRED
+                       if self._value_or_none(name) is None]
+            if missing:
+                raise StartupRefused(
+                    'hardware limits file incomplete: ' + ', '.join(missing) + ' not set; '
+                    'fill in every value of your copy of hardware_limits_TEMPLATE.yaml '
+                    '(docs/HARDWARE_PROCEDURE.md, "Values you supply")')
 
         values = {'motion_enabled': bool(self.get_parameter('motion_enabled').value)}
         for name in list(_REQUIRED_DOUBLES) + list(_OPTIONAL):
@@ -531,7 +546,7 @@ class TeleopNode(Node):
         # Gripper teleop.
         self.gripper_state = grip.GripperState()
         self.owned_while_armed = False      # G-17: teleop owned the arm in this arming
-        self.asked_for_arm = False          # teleop asked the mux for the arm (and may hand it back)
+        self.asked_for_arm = False          # teleop asked the mux for the arm (may hand it back)
         self.gripper_output: Optional[grip.GripperOutput] = None
         self.gripper_tripped = False        # a frame since the last cycle tripped (any clutch)
         self.owner_gripper = False          # the mux swaps the gripper with the arm
@@ -1321,7 +1336,7 @@ class TeleopNode(Node):
             self.gripper_pub.publish(msg)
 
     def preview_cycle(self, env: Env) -> None:
-        """Publish the target an engagement would command (motion disabled only), or say why not."""
+        """Publish the target an engagement would command (motion disabled), or say why not."""
         self.preview_state, target, why = preview.step(self.preview_state, self.state, env,
                                                        self.params)
         if why != self.preview_reason:

@@ -53,7 +53,7 @@ def drive(frames, gate_params, state=None, tool=TOOL_START, tool_age=0.0, rate=5
 
 
 def press_arm(n=90):
-    """A clean stream with the arm button pressed on frames 10-20, grip released."""
+    """Return a clean stream with the arm button pressed on frames 10-20, grip released."""
     return [frame(k, grip=False, arm=10 <= k <= 20) for k in range(n)]
 
 
@@ -117,7 +117,8 @@ def test_no_preview_with_a_calibration_from_another_session():
 def test_no_preview_without_fresh_joint_states_and_it_says_so():
     stale = drive(stroke(), params(motion_enabled=False), state=GateState(calibration=CAL),
                   tool_age=1.0)
-    assert all(target is None for *_, target, _ in stale) and stale[-1][4] == preview.NO_JOINT_STATE
+    assert all(target is None for *_, target, _ in stale)
+    assert stale[-1][4] == preview.NO_JOINT_STATE
     unknown = drive(stroke(), params(motion_enabled=False), state=GateState(calibration=CAL),
                     tool=None)
     assert all(target is None for *_, target, _ in unknown)
