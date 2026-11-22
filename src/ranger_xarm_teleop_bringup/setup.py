@@ -37,4 +37,9 @@ setup(
     description='Launch files and configuration for teleoperating the arm.',
     license='Apache-2.0',
     tests_require=['pytest'],
+    entry_points={
+        'console_scripts': [
+            'hwmock_gripper_proxy = ranger_xarm_teleop_bringup.hwmock_gripper_proxy:main',
+        ],
+    },
 )
