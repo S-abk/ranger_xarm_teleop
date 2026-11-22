@@ -61,7 +61,11 @@ def stage2(tmp_path_factory):
         manager_pids = node_pids('ros2_control_node', environ=f'ROS_HOME={env["ROS_HOME"]}')
         limits = write_hardware_limits(logs)
         attach = start_attach(env, 'check', limits, logs, 'disabled')
-        probe.wait_for(lambda: probe.state() is not None, 90.0, 'the teleop state')
+        # The node builds its kinematic chain and keep-out model from the description first
+        # (over a second): the stage is attached once the measured tool pose is valid.
+        probe.wait_for(lambda: probe.state() is not None
+                       and probe.state().measured_tool_pose_valid, 90.0,
+                       'the teleop state with a valid measured tool pose')
         start_input(probe, env, logs)
         yield {'probe': probe, 'env': env, 'logs': logs, 'attach': attach, 'bringup': bringup,
                'before': before, 'bringup_nodes': bringup_nodes, 'manager_pids': manager_pids,
@@ -184,7 +188,7 @@ def test_the_check_tool_only_subscribes(stage2):
         subs = {n for n, _ in node.get_subscriber_names_and_types_by_node('hw_check', '/')}
     finally:
         code, verdicts, report, output = check_report(process, data_dir, 60.0)
-    assert pubs <= {'/rosout', '/parameter_events'}, pubs
+    assert pubs <= {'/parameter_events'}, pubs          # rclpy's own; no /rosout either
     assert services == [] and clients == [], (services, clients)
     assert '/joint_states' in subs and '/controller_manager/activity' in subs
     assert output.splitlines()[0].startswith('read-only: this tool only subscribes')

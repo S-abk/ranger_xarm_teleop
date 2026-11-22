@@ -132,6 +132,7 @@ HARDWARE_TEMPLATE_MARKER = re.compile(r'^[ \t]*#[ \t]*HARDWARE LIMITS TEMPLATE[ 
                                       re.MULTILINE)
 _PROCEDURE = 'docs/HARDWARE_PROCEDURE.md, "Values you supply"'
 _SCALES = ('translation_scale_coarse', 'translation_scale_fine')
+_DEFAULT_SCALE = 1.0      # params.DEFAULTS of the teleop node, for a scale the file leaves out
 
 
 def _positive_number(value) -> bool:
@@ -186,6 +187,11 @@ def check_hardware_limits_file(path: str) -> dict:
                 problems.append(f'{path}: {name} ({values[name]!r}) is above '
                                 f'max_translation_scale ({largest!r}): lower it or raise '
                                 'max_translation_scale (a scale is never clamped into range)')
+            elif name not in values and _DEFAULT_SCALE > largest:
+                # The teleop node's default scale (1.0) applies when the file sets none.
+                problems.append(f'{path}: max_translation_scale ({largest!r}) is below the '
+                                f'default {name} ({_DEFAULT_SCALE:g}): set {name} in your file '
+                                'to at most max_translation_scale')
     if values.get('gripper_enabled') not in (None, False):
         problems.append(f'{path}: gripper_enabled is {values["gripper_enabled"]!r}: gripper '
                         'teleop is simulation only; remove it from the file')

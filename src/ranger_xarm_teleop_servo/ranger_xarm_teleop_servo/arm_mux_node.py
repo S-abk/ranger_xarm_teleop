@@ -266,8 +266,14 @@ class ArmMuxNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         with self.lock:
             msg.owner = int(Owner.SWITCHING if self.switching else self.owner)
+            if self.outside and msg.owner == int(Owner.TELEOP):
+                # G-17: a teleop controller this mux did not activate is not teleop's arm.
+                # Reported as no owner, so an arming teleop asks the mux, which refuses until
+                # the controller is deactivated.
+                msg.owner = int(Owner.NONE)
+                msg.detail = self.outside
             msg.status = int(self.status)
-            msg.detail = self.detail
+            msg.detail = msg.detail or self.detail
         msg.gripper = self.gripper
         self.owner_pub.publish(msg)
 

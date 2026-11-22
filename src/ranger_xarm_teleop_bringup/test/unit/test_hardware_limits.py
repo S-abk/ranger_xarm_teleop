@@ -262,3 +262,14 @@ def test_no_shipped_file_would_pass_the_hardware_check():
     for path in shipped_yaml_files():
         with pytest.raises((HardwareLimitsRefused, SimulationOnlyRefused)):
             check_hardware_limits_file(path)
+
+
+def test_a_largest_scale_below_the_default_scales_needs_the_scales_set(tmp_path):
+    """The node's default scales are 1.0: a smaller largest scale needs both set in the file."""
+    values = dict(good_values(), max_translation_scale=0.5)
+    with pytest.raises(HardwareLimitsRefused) as err:
+        check_hardware_limits_file(write(tmp_path, values))
+    text = str(err.value)
+    assert 'translation_scale_fine' in text and 'translation_scale_coarse' in text
+    values.update(translation_scale_fine=0.5, translation_scale_coarse=0.5)
+    assert check_hardware_limits_file(write(tmp_path, values, 'set.yaml')) == values

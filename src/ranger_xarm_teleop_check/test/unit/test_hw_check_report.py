@@ -36,7 +36,8 @@ def _git(path, *args):
 
 def test_banner_is_exact():
     assert rep.BANNER == ('read-only: this tool only subscribes; it creates no publisher, '
-                          'client, action or parameter call')
+                          'client, action or parameter call (rclpy itself keeps one '
+                          'publisher, /parameter_events, which it never uses here)')
 
 
 def test_report_path():

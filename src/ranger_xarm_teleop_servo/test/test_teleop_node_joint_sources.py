@@ -131,3 +131,19 @@ def test_one_message_with_arm_and_gripper_is_unchanged(ros):
         assert value == 0.4 and stamp == node.joint_state[1]
     finally:
         node.close()
+
+
+def test_before_the_arm_model_a_single_joint_message_is_not_an_arm_sample(ros):
+    node = TeleopNode(node_name='teleop_joint_sources_early',
+                      parameter_overrides=overrides(LIMITS))
+    try:
+        node.mono = lambda: 100.0
+        assert node.arm is None
+        node._on_joint_state(message(node, JOINTS, READY, age=0.5))
+        first = node.joint_state
+        node.mono = lambda: 100.5
+        node._on_joint_state(message(node, [GRIPPER], [0.2]))
+        assert node.joint_state[0] == first[0] and node.joint_state[1] == first[1]
+        assert node.joint_state[2][GRIPPER] == 0.2
+    finally:
+        node.close()

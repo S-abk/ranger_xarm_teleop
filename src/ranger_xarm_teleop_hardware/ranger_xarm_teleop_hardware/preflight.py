@@ -38,6 +38,8 @@ LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
 
 def read_controllers(node, client, wait_s: float, reads: int = 3):
     """Return {name: state}, or None when the controller manager did not answer."""
+    print(f'preflight: waiting up to {wait_s:g} s for /controller_manager/list_controllers',
+          flush=True)
     if not client.wait_for_service(timeout_sec=wait_s):
         return None
     for attempt in range(reads):

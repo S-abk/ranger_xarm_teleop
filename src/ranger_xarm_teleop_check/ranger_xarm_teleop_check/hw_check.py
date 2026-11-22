@@ -151,7 +151,9 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
     rclpy.init(args=sys.argv)
     # No parameter services (INV-3). rclpy also starts a get_type_description service unless
     # this local override says otherwise: it is a service, so it is switched off.
-    node = Node(NODE_NAME, start_parameter_services=False,
+    # No /rosout publisher either: the tool prints; its only publisher left is rclpy's own
+    # /parameter_events, which nothing here publishes on.
+    node = Node(NODE_NAME, start_parameter_services=False, enable_rosout=False,
                 parameter_overrides=[Parameter('start_type_description_service',
                                                Parameter.Type.BOOL, False)])
     system_clock = Clock(clock_type=ClockType.SYSTEM_TIME)

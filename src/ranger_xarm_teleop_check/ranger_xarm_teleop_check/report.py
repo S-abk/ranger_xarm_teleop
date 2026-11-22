@@ -30,7 +30,8 @@ from .rules import Result
 
 # The first line the tool prints, before anything else.
 BANNER = ('read-only: this tool only subscribes; it creates no publisher, client, action or '
-          'parameter call')
+          'parameter call (rclpy itself keeps one publisher, /parameter_events, which it never '
+          'uses here)')
 DEFAULT_DATA_DIR = '~/teleop_data'
 REPORT_FOLDER = 'hardware_checks'
 

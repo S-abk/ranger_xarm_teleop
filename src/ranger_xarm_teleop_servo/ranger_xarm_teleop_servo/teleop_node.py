@@ -486,6 +486,7 @@ class TeleopNode(Node):
         self.joint_state = None
         self.joint_stamps: Dict[str, int] = {}  # stamp ns of the message last carrying each joint
         self._joints_before_arm: Dict[str, float] = {}   # joints seen before the first arm sample
+        self._sample_names: tuple = ()      # joints of the last arm sample (before the model)
         self.measured_stamp_ns = 0          # stamp of the joint state measured() last used
         self.servo_output = None            # (arrival, {name: position}) of the last point
         self.watcher = Node(f'{node_name}_watcher',
@@ -880,18 +881,30 @@ class TeleopNode(Node):
         arrival = self.mono()
         stamp = stamp_key(msg.header.stamp)
         positions = dict(zip(msg.name, msg.position))
-        for name in positions:
-            self.joint_stamps[name] = stamp
-        arm = self.arm.joint_names if self.arm is not None else ()
-        if arm and not all(name in positions for name in arm):
-            if self.joint_state is None:
-                self._joints_before_arm.update(positions)
+        stamps = dict(self.joint_stamps)
+        stamps.update({name: stamp for name in positions})
+        self.joint_stamps = stamps          # one assignment: read from the timer thread
+        latest = self.joint_state
+        if self.arm is not None:
+            arm = self.arm.joint_names
+        elif latest is not None:
+            arm = self._sample_names        # the joints of the last arm sample
+        else:
+            arm = ()
+        # Before anything is known, a message with a single joint (a gripper's own) is not
+        # taken as an arm sample either.
+        partial = (not all(name in positions for name in arm)) if arm else len(positions) < 2
+        if partial:
+            if latest is None:
+                self._joints_before_arm = {**self._joints_before_arm, **positions}
             else:
-                self.joint_state[2].update(positions)
+                # Its joints are taken in, with the arm sample's own arrival and stamp: a new
+                # tuple and a new dict, never a change to the one another thread may read.
+                self.joint_state = (latest[0], latest[1], {**latest[2], **positions})
             return
-        merged = (dict(self.joint_state[2]) if self.joint_state is not None
-                  else dict(self._joints_before_arm))
+        merged = dict(latest[2]) if latest is not None else dict(self._joints_before_arm)
         merged.update(positions)
+        self._sample_names = tuple(positions)
         self.joint_state = (arrival, stamp, merged)
         self.joint_state_arrival = arrival
 
@@ -1911,7 +1924,10 @@ class TeleopNode(Node):
         armed = self.state.want_armed and self.params.motion_enabled
         reported = (self.owner_arrival is not None
                     and now - self.owner_arrival <= OWNER_TIMEOUT_S)
-        if reported and owner != ArmOwner.OWNER_TELEOP:
+        if (reported and owner != ArmOwner.OWNER_TELEOP and self.owner_request_since is None
+                and owner != ArmOwner.OWNER_SWITCHING):
+            # Not while a request is out: the mux's report from before the switch would clear
+            # it, and an arm teleop asked for would then never be handed back.
             self.asked_for_arm = False
         if not armed:
             self.owned_while_armed = False
@@ -1966,8 +1982,7 @@ class TeleopNode(Node):
             return
         self.mux_status = result.status
         if result.success:
-            if wanted == ArmOwner.OWNER_MOVEIT:
-                self.asked_for_arm = False
+            self.asked_for_arm = wanted == ArmOwner.OWNER_TELEOP
             self.owner = result.owner
             self.owner_arrival = self.mono()
             self.get_logger().info(

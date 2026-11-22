@@ -23,3 +23,9 @@ def test_launch_and_node_require_the_same_hardware_values():
 
 def test_the_hardware_guards_cannot_be_set_by_an_extra_file():
     assert 'hardware_limits' in RESERVED and 'refuse_teleop' in RESERVED
+
+
+def test_the_launch_knows_the_nodes_default_translation_scales():
+    from ranger_xarm_teleop_bringup import limits
+    assert params.DEFAULTS['translation_scale_fine'] == limits._DEFAULT_SCALE
+    assert params.DEFAULTS['translation_scale_coarse'] == limits._DEFAULT_SCALE

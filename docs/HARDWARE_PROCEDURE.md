@@ -53,7 +53,7 @@ suggestions, not defaults, and appear nowhere the hardware path reads them.
 | `max_lead_rotation_deg` | the same in rotation | angular cap x lag x 1.2 in degrees; start at 3 |
 | `max_offset_translation_m` | target from the pose at clutch engagement | 0.10 m (simulation 0.60) |
 | `max_offset_rotation_deg` | the same in rotation | 20 (simulation 60) |
-| `max_translation_scale` | largest scale the operator can pick | 1.0, and do not set a coarse scale above it |
+| `max_translation_scale` | largest scale the operator can pick | 1.0. Below 1.0, also set `translation_scale_fine` and `translation_scale_coarse` (their default is 1.0), or the file is refused |
 | `step_translation_limit_m` | target step per 20 ms cycle (larger releases the clutch) | a third of the simulation value: 0.010 |
 | `step_rotation_limit_deg` | the same in rotation | a third of the simulation value: 3 |
 | `view_cone_half_angle_deg` | controller angle off the headset's forward axis | 50 (simulation 65; narrower is stricter) |
@@ -88,6 +88,13 @@ workspace built.
 3. On the robot computer, apply the workspace patch that adds the teleop controller to the
    real bring-up (P1: `teleop_arm_controller` in `real_ros2_controllers.yaml`, spawned
    inactive by `real_execution.launch.py`), and rebuild the workspace there.
+
+4. Also on the robot computer, re-enable the collision check of `xarm_link2` and `xarm_link4` in
+   the robot workspace's SRDF (P3). The SRDF marks the pair "Never" in collision, but within
+   the joint limits the two links collide (joint 3 above about 8.6 degrees with joint 4 near
+   130 to 186 degrees, modulo 360); while the pair is disabled, neither MoveIt nor MoveIt
+   Servo checks it, and the teleop keep-out does not cover arm-against-arm pairs. The other
+   four disabled arm pairs keep at least 11 mm apart over the whole joint range.
 
 **What you should see:** the mock's first log line says `HARDWARE-SHAPED MOCK`; the teleop
 launch prints `ATTACH PREFLIGHT OK`; the check tool's first line says it only subscribes.
@@ -176,7 +183,8 @@ Then set `tool_pose_timeout_s` from this run's largest gap (Values you supply) b
 ## Stage 3: MoveIt motion through the owner switch, nothing armed
 
 **Before you start:** stage 2 passed and its report kept; P1 applied and built on the robot
-computer; the arm in a posture with room around it; emergency stops in reach. Shut stage 2
+computer; P3 applied, or else keep joint 3 below 5 degrees in every motion of stages 3 and 4
+(planned or teleoperated) and stop if it goes higher; the arm in a posture with room around it; emergency stops in reach. Shut stage 2
 down first.
 
 **Commands**
@@ -255,6 +263,7 @@ target in RViz; the check gives `PASS` on `stale repeats while moving`,
 - it keeps moving more than about 2 cm after you release;
 - the wrist oscillates (the solver's limit cycle near the wrist singularity: release, then
   disarm, and plan the arm away from the singular posture through MoveIt);
+- without P3 applied, joint 3 goes above 5 degrees (the unchecked link 2 and link 4 pair);
 - `peak joint acceleration` fails: keep the report and stop the stage (open item: acceleration
   bursts; the mock shows them too at 40 % of the simulation speed caps).
 
