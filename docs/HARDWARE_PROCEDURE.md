@@ -201,20 +201,35 @@ ros2 run ranger_xarm_teleop_check hw_check idle --limits <limits> --workspace "$
 all; with it false the mux refuses every switch [`test_hwmock_execution`: motion disabled never
 switches to teleop]. Nobody arms in this stage.
 
+**What you should see before anything moves:** terminal 2 prints `ATTACH PREFLIGHT OK
+(execution stage)`; the idle check in terminal 5 gives the same `PASS` results as in stage 2,
+plus `controller xarm6_traj_controller active` and `controller teleop_arm_controller inactive`.
+**Stop if** any of them fails: nothing has moved yet.
+
 **3a. A small planned motion.** In terminal 5 start
 `hw_check motion --seconds 40 --joint-limits "$RANGER_XARM_WS/src/ranger_xarm_moveit_config/config/joint_limits.yaml"`,
-then in RViz plan a small motion (one joint, about 10 degrees, velocity scaling 0.1) and
-execute it. Then plan the arm to a posture with the wrist bent (joint 5 well away from zero;
-the tests use 0, -0.6, -0.7, 0, 1.3, 0 rad) for stage 4.
+then in RViz plan a small motion (one joint, about 10 degrees, velocity scaling 0.1), look at
+the planned path, and execute it.
 
-- You should see: the arm follows the plan smoothly and stops at its goal; the check gives
-  `PASS` on `stale repeats while moving` and `wrist oscillation`.
-- **Stop if:** `stale repeats while moving` fails (the driver is not reading the arm every
-  cycle: stop the stage); the arm moves anywhere the plan did not show; `wrist oscillation`
-  fails. If `peak joint acceleration` fails, keep the report and plan the next motion slower;
-  this is an open item (acceleration limiting is not built).
+- You should see: the arm moves along the path RViz showed, about 10 degrees on that one
+  joint, slowly, and stops at its goal; when the check ends it gives `PASS` on
+  `stale repeats while moving` and `wrist oscillation`.
+- **Stop if:** the arm moves anywhere the plan did not show, or does not stop at its goal
+  (emergency stop); `stale repeats while moving` fails (the driver is not reading the arm every
+  cycle: stop the stage); `wrist oscillation` fails. If `peak joint acceleration` fails, keep
+  the report and plan the next motion slower; this is an open item (acceleration limiting is
+  not built).
 
-**3b. The switch to teleop and back.**
+**3b. To the posture for stage 4**, only after 3a's check has passed. Plan the arm to a
+posture with the wrist bent (joint 5 well away from zero; the tests use 0, -0.6, -0.7, 0, 1.3,
+0 rad), velocity scaling 0.1, with a new `hw_check motion` running, and execute it.
+
+- You should see: the arm moves along the planned path and stops there; the check passes as in
+  3a.
+- **Stop if:** as in 3a; and, without P3, if the path takes joint 3 above 5 degrees (do not
+  execute such a plan).
+
+**3c. The switch to teleop and back.**
 
 ```bash
 ros2 service call /teleop/mux/set_owner ranger_xarm_teleop_interfaces/srv/SetArmOwner "{owner: 2}"   # to teleop
@@ -238,7 +253,7 @@ terminal 5, 2, 4, then 1.
 ## Stage 4: teleop armed at very low limits
 
 **Before you start:** stage 3 passed; your limits file at the first-session values; the arm at
-the bent-wrist posture from stage 3a (arming is refused near the wrist singularity); emergency
+the bent-wrist posture from stage 3b (arming is refused near the wrist singularity); emergency
 stops in reach. Same terminals 1 to 4 as stage 3.
 
 **Commands:** before arming, start the check (everything joins before arming):
@@ -247,9 +262,12 @@ stops in reach. Same terminals 1 to 4 as stage 3.
 ros2 run ranger_xarm_teleop_check hw_check teleop --seconds 120 --limits <limits> --joint-limits "$RANGER_XARM_WS/src/ranger_xarm_moveit_config/config/joint_limits.yaml"   # terminal 5
 ```
 
-Then, in the headset: point forward and press A (calibrate), press B (arm). Hold the grip and
-move your hand **5 cm, slowly**, in free space, then release. Then one more stroke the other
-way.
+Then, in the headset: point forward and press A (calibrate), press B (arm). **Arming moves
+nothing:** the panel shows armed and the arm switches to teleop standing still (stop if
+anything moves). Hold the grip and move your hand **5 cm, slowly**, in free space, then
+release. Read terminal 5's result before the next stroke: it prints when its 120 s end, so
+disarm (B), let it finish, check it as below, and start a new run before arming again. Then
+one more stroke the other way.
 
 **What you should see:** the tool follows your hand at no more than the speed cap and stops
 within about a centimetre after you release (the arm finishes the points it already has); the
@@ -275,8 +293,8 @@ switch every controller off): teleop disarms and stays disarmed (G-17), and the 
 a teleop controller it did not activate [`test_hwmock_execution`: the three G-17 tests].
 Follow "After an emergency stop".
 
-**How to back out:** release the grip, press B (disarm; the arm returns to MoveIt), Ctrl-C
-terminal 5, 2, 4, then 1.
+**How to back out:** release the grip, press B (disarm: the arm returns to MoveIt standing
+still; stop if anything moves), Ctrl-C terminal 5, 2, 4, then 1.
 
 ---
 
@@ -298,10 +316,17 @@ ros2 run ranger_xarm_teleop_check hw_check cameras --profile install/ranger_xarm
 The bring-up's cameras default to 15 fps; the recording profile expects 30 fps at 640x480,
 hence the two profile arguments.
 
-**You should see:** `PASS` on every camera's rate, gap and size rules.
+Before arming, also run the idle check again on this bring-up (cameras and recorder add load
+to the robot computer): `hw_check idle --limits <limits> --workspace "$RANGER_XARM_WS"` in
+terminal 5.
+
+**You should see:** `PASS` on every camera's rate, gap and size rules, and the idle check as in
+stage 3 (150 Hz held). Then arm and teleoperate exactly as in stage 4: its expectations and
+stop conditions apply to every stroke.
 
 **Stop if:** a camera does not hold 30 fps or loses frames (USB bandwidth): keep the report;
-do not record with a profile it does not meet.
+do not record with a profile it does not meet. If the idle check no longer holds 150 Hz with
+the cameras running, stop: do not arm.
 
 ---
 
