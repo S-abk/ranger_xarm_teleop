@@ -23,12 +23,13 @@ teleop controller's command topic, and show the preview of the target while the 
 Nothing here starts a robot.
 """
 
+import os
 import threading
 import time
 
 from geometry_msgs.msg import PoseStamped
-from hw_helpers import (publishers_of, start_attach, start_hwmock, wait_for_controllers,
-                        write_hardware_limits)
+from hw_helpers import (check_report, publishers_of, start_attach, start_check, start_hwmock,
+                        wait_for_controllers, write_hardware_limits)
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
@@ -64,6 +65,7 @@ def stage2(tmp_path_factory):
         start_input(probe, env, logs)
         yield {'probe': probe, 'env': env, 'logs': logs, 'attach': attach, 'bringup': bringup,
                'before': before, 'bringup_nodes': bringup_nodes, 'manager_pids': manager_pids,
+               'limits': limits,
                'previews': previews, 'lock': lock}
     finally:
         probe.close()
@@ -96,7 +98,8 @@ def test_the_attach_leaves_the_bring_up_as_it_found_it(stage2):
 
 def test_nothing_publishes_on_the_teleop_controller_or_the_joint_command(stage2):
     probe = stage2['probe']
-    assert publishers_of(probe, TELEOP_COMMAND) == []
+    # The test's own probe has a publisher there (for other tests); nothing of the stack does.
+    assert [n for n in publishers_of(probe, TELEOP_COMMAND) if n != 'teleop_test_probe'] == []
     assert publishers_of(probe, '/servo_node/delta_joint_cmds') == []
     assert publishers_of(probe, '/teleop/target_pose') == []
     assert publishers_of(probe, PREVIEW) == ['teleop_servo']
@@ -152,3 +155,60 @@ def test_the_preview_follows_a_stroke_and_is_never_a_command(stage2):
     probe.wait_for(lambda: probe.state().preview_reason.startswith('grip released')
                    or probe.state().preview_reason.startswith('no fresh input'), 10.0,
                    'the preview to stop with the grip released')
+
+
+def workspace():
+    """Return the robot workspace (the driver checkout the version gate reads), or None."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.environ.get('RANGER_XARM_WS', ''),
+                 os.path.join(os.environ.get('TELEOP_PROJECT', ''), '..', 'ranger_xarm_ws'),
+                 os.path.join(here, '..', '..', '..', '..', '..', 'ranger_xarm_ws')):
+        if path and os.path.isdir(os.path.join(path, 'src', 'xarm_ros2')):
+            return os.path.abspath(path)
+    return None
+
+
+def test_the_check_tool_only_subscribes(stage2):
+    """INV-3: while it runs, the check tool's node has no client, no service, no own publisher."""
+    probe, env, logs = stage2['probe'], stage2['env'], stage2['logs']
+    process, data_dir = start_check(env, 'idle', logs, 'endpoints', '--seconds', '8',
+                                    '--limits', stage2['limits'])
+    try:
+        probe.wait_for(lambda: ('hw_check', '/') in probe.node.get_node_names_and_namespaces(),
+                       20.0, 'the check tool on the graph')
+        time.sleep(2.0)
+        node = probe.node
+        pubs = {n for n, _ in node.get_publisher_names_and_types_by_node('hw_check', '/')}
+        services = node.get_service_names_and_types_by_node('hw_check', '/')
+        clients = node.get_client_names_and_types_by_node('hw_check', '/')
+        subs = {n for n, _ in node.get_subscriber_names_and_types_by_node('hw_check', '/')}
+    finally:
+        code, verdicts, report, output = check_report(process, data_dir, 60.0)
+    assert pubs <= {'/rosout', '/parameter_events'}, pubs
+    assert services == [] and clients == [], (services, clients)
+    assert '/joint_states' in subs and '/controller_manager/activity' in subs
+    assert output.splitlines()[0].startswith('read-only: this tool only subscribes')
+
+
+def test_the_idle_check_passes_on_the_check_stage(stage2):
+    """Procedure stage 2: the read-only checks that do not depend on the machine pass."""
+    env, logs = stage2['env'], stage2['logs']
+    extra = ['--seconds', '10', '--limits', stage2['limits'],
+             '--expect-active', 'joint_state_broadcaster']
+    ws = workspace()
+    if ws:
+        extra += ['--workspace', ws]
+    process, data_dir = start_check(env, 'idle', logs, 'idle', *extra)
+    code, verdicts, report, output = check_report(process, data_dir, 90.0)
+    for rule in ('joint_states rate', 'joint_states largest gap'):
+        assert verdicts.get(rule) == 'PASS', (rule, output[-4000:])
+    # The mock plugin's branch of the description writes no velocity_control parameter (the
+    # real plugin's does): not judged here, said so, never passed silently.
+    assert verdicts.get('velocity_control') == 'NOT JUDGED', output[-4000:]
+    assert verdicts.get('joint_states effort') == 'INFO'
+    clock = [r for r in report['rules'] if 'clock' in r['rule']]
+    assert clock and all(r['verdict'] == 'PASS' for r in clock), clock
+    if ws:
+        assert verdicts.get('xarm_ros2 joint-state change') == 'PASS', output[-3000:]
+    # The machine's own rules (governor) may fail on a laptop; they are reported, not hidden.
+    assert 'cpu governor' in verdicts

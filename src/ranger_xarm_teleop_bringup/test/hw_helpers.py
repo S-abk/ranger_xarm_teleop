@@ -19,6 +19,8 @@ writes its own into its temporary directory, derived from the simulation-only va
 it is deleted with that directory.
 """
 
+import glob
+import json
 import os
 import time
 
@@ -83,3 +85,24 @@ def wait_for_controllers(probe, expected, timeout=90.0):
 def publishers_of(probe, topic):
     """Return the node names publishing ``topic``."""
     return sorted(i.node_name for i in probe.node.get_publishers_info_by_topic(topic))
+
+
+def start_check(env, stage, logs, label, *extra):
+    """Start the read-only check tool; return ``(Process, data dir)``."""
+    data_dir = os.path.join(str(logs), f'checks_{label}')
+    process = Process(['ros2', 'run', 'ranger_xarm_teleop_check', 'hw_check', stage,
+                       '--data-dir', data_dir, *extra], env,
+                      os.path.join(str(logs), f'check_{label}.log'))
+    return process, data_dir
+
+
+def check_report(process, data_dir, timeout):
+    """Wait for the check tool; return ``(exit status, {rule: verdict}, report, output)``."""
+    code = process.wait(timeout)
+    output = process.output()
+    assert code is not None, f'the check tool did not finish in {timeout} s:\n{output[-3000:]}'
+    paths = sorted(glob.glob(os.path.join(data_dir, 'hardware_checks', '*.json')))
+    assert paths, f'the check tool wrote no report (exit {code}):\n{output[-3000:]}'
+    with open(paths[-1], encoding='utf-8') as handle:
+        report = json.load(handle)
+    return code, {r['rule']: r['verdict'] for r in report['rules']}, report, output

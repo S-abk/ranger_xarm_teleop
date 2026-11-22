@@ -33,7 +33,7 @@ GRIPPER_JOINT = 'xarm_drive_joint'
 GRIPPER_MIN = 0.0
 GRIPPER_MAX = 0.849
 
-CONTROLLER_MANAGER_SERVICE = '/controller_manager/list_controllers'
+CONTROLLER_MANAGER_NODE = '/controller_manager'
 ROBOT_DESCRIPTION_TOPIC = '/robot_description'
 
 REFUSAL = ('hwmock refused: a controller manager is already answering on this ROS domain '
@@ -118,14 +118,16 @@ def own_config_files(stage):
     return [TELEOP_FRAGMENT, BROADCASTER_FILE] if stage == 'execution' else []
 
 
-def refusal_reason(service_names, robot_description_publishers):
+def refusal_reason(node_names, robot_description_publishers):
     """
     Return the one-line refusal when the graph shows a running bring-up, else None.
 
-    service_names: the names of the services in the graph. robot_description_publishers:
-    how many publishers /robot_description has.
+    node_names: the fully qualified names of the nodes in the graph (a controller manager is
+    a node named /controller_manager; a service name would not do, as the graph lists a
+    service for its clients too). robot_description_publishers: how many publishers
+    /robot_description has.
     """
-    if CONTROLLER_MANAGER_SERVICE in service_names or robot_description_publishers > 0:
+    if CONTROLLER_MANAGER_NODE in node_names or robot_description_publishers > 0:
         return REFUSAL
     return None
 

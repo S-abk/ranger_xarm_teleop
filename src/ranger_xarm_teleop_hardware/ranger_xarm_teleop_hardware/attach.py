@@ -65,6 +65,20 @@ def check_launch_options(stage: str, motion_enabled: bool, simulation: bool, res
                          'adapter for the real gripper action is not built yet')
 
 
+def tool_frame(stage: str, requested: str = '') -> str:
+    """
+    Return the tool frame (and MoveIt Servo's tip) for the stage.
+
+    The check stage's description has no gripper, and with it no ``xarm_link_tcp``: the
+    flange (``xarm_link_eef``) is the last frame there. A frame the person names is used as
+    it is.
+    """
+    check_stage(stage)
+    if requested:
+        return requested
+    return 'xarm_link_eef' if stage == 'check' else 'xarm_link_tcp'
+
+
 def description_args(stage: str) -> List[str]:
     """Return the xacro arguments of the stage's real robot description (MoveIt Servo's model)."""
     check_stage(stage)

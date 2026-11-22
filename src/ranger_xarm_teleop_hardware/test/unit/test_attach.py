@@ -15,7 +15,7 @@
 
 import pytest
 from ranger_xarm_teleop_hardware.attach import (ARM_JOINTS, check_launch_options,
-                                                description_args, judge, PATCH)
+                                                description_args, judge, PATCH, tool_frame)
 
 DESCRIPTION = '<robot name="r"/>'
 CHECK = {'joint_state_broadcaster': 'active'}
@@ -104,3 +104,9 @@ def test_the_description_matches_the_stage_and_names_the_real_plugin():
         assert 'xarm_velocity_control:=false' in args
         assert 'xarm_ros2_control_plugin:=uf_robot_hardware/UFRobotSystemHardware' in args
         assert not any(a.split(':=')[0].endswith('_ip') for a in args)   # no address
+
+
+def test_the_check_stage_has_no_gripper_so_the_tool_frame_is_the_flange():
+    assert tool_frame('check') == 'xarm_link_eef'
+    assert tool_frame('execution') == 'xarm_link_tcp'
+    assert tool_frame('check', 'my_tool') == 'my_tool'

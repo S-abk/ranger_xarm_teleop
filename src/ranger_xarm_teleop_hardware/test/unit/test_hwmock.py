@@ -199,8 +199,8 @@ def test_launch_starts_with_the_mock_log_line_then_the_guard():
 
 
 def test_refusal_reason():
-    assert hwmock.refusal_reason(['/other/service'], 0) is None
-    assert hwmock.refusal_reason(['/x', hwmock.CONTROLLER_MANAGER_SERVICE], 0) == hwmock.REFUSAL
+    assert hwmock.refusal_reason(['/teleop_test_probe'], 0) is None
+    assert hwmock.refusal_reason(['/x', hwmock.CONTROLLER_MANAGER_NODE], 0) == hwmock.REFUSAL
     assert hwmock.refusal_reason([], 1) == hwmock.REFUSAL
     assert '\n' not in hwmock.REFUSAL
     assert hwmock.REFUSAL == (

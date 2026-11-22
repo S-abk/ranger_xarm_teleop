@@ -77,7 +77,10 @@ def graph_refusal():
         try:
             deadline = time.monotonic() + GUARD_WAIT_S
             while True:
-                names = [name for name, _ in node.get_service_names_and_types()]
+                # Node names, not service names: a service name is listed for its clients
+                # too, and a client of the controller manager is not a running bring-up.
+                names = [('' if ns == '/' else ns) + '/' + name
+                         for name, ns in node.get_node_names_and_namespaces()]
                 reason = hwmock.refusal_reason(
                     names, node.count_publishers(hwmock.ROBOT_DESCRIPTION_TOPIC))
                 if reason or time.monotonic() >= deadline:

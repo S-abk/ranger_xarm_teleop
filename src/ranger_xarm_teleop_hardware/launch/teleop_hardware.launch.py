@@ -50,7 +50,7 @@ from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from ranger_xarm_teleop_bringup.limits import check_hardware_limits_file
-from ranger_xarm_teleop_hardware.attach import check_launch_options, description_args
+from ranger_xarm_teleop_hardware.attach import check_launch_options, description_args, tool_frame
 
 
 def _true(text: str) -> bool:
@@ -67,6 +67,7 @@ def launch_setup(context, *args, **kwargs):
                          _true(arg('gripper_enabled')))           # raises: nothing started
     limits_file = arg('limits_file')
     check_hardware_limits_file(limits_file)                       # raises: nothing started
+    frame = tool_frame(stage, arg('tool_frame'))
 
     core = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
@@ -80,7 +81,8 @@ def launch_setup(context, *args, **kwargs):
             'description_args': ' '.join(description_args(stage)),
             'moveit_controller': 'xarm6_traj_controller',
             'teleop_controller': 'teleop_arm_controller',
-            'tool_frame': arg('tool_frame'),
+            'tool_frame': frame,
+            'servo_tip_frame': frame,
             'teleop_params_file': arg('teleop_params_file'),
             'gripper_enabled': 'false',
             'reset': 'false',
@@ -99,7 +101,7 @@ def launch_setup(context, *args, **kwargs):
                 'session': arg('record_session'),
                 'record_extra': arg('record_extra'),
                 'limits_file': limits_file,
-                'tool_frame': arg('tool_frame'),
+                'tool_frame': frame,
             }.items()))
 
     preflight = ExecuteProcess(
@@ -131,7 +133,10 @@ def generate_launch_description():
             'motion_enabled', default_value='false',
             description='G-1: false computes and shows, never commands; true only from the '
                         'execution stage on.'),
-        DeclareLaunchArgument('tool_frame', default_value='xarm_link_tcp'),
+        DeclareLaunchArgument(
+            'tool_frame', default_value='',
+            description='Empty: xarm_link_eef in the check stage (no gripper in that '
+                        'description), xarm_link_tcp in the execution stage.'),
         DeclareLaunchArgument('teleop_params_file', default_value=''),
         DeclareLaunchArgument('feedback', default_value='true'),
         DeclareLaunchArgument('record', default_value='false'),
