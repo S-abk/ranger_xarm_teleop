@@ -1,0 +1,35 @@
+# The teleop trajectory controller for a real bring-up's controller manager (the robot workspace's
+# real_ros2_controllers.yaml). On hardware the bring-up owns it and spawns it inactive; the teleop
+# launch only checks that it is there and inactive, and only the command mux activates it.
+# The hardware-shaped mock (hwmock.launch.py) loads this same file beside the workspace's own
+# controller file, so the mock has the shape the bring-up has once this fragment is added there.
+# Same values as config/teleop_arm_controller.yaml (simulation).
+controller_manager:
+  ros__parameters:
+    teleop_arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+teleop_arm_controller:
+  ros__parameters:
+    joints:
+      - xarm_joint1
+      - xarm_joint2
+      - xarm_joint3
+      - xarm_joint4
+      - xarm_joint5
+      - xarm_joint6
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    allow_partial_joints_goal: false
+    # Streamed commands continue from the last commanded point, not from the measured state.
+    interpolate_from_desired_state: true
+    # No command for this long after the last received point: hold position.
+    cmd_timeout: 0.2
+    state_publish_rate: 50.0
+    action_monitor_rate: 20.0
+    constraints:
+      goal_time: 0.0
+      stopped_velocity_tolerance: 0.0
