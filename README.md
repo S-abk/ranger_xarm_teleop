@@ -13,6 +13,8 @@ Depends on the robot packages in `ranger_xarm_ws` (built separately).
 | `src/ranger_xarm_teleop_servo` | Teleop node (clutch-relative mapping, safety gate, damped least-squares solver, MoveIt Servo joint-jog commands), command mux node, gripper relay node, and the pure modules behind them with their tests |
 | `src/ranger_xarm_teleop_bringup` | MoveIt Servo configuration, the teleop trajectory controller, launch files for mock execution and a running simulator (`record:=true` adds the recorder), simulation-only limit values |
 | `src/ranger_xarm_teleop_record` | Demonstration episodes: episode node (left controller, rosbag2 recorder control, sidecar), deployment profiles, the pure checker, consistency check and fixed-rate export, and session tools (see Recording demonstrations) |
+| `src/ranger_xarm_teleop_hardware` | The hardware path: `teleop_hardware.launch.py` attaches the teleop stack to a real bring-up it did not start (motion disabled by default, a preflight that reads the bring-up once and refuses with what to do), and `hwmock.launch.py`, a hardware-shaped mock with the real bring-up's controllers, rates and gripper action to rehearse it on |
+| `src/ranger_xarm_teleop_check` | `hw_check`, read-only checks for each stage of the hardware procedure (it only subscribes): joint-state rate and gaps, controllers, description, clock, machine timing, motion, lead, cameras; one report file per run outside the checkout |
 | `src/ranger_xarm_teleop_session` | The session launcher behind `tools/teleop_session`: start order, pre-flight (pure, no ROS), log watching, stop; the short-lived probe node |
 | `third_party/vr-teleop-kit` | Vendored relay and WebXR web client (upstream commit `80589ee`, Apache-2.0, minimal patch listed in `VENDORED.md`) |
 | `tools/` | `teleop_session` (start, check and stop a session; the relay role needs no ROS). No-ROS CLIs: `relay_setup.sh`, `relay.sh`, `record_relay.py`, `fake_quest.py`, `analyze_input.py`, `clip_recording.py`. With ROS: `move_arm.py`, `recover_arm.py`, `retreat_arm.py`, `compare_keepout_moveit.py`, `keepout_workspace.py` (sourced workspace only), `replay_measured.sh`, `measure_tracking.py` (`report` needs no ROS), `record_session.py` (`halts` needs no ROS). No ROS: `workspace_map.py`, `servo_rigid_pairs.py` |
@@ -137,6 +139,17 @@ SESSION READY
   below, which writes into `recordings/`); the recorder records the session.
 - The relay has no authentication. It listens on 127.0.0.1 unless `--listen` names another
   address, and then the launcher says that anything on that network can connect to it.
+
+## Hardware
+
+The real arm is run by a person following `docs/HARDWARE_PROCEDURE.md`: five stages, each with
+its commands, what to expect and when to stop. The teleop stack attaches to the robot
+workspace's bring-up (`ranger_xarm_teleop_hardware teleop_hardware.launch.py`), starts with
+motion disabled, and refuses to start until every limit is set in a limits file outside the
+checkout (`config/hardware_limits_TEMPLATE.yaml` lists them, all `PENDING`). The teleop
+trajectory controller is part of the real bring-up there (a patch to the robot workspace),
+spawned inactive; only the command mux activates it. Gripper teleop and the reset stay
+simulation only.
 
 ## Run the headset input bridge
 
