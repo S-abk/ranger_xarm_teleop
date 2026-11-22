@@ -28,7 +28,6 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
-        ('share/' + package_name + '/config/hardware', glob('config/hardware/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -37,9 +36,4 @@ setup(
     description='Launch files and configuration for teleoperating the arm.',
     license='Apache-2.0',
     tests_require=['pytest'],
-    entry_points={
-        'console_scripts': [
-            'hwmock_gripper_proxy = ranger_xarm_teleop_bringup.hwmock_gripper_proxy:main',
-        ],
-    },
 )

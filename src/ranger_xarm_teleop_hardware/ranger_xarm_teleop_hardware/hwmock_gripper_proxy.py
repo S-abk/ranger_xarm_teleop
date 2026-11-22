@@ -26,7 +26,7 @@ import threading
 import time
 
 from control_msgs.action import GripperCommand
-from ranger_xarm_teleop_bringup.hwmock import (
+from ranger_xarm_teleop_hardware.hwmock import (
     clamp_position, GRIPPER_JOINT, GRIPPER_MAX, GRIPPER_MIN, step_toward)
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse

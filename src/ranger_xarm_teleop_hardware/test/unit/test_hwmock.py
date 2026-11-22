@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from ranger_xarm_teleop_bringup import hwmock
+from ranger_xarm_teleop_hardware import hwmock
 
 PKG_DIR = Path(__file__).resolve().parents[2]
 LAUNCH = PKG_DIR / 'launch' / 'hwmock.launch.py'

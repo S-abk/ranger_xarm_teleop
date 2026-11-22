@@ -29,7 +29,7 @@ mock_components starts it (every joint at 0.0: the description has no initial-va
 gripper at the assumed initial_gripper_position. Omitted from the real execution launch: the
 trusted-volume filter, the xarm_api parameter file (the mock plugin takes neither) and the
 Ouster octomap sensor file (no sensor to feed it). The execution stage also restricts
-joint_state_broadcaster to the arm joints (config/hardware/hwmock_joint_state_broadcaster.yaml),
+joint_state_broadcaster to the arm joints (config/hwmock_joint_state_broadcaster.yaml),
 because the mock description, unlike the real one, has a gripper system.
 
 It refuses to start beside a running controller manager or a /robot_description publisher
@@ -52,7 +52,7 @@ from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitut
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
-from ranger_xarm_teleop_bringup import hwmock
+from ranger_xarm_teleop_hardware import hwmock
 import yaml
 
 GUARD_WAIT_S = 2.0
@@ -146,7 +146,7 @@ def _stage_actions(context):
         return [LogInfo(msg=reason), Shutdown(reason=reason)]
 
     pkg = Path(get_package_share_directory('ranger_xarm_moveit_config'))
-    own = get_package_share_directory('ranger_xarm_teleop_bringup')
+    own = get_package_share_directory('ranger_xarm_teleop_hardware')
     execution = stage == 'execution'
     description = _description(stage)
 
@@ -172,7 +172,7 @@ def _stage_actions(context):
             parameters=[description]))
     if execution:
         actions.append(Node(
-            package='ranger_xarm_teleop_bringup', executable='hwmock_gripper_proxy',
+            package='ranger_xarm_teleop_hardware', executable='hwmock_gripper_proxy',
             name='xarm_gripper_action_proxy', output='screen',
             parameters=[{
                 'proxy_action_name': '/xarm_gripper/gripper_action',

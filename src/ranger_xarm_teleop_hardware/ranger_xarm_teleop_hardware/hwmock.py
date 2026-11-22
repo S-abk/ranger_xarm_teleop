@@ -98,8 +98,8 @@ def spawner_arguments(name, extra=()):
             '--controller-manager-timeout', '30']
 
 
-TELEOP_FRAGMENT = 'config/hardware/teleop_arm_controller_real.yaml'
-BROADCASTER_FILE = 'config/hardware/hwmock_joint_state_broadcaster.yaml'
+TELEOP_FRAGMENT = 'config/teleop_arm_controller_real.yaml'
+BROADCASTER_FILE = 'config/hwmock_joint_state_broadcaster.yaml'
 
 
 def own_config_files(stage):
