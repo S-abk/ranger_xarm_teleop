@@ -60,7 +60,8 @@ from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
 from ranger_xarm_teleop_servo.ownership import (any_goal_active, BandTracker, check_switch,
                                                 MuxParams,
-                                                MuxStatus, Owner, owner_of, split_of,
+                                                MuxStatus, outside_activation, Owner, owner_of,
+                                                split_of,
                                                 StillnessTracker, switch_lists)
 import rclpy
 from rclpy.clock import Clock, ClockType
@@ -100,6 +101,10 @@ class ArmMuxNode(Node):
         self.declare_parameter('gripper_joints', ['xarm_drive_joint'])
         # Net travel (joint units) within the stillness window that still counts as stopped.
         self.declare_parameter('gripper_still_band', 0.01)
+        # A guard, set by the launch whenever teleop motion is disabled (motion_enabled false):
+        # every switch to teleop is refused, so the teleop controller stays inactive and ignores
+        # anything sent to it. Not a parameter an extra file may set (limits.RESERVED).
+        self.declare_parameter('refuse_teleop', False)
 
         self.moveit_controller = str(self.get_parameter('moveit_controller').value)
         self.teleop_controller = str(self.get_parameter('teleop_controller').value)
@@ -120,6 +125,7 @@ class ArmMuxNode(Node):
             self.gripper_joints = [str(j) for j in self.get_parameter('gripper_joints').value]
             if not self.gripper_joints:
                 raise ValueError('gripper_joints: gripper teleop needs the gripper joints')
+        self.refuse_teleop = bool(self.get_parameter('refuse_teleop').value)
         self.switch_timeout = float(self.get_parameter('switch_timeout_s').value)
         self.still_wait = float(self.get_parameter('still_wait_s').value)
         self.tracker = StillnessTracker(MuxParams(
@@ -142,6 +148,10 @@ class ArmMuxNode(Node):
         self.goal_status: Dict[str, bool] = {}
         self.clutch_engaged = False
         self.teleop_state_arrival: Optional[float] = None
+        # The teleop controller is active because this mux switched it there (G-17: anything
+        # else is an outside switch, reported and undone once the arm is still).
+        self.teleop_by_mux = False
+        self.outside = ''               # the report of an outside activation, while it lasts
 
         sim_time = [self.get_parameter('use_sim_time')]
         self.observer = Node(f'{node_name}_observer', parameter_overrides=sim_time)
@@ -245,10 +255,13 @@ class ArmMuxNode(Node):
 
     def _on_timer(self) -> None:
         if not self.switching:
-            owner = self.read_owner()
+            states = self.read_states()
+            owner = self.owner_from(states)
             with self.lock:
                 if not self.switching:
                     self.owner = owner if owner is not None else Owner.NONE
+            if states is not None:
+                self.restore_order(states)
         msg = ArmOwner()
         msg.header.stamp = self.get_clock().now().to_msg()
         with self.lock:
@@ -257,6 +270,61 @@ class ArmMuxNode(Node):
             msg.detail = self.detail
         msg.gripper = self.gripper
         self.owner_pub.publish(msg)
+
+    # ---- an outside switch (G-17) ----
+
+    def restore_order(self, states: Dict[str, str]) -> None:
+        """
+        Report a teleop controller activated outside the mux; deactivate it once still.
+
+        Only a deactivation is ever requested here, strict, and only with every arm joint
+        still and no goal executing; nothing is activated in response.
+        """
+        teleop = [self.teleop_controller] + ([self.teleop_gripper] if self.gripper else [])
+        if not any(states.get(name) == 'active' for name in teleop):
+            self.teleop_by_mux = False
+        active = outside_activation(states, teleop, self.teleop_by_mux)
+        if not active:
+            if self.outside:
+                self.get_logger().info('the outside activation of the teleop controller is '
+                                       'over')
+            self.outside = ''
+            return
+        report = (f'{", ".join(active)} active without a switch by the mux (an outside switch, '
+                  'for example the arm driver after an error)')
+        if report != self.outside:
+            self.get_logger().error(report + '; it is deactivated once the arm is still; '
+                                    'nothing is activated in response')
+        self.outside = report
+        with self.lock:
+            if self.switching:
+                return
+            goal_active = any(self.goal_status.values())
+            status = check_switch(self.mono(), self.tracker, goal_active, False,
+                                  self.gripper_tracker)
+            if status != MuxStatus.OK:
+                self.detail = f'{report}: waiting for the arm to be still ({status.name})'
+                return
+            self.switching = True
+        try:
+            request = SwitchController.Request()
+            request.activate_controllers = []
+            request.deactivate_controllers = active
+            request.strictness = SwitchController.Request.STRICT
+            request.timeout.sec = int(self.switch_timeout)
+            result = self._call(self.switch_client, request)
+            ok = result is not None and result.ok
+            after = self.read_owner()
+            with self.lock:
+                if after is not None:
+                    self.owner = after
+                self.detail = (f'{report}: deactivated' if ok else
+                               f'{report}: deactivation failed '
+                               f'({"no answer" if result is None else result.message})')
+            (self.get_logger().warning if ok else self.get_logger().error)(self.detail)
+        finally:
+            with self.lock:
+                self.switching = False
 
     # ---- the switch ----
 
@@ -277,6 +345,11 @@ class ArmMuxNode(Node):
         """Switch to ``wanted``; return ``(status, detail)``. The owner changes only on OK."""
         if wanted not in (Owner.MOVEIT, Owner.TELEOP):
             return MuxStatus.SWITCH_FAILED, f'unknown owner {wanted}'
+        if wanted == Owner.TELEOP and self.refuse_teleop:
+            return MuxStatus.SWITCH_FAILED, (
+                'refused: teleop motion is disabled (motion_enabled is false), so the arm is '
+                'never switched to teleop; start the teleop launch with motion_enabled:=true '
+                'to allow it')
         with self.lock:
             if self.switching:
                 return MuxStatus.SWITCH_FAILED, 'another switch is in progress'
@@ -295,6 +368,9 @@ class ArmMuxNode(Node):
         with self.lock:
             self.owner = current
         if current == wanted:
+            if wanted == Owner.TELEOP and self.outside:
+                return MuxStatus.SWITCH_FAILED, (
+                    f'{self.outside}: it is deactivated before teleop may have the arm')
             return MuxStatus.OK, ''
         # "Stopped" needs an unbroken run of still joint-state samples. If that run is
         # not long enough yet (the arm has just stopped, or the stream had a hole), wait
@@ -344,6 +420,7 @@ class ArmMuxNode(Node):
             return MuxStatus.SWITCH_FAILED, (
                 f'switch not confirmed: controllers report '
                 f'{after.name if after is not None else "nothing"}')
+        self.teleop_by_mux = wanted == Owner.TELEOP
         self.get_logger().info(f'arm owner: {wanted.name} (was {current.name})')
         return MuxStatus.OK, ''
 

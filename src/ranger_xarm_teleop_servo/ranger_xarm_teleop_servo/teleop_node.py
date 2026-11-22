@@ -90,6 +90,7 @@ from ranger_xarm_teleop_servo import keepout as ko
 from ranger_xarm_teleop_servo import params as gate_params
 from ranger_xarm_teleop_servo import rigid_pairs
 from ranger_xarm_teleop_servo import solver as dls
+from ranger_xarm_teleop_servo import preview
 from ranger_xarm_teleop_servo.gate import (Env, Frame, frame_fault, GateState, Hold, Limit,
                                            on_frame, tick)
 from ranger_xarm_teleop_servo.input_frames import (FrameAssembler, gate_frame, PAIR_WAIT_S,
@@ -114,6 +115,7 @@ from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 TARGET_TOPIC = '/teleop/target_pose'
+PREVIEW_TOPIC = '/teleop/preview/target_pose'   # only while motion is disabled
 STATE_TOPIC = '/teleop/state'
 OWNER_TOPIC = '/teleop/mux/owner'
 SET_OWNER_SERVICE = '/teleop/mux/set_owner'
@@ -221,6 +223,22 @@ _OPTIONAL = {
     'translation_scale_fine': Parameter.Type.DOUBLE,
     'translation_scale_coarse': Parameter.Type.DOUBLE,
 }
+
+
+class NoPublisher:
+    """
+    Stands in for a command publisher that is never created while motion is disabled.
+
+    With ``motion_enabled`` false the node has no publisher for the target, the joint
+    command or the gripper command at all, so nothing can reach them; a later change that
+    tried to publish there would raise here instead of commanding the arm.
+    """
+
+    def __init__(self, topic: str) -> None:
+        self.topic = topic
+
+    def publish(self, msg) -> None:
+        raise RuntimeError(f'motion is disabled: this node has no publisher on {self.topic}')
 
 
 class StartupRefused(RuntimeError):
@@ -512,6 +530,8 @@ class TeleopNode(Node):
 
         # Gripper teleop.
         self.gripper_state = grip.GripperState()
+        self.owned_while_armed = False      # G-17: teleop owned the arm in this arming
+        self.asked_for_arm = False          # teleop asked the mux for the arm (and may hand it back)
         self.gripper_output: Optional[grip.GripperOutput] = None
         self.gripper_tripped = False        # a frame since the last cycle tripped (any clutch)
         self.owner_gripper = False          # the mux swaps the gripper with the arm
@@ -526,13 +546,25 @@ class TeleopNode(Node):
         self.gripper_last_hold = None
         self.gripper_pub = None
         if self.gripper_params.enabled:
-            self.gripper_pub = self.create_publisher(GripperCommand, GRIPPER_COMMAND_TOPIC, 10)
+            self.gripper_pub = (
+                self.create_publisher(GripperCommand, GRIPPER_COMMAND_TOPIC, 10)
+                if self.params.motion_enabled else NoPublisher(GRIPPER_COMMAND_TOPIC))
             self.watcher.create_subscription(JointState, GRIPPER_HELD_TOPIC,
                                              self._on_gripper_held, 10)
 
-        self.target_pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 10)
+        # Motion disabled (fixed point of the hardware path): no command publisher exists, and
+        # the preview of the target has its own topic, which exists only then.
+        self.preview_pub = None
+        self.preview_state = preview.PreviewState()
+        self.preview_reason = ''
+        if self.params.motion_enabled:
+            self.target_pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 10)
+            self.servo_pub = self.create_publisher(JointJog, f'{servo}/delta_joint_cmds', 10)
+        else:
+            self.target_pub = NoPublisher(TARGET_TOPIC)
+            self.servo_pub = NoPublisher(f'{servo}/delta_joint_cmds')
+            self.preview_pub = self.create_publisher(PoseStamped, PREVIEW_TOPIC, 10)
         self.state_pub = self.create_publisher(TeleopState, STATE_TOPIC, 10)
-        self.servo_pub = self.create_publisher(JointJog, f'{servo}/delta_joint_cmds', 10)
         self.tf_static_pub = self.create_publisher(TFMessage, '/tf_static', TF_STATIC_QOS)
 
         self.create_subscription(PoseStamped, POSE_TOPICS['right'], self._on_pose,
@@ -1133,6 +1165,8 @@ class TeleopNode(Node):
         marks.append(('tool pose', self.mono()))
         engaged_before = self.state.engaged
         self.state, output = tick(self.state, env, self.params)
+        if self.preview_pub is not None:
+            self.preview_cycle(env)
         marks.append(('gate', self.mono()))
         for event in output.events:
             self.get_logger().info(event)
@@ -1285,6 +1319,21 @@ class TeleopNode(Node):
             msg.request = int(out.request)
             msg.reference_source = int(out.source)
             self.gripper_pub.publish(msg)
+
+    def preview_cycle(self, env: Env) -> None:
+        """Publish the target an engagement would command (motion disabled only), or say why not."""
+        self.preview_state, target, why = preview.step(self.preview_state, self.state, env,
+                                                       self.params)
+        if why != self.preview_reason:
+            self.get_logger().info(f'preview: {why or "publishing the target"}')
+            self.preview_reason = why
+        if target is None:
+            return
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.base_frame
+        fill_pose(msg.pose, target)
+        self.preview_pub.publish(msg)
 
     def publish_target(self, target: Pose, stamp) -> None:
         """Publish the tool-frame target (the recorded action)."""
@@ -1520,6 +1569,7 @@ class TeleopNode(Node):
             fill_pose(msg.measured_tool_pose, tool)
             msg.measured_tool_pose_stamp.sec = int(tool_stamp_ns // 1_000_000_000)
             msg.measured_tool_pose_stamp.nanosec = int(tool_stamp_ns % 1_000_000_000)
+        msg.preview_reason = self.preview_reason if self.preview_pub is not None else ''
         msg.keepout_margin = self.keepout_margin
         clearance, pair = self.idle_clearance()
         msg.keepout_clearance = float(clearance)
@@ -1832,7 +1882,29 @@ class TeleopNode(Node):
         return self.owner
 
     def manage_ownership(self, now: float, owner: int) -> None:
-        """Ask the mux for teleop when armed and for MoveIt when disarmed."""
+        """
+        Ask the mux for teleop when armed and for MoveIt when disarmed.
+
+        G-17: armed teleop that has owned the arm and finds it under another owner (or none)
+        without having asked for the change disarms and stays disarmed: an arm error or an
+        emergency stop makes the robot's driver switch every controller off and on again,
+        bypassing the mux. Teleop never asks for the arm again by itself; arming again takes
+        a fresh press of the arm button and a new reference from the measured state. Only a
+        fresh report of the mux counts: a silent mux (its report too old) holds the arm
+        (NOT_OWNER) but is not a report that the arm changed hands.
+        """
+        armed = self.state.want_armed and self.params.motion_enabled
+        reported = (self.owner_arrival is not None
+                    and now - self.owner_arrival <= OWNER_TIMEOUT_S)
+        if reported and owner != ArmOwner.OWNER_TELEOP:
+            self.asked_for_arm = False
+        if not armed:
+            self.owned_while_armed = False
+        elif owner == ArmOwner.OWNER_TELEOP:
+            self.owned_while_armed = True
+        elif self.owned_while_armed and reported:
+            self._ownership_lost(owner)
+            return
         if self.owner_request_since is not None:
             if now - self.owner_request_since < 5.0:
                 return
@@ -1841,8 +1913,11 @@ class TeleopNode(Node):
         if self.state.want_armed and self.params.motion_enabled:
             if owner != ArmOwner.OWNER_TELEOP:
                 wanted = ArmOwner.OWNER_TELEOP
-        elif (owner == ArmOwner.OWNER_TELEOP
+        elif (owner == ArmOwner.OWNER_TELEOP and self.asked_for_arm
               and self.servo_state in (SERVO_PAUSED, SERVO_UNKNOWN)):
+            # Only an arm teleop asked for is handed back. A teleop controller that became
+            # active some other way (G-17: the driver after an arm error) is the mux's to undo;
+            # asking for MoveIt here would activate MoveIt's controller in response to it.
             wanted = ArmOwner.OWNER_MOVEIT
         if self.state.want_armed and not self.params.motion_enabled:
             self._disarm('motion_enabled is false')
@@ -1854,6 +1929,8 @@ class TeleopNode(Node):
                 self._disarm('the command mux is not available')
             return
         self.owner_request_since = now
+        if wanted == ArmOwner.OWNER_TELEOP:
+            self.asked_for_arm = True
         # Teleop's request window: opened when it asks for the arm, closed when it gives it back
         # (a later owner switch it did not ask for has no request: no held report counts).
         self.owner_request_ros_ns = (self.get_clock().now().nanoseconds
@@ -1874,6 +1951,8 @@ class TeleopNode(Node):
             return
         self.mux_status = result.status
         if result.success:
+            if wanted == ArmOwner.OWNER_MOVEIT:
+                self.asked_for_arm = False
             self.owner = result.owner
             self.owner_arrival = self.mono()
             self.get_logger().info(
@@ -1891,6 +1970,24 @@ class TeleopNode(Node):
         response.success = True
         response.message = 'disarmed' if was else 'was not armed'
         return response
+
+    def _ownership_lost(self, owner: int) -> None:
+        """G-17: disarm, and forget teleop's own references, after an unrequested owner change."""
+        names = {ArmOwner.OWNER_MOVEIT: 'MoveIt', ArmOwner.OWNER_TELEOP: 'teleop'}
+        self.get_logger().error(
+            'G-17: the arm left teleop without teleop asking (now owned by '
+            f'{names.get(owner, "nobody")}): an arm error, an emergency stop or a controller '
+            'switch outside the mux; teleop disarms and stays disarmed: press the arm button '
+            'to arm again once the arm is ready')
+        self.owned_while_armed = False
+        self.asked_for_arm = False
+        self.owner_request_since = None
+        self.owner_request_ros_ns = None
+        # Teleop's own gripper command is not a reference any more: the next arming starts
+        # from the held reference after its own switch, or the measured opening. Nothing is
+        # commanded here (a freeze never opens or closes the gripper).
+        self.gripper_state = grip.GripperState()
+        self._disarm('G-17: ownership lost without a request')
 
     def _disarm(self, why: str) -> None:
         if self.state.want_armed:

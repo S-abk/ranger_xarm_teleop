@@ -153,3 +153,10 @@ builtin_interfaces/Time gripper_measured_stamp
 # while measured_tool_pose_valid is false). Last in the message so that recordings made
 # before it was added stay readable (their messages end where this field begins).
 builtin_interfaces/Time measured_tool_pose_stamp
+# Preview (contract, "Arm ownership"): with motion disabled the node publishes, while the grip
+# is held, the target it would command on /teleop/preview/target_pose (mapping, scale, offset
+# and keep-out bounds; never an action). This says why no preview is published (no fresh input,
+# no calibration, no fresh joint state, grip released, a rejected step); empty while one is, and
+# always empty with motion enabled (the preview topic does not exist then). Last in the message
+# so that earlier recordings stay readable.
+string preview_reason
