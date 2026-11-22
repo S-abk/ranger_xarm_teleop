@@ -13,6 +13,9 @@
 # limitations under the License.
 """Helpers shared by the launch files: limit values and the simulation-only refusal."""
 
+import math
+import re
+
 import yaml
 
 SIMULATION_ONLY_KEY = 'limits_are_simulation_only'
@@ -20,6 +23,10 @@ SIMULATION_ONLY_KEY = 'limits_are_simulation_only'
 
 class SimulationOnlyRefused(RuntimeError):
     """A simulation-only limits file was given to a launch path that is not a simulation."""
+
+
+class HardwareLimitsRefused(ValueError):
+    """A limits file is not acceptable for the hardware path; the message lists every problem."""
 
 
 def load_limits(path: str) -> dict:
@@ -97,3 +104,91 @@ def check_gripper_limits(path: str, values: dict) -> None:
         if not isinstance(values.get(name), (int, float)) or isinstance(values.get(name), bool):
             raise ValueError(f'{path}: {name} is required with gripper teleop and has no '
                              'default')
+
+
+# The values a hardware limits file must supply, in the order of the shipped template: the
+# gate's PENDING values (ranger_xarm_teleop_servo.params.REQUIRED), then the link keep-out
+# margin and the tool pose timeout. None has a default or a shipped number.
+HARDWARE_REQUIRED = (
+    'max_offset_translation_m',
+    'max_offset_rotation_deg',
+    'view_cone_half_angle_deg',
+    'step_translation_limit_m',
+    'step_rotation_limit_deg',
+    'linear_speed_cap_m_s',
+    'angular_speed_cap_rad_s',
+    'max_lead_translation_m',
+    'max_lead_rotation_deg',
+    'max_translation_scale',
+    'link_keepout_margin_m',
+    'tool_pose_timeout_s',
+)
+
+# The first line of the shipped template. A copy that still has it is the unfilled template.
+HARDWARE_TEMPLATE_MARKER = re.compile(r'^[ \t]*#[ \t]*HARDWARE LIMITS TEMPLATE[ \t]*$',
+                                      re.MULTILINE)
+_PROCEDURE = 'docs/HARDWARE_PROCEDURE.md, "Values you supply"'
+_SCALES = ('translation_scale_coarse', 'translation_scale_fine')
+
+
+def _positive_number(value) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def check_hardware_limits_file(path: str) -> dict:
+    """
+    Return the limit values of ``path``, which must be a hardware limits file; else refuse.
+
+    Raises ``SimulationOnlyRefused`` for a file marked simulation-only (the hardware path
+    never loads simulation-only values) and ``HardwareLimitsRefused``, with one line per
+    problem and every problem listed, when the file cannot be read, still has the template's
+    marker line, leaves any of ``HARDWARE_REQUIRED`` missing, ``PENDING`` or not a positive
+    finite number, enables gripper teleop or sets the reset's speed scaling (both are
+    simulation only), or sets a translation scale above ``max_translation_scale``.
+    """
+    try:
+        with open(path, encoding='utf-8') as handle:
+            text = handle.read()
+        values = load_limits(path)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as err:
+        raise HardwareLimitsRefused(f'{path}: cannot be read as a limits file: {err}') from err
+    if values.get(SIMULATION_ONLY_KEY):
+        raise SimulationOnlyRefused(
+            f'{path} holds simulation-only limit values; the hardware path never loads '
+            f'them: write your own file from the hardware template ({_PROCEDURE})')
+    problems = []
+    if HARDWARE_TEMPLATE_MARKER.search(text):
+        problems.append(
+            f'{path}: this is the unfilled template: copy it outside the checkout, fill in '
+            'every value and delete the marker line (the first line, "HARDWARE LIMITS '
+            'TEMPLATE")')
+    for name in HARDWARE_REQUIRED + _SCALES:
+        if name not in values:
+            if name in HARDWARE_REQUIRED:
+                problems.append(f'{path}: {name} is missing: add it to your copy of the '
+                                f'template ({_PROCEDURE})')
+            continue
+        value = values[name]
+        if isinstance(value, str) and value.strip().upper() == 'PENDING':
+            problems.append(f'{path}: {name} is PENDING: set it in your copy of the template '
+                            f'({_PROCEDURE})')
+        elif not _positive_number(value):
+            problems.append(f'{path}: {name} is not a positive number (got {value!r}): set it '
+                            f'to a finite number above zero ({_PROCEDURE})')
+    largest = values.get('max_translation_scale')
+    if _positive_number(largest):
+        for name in _SCALES:
+            if _positive_number(values.get(name)) and values[name] > largest:
+                problems.append(f'{path}: {name} ({values[name]!r}) is above '
+                                f'max_translation_scale ({largest!r}): lower it or raise '
+                                'max_translation_scale (a scale is never clamped into range)')
+    if values.get('gripper_enabled') not in (None, False):
+        problems.append(f'{path}: gripper_enabled is {values["gripper_enabled"]!r}: gripper '
+                        'teleop is simulation only; remove it from the file')
+    if 'reset_speed_scaling' in values:
+        problems.append(f'{path}: reset_speed_scaling is set: reset is simulation only; '
+                        'remove it from the file')
+    if problems:
+        raise HardwareLimitsRefused('\n'.join(problems))
+    return values
