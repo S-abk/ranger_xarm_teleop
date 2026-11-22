@@ -72,7 +72,7 @@ import math
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 from ament_index_python.packages import get_package_share_directory
 from control_msgs.msg import JointJog
@@ -448,7 +448,11 @@ class TeleopNode(Node):
         # the headset input in this node's executor. Each callback stores one tuple (a
         # single assignment, safe across the threads).
         self.joint_state_arrival: Optional[float] = None
-        self.joint_state = None             # (arrival, stamp ns, {name: position})
+        # The newest arm sample: (arrival, stamp ns, {name: position}). The positions also hold
+        # the newest value of every other joint seen, which may come in messages of their own.
+        self.joint_state = None
+        self.joint_stamps: Dict[str, int] = {}  # stamp ns of the message last carrying each joint
+        self._joints_before_arm: Dict[str, float] = {}   # joints seen before the first arm sample
         self.measured_stamp_ns = 0          # stamp of the joint state measured() last used
         self.servo_output = None            # (arrival, {name: position}) of the last point
         self.watcher = Node(f'{node_name}_watcher',
@@ -818,9 +822,30 @@ class TeleopNode(Node):
             pass
 
     def _on_joint_state(self, msg: JointState) -> None:
+        """
+        Take in one joint state.
+
+        A real bring-up has more than one publisher on /joint_states: the joint state
+        broadcaster with the arm, and a gripper proxy with only the gripper joint (10 Hz). A
+        message without every arm joint is not an arm sample: its joints are taken in, but it
+        neither replaces the arm's positions nor makes the arm's measurement look fresh.
+        """
         arrival = self.mono()
-        self.joint_state = (arrival, stamp_key(msg.header.stamp),
-                            dict(zip(msg.name, msg.position)))
+        stamp = stamp_key(msg.header.stamp)
+        positions = dict(zip(msg.name, msg.position))
+        for name in positions:
+            self.joint_stamps[name] = stamp
+        arm = self.arm.joint_names if self.arm is not None else ()
+        if arm and not all(name in positions for name in arm):
+            if self.joint_state is None:
+                self._joints_before_arm.update(positions)
+            else:
+                self.joint_state[2].update(positions)
+            return
+        merged = (dict(self.joint_state[2]) if self.joint_state is not None
+                  else dict(self._joints_before_arm))
+        merged.update(positions)
+        self.joint_state = (arrival, stamp, merged)
         self.joint_state_arrival = arrival
 
     def _on_servo_output(self, msg: JointTrajectory) -> None:
@@ -1166,10 +1191,13 @@ class TeleopNode(Node):
         latest = self.joint_state
         if latest is None:
             return None
-        value = latest[2].get(self.gripper_params.joint)
+        joint = self.gripper_params.joint
+        value = latest[2].get(joint)
         if value is None or not math.isfinite(value):
             return None
-        return float(value), latest[1]
+        # The stamp of the message that carried the gripper joint, which on a real bring-up is
+        # not the arm's (the gripper proxy publishes its own).
+        return float(value), self.joint_stamps.get(joint, latest[1])
 
     def gripper_clearance(self, joints):
         """Return the gripper's keep-out clearance as a function of its commanded position."""
