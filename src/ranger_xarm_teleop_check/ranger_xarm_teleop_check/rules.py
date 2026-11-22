@@ -72,6 +72,11 @@ OSCILLATION_WINDOW = 1.0
 # A /teleop/state and a /teleop/target_pose stamp match within this many seconds (they share a
 # stamp when a target is published in the cycle).
 MATCH_TOLERANCE = 0.010
+# The lead is clamped at max_lead_translation_m (G-14), so it sits at the limit whenever the hand
+# outruns the arm: only a lead beyond the limit by more than this means the clamp did not hold.
+LEAD_TOLERANCE_M = 0.002
+# A matched cycle within this of the limit counts as one where the clamp acted.
+LEAD_AT_LIMIT_M = 0.001
 # Wrist joints looked at for oscillation (index into the arm joints, 0-based).
 WRIST_JOINTS = (3, 5)
 
@@ -511,29 +516,43 @@ def teleop_measures(data: dict) -> dict:
 
 
 def rules_lead(tm: dict, opts: Options) -> List[Result]:
-    """Lead of the target over the measured tool pose (p99) and the lag estimate."""
+    """
+    Lead of the target over the measured tool pose, against the G-14 clamp; and the lag.
+
+    The clamp holds the lead at max_lead_translation_m whenever the hand outruns the arm, so
+    the rule is that the largest lead stays within the limit (plus LEAD_TOLERANCE_M); how often
+    the clamp acted is reported beside it, and the lag estimate is what the limit is chosen
+    from (lead limit >= speed cap x lag).
+    """
     lead = tm['lead']
-    name = 'target lead (p99, translation)'
+    name = 'target lead (largest, translation)'
     shown = (f"p50 {_fmt(lead['p50'], '.4f')} p99 {_fmt(lead['p99'], '.4f')} max "
              f"{_fmt(lead['max'], '.4f')} m over {lead['count']} matched cycles")
+    threshold = f'max <= max_lead_translation_m + {LEAD_TOLERANCE_M:g} m'
     out = []
     if lead['count'] == 0:
         out.append(Result(name, NOT_JUDGED, 'no target matched a valid measured pose',
-                          'p99 <= max_lead_translation_m',
-                          'run this while the clutch is engaged and /teleop/target_pose is '
-                          'published'))
+                          threshold, 'run this while the clutch is engaged and '
+                          '/teleop/target_pose is published'))
     elif not opts.limits_given:
-        out.append(Result(name, NOT_JUDGED, shown, 'p99 <= max_lead_translation_m',
+        out.append(Result(name, NOT_JUDGED, shown, threshold,
                           'pass --limits <your limits file> to judge it'))
     elif not is_number(opts.max_lead_translation_m):
-        out.append(Result(name, NOT_JUDGED, shown, 'p99 <= max_lead_translation_m',
+        out.append(Result(name, NOT_JUDGED, shown, threshold,
                           'set max_lead_translation_m in your limits file first'))
     else:
         bound = float(opts.max_lead_translation_m)
-        out.append(Result(name, PASS if lead['p99'] <= bound else FAIL, shown,
-                          f'p99 <= max_lead_translation_m = {bound:g} m',
-                          'the arm lags the target by more than the limits allow: slow the '
-                          'hand or check the arm tracking'))
+        out.append(Result(name, PASS if lead['max'] <= bound + LEAD_TOLERANCE_M else FAIL,
+                          shown, f'max <= max_lead_translation_m = {bound:g} m + '
+                          f'{LEAD_TOLERANCE_M:g} m',
+                          'the target led the arm beyond the lead limit: the clamp did not '
+                          'hold; stop and report it'))
+        values = lead.get('values') or []
+        share = sum(1 for v in values if v >= bound - LEAD_AT_LIMIT_M) / len(values)
+        out.append(Result('target lead at the limit', INFO,
+                          f'{share * 100.0:.0f} % of matched cycles (the G-14 clamp acted)',
+                          'informational: often at the limit means the hand outruns the '
+                          'speed cap; raise neither alone (lead >= cap x lag)'))
     out.append(Result('target lag', INFO,
                       f"{_fmt(tm['lag_s'])} s (cross-correlation of target and measured x, y, "
                       'z; positive: the arm is later)', 'informational'))

@@ -77,15 +77,15 @@ def test_every_problem_is_one_line():
 
 
 @pytest.mark.parametrize('options, words', [
-    (dict(stage='check', motion_enabled=True), 'refused in the check stage'),
-    (dict(simulation=True), 'simulation:=true is refused'),
-    (dict(reset=True), 'reset:=true is refused'),
-    (dict(gripper_enabled=True), 'gripper_enabled:=true is refused'),
-    (dict(stage='both'), "stage must be 'check' or 'execution'"),
+    ({'stage': 'check', 'motion_enabled': True}, 'refused in the check stage'),
+    ({'simulation': True}, 'simulation:=true is refused'),
+    ({'reset': True}, 'reset:=true is refused'),
+    ({'gripper_enabled': True}, 'gripper_enabled:=true is refused'),
+    ({'stage': 'both'}, "stage must be 'check' or 'execution'"),
 ])
 def test_launch_options_the_hardware_path_refuses(options, words):
-    values = dict(stage='execution', motion_enabled=False, simulation=False, reset=False,
-                  gripper_enabled=False)
+    values = {'stage': 'execution', 'motion_enabled': False, 'simulation': False,
+              'reset': False, 'gripper_enabled': False}
     values.update(options)
     with pytest.raises(ValueError, match=words):
         check_launch_options(**values)

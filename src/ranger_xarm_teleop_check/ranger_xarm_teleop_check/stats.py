@@ -201,7 +201,12 @@ def joint_velocities(t: Sequence[float], pos: Sequence[Sequence[float]],
     """
     n = len(pos)
     if n and reported is not None and all(r is not None for r in reported):
-        return np.asarray(reported, dtype=float), 'reported'
+        arr = np.asarray(reported, dtype=float)
+        moved = n >= 2 and float(np.max(np.ptp(np.asarray(pos, dtype=float), axis=0))) > 1e-4
+        # A backend that reports zero velocity while the joints move (mock components do)
+        # reports nothing: the positions are differenced instead.
+        if not (moved and np.all(np.abs(arr) < 1e-9)):
+            return arr, 'reported'
     v = np.full((n, 6), np.nan)
     if n >= 3:
         p = np.asarray(pos, dtype=float)
@@ -302,7 +307,8 @@ def lead_stats(state_t: Sequence[float], measured: Sequence[Tuple[float, float, 
             continue
         leads.append(math.dist(m, target[k]))
     return {'count': len(leads), 'p50': percentile(leads, 50.0),
-            'p99': percentile(leads, 99.0), 'max': max(leads) if leads else None}
+            'p99': percentile(leads, 99.0), 'max': max(leads) if leads else None,
+            'values': leads}
 
 
 def lag_estimate(state_t: Sequence[float], measured: Sequence[Tuple[float, float, float]],

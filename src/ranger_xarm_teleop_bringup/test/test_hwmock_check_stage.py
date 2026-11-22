@@ -157,8 +157,8 @@ def test_the_preview_follows_a_stroke_and_is_never_a_command(stage2):
                    'the preview to stop with the grip released')
 
 
-def workspace():
-    """Return the robot workspace (the driver checkout the version gate reads), or None."""
+def robot_workspace():
+    """Return the path of the robot workspace that the version gate reads, or None."""
     here = os.path.dirname(os.path.abspath(__file__))
     for path in (os.environ.get('RANGER_XARM_WS', ''),
                  os.path.join(os.environ.get('TELEOP_PROJECT', ''), '..', 'ranger_xarm_ws'),
@@ -195,7 +195,7 @@ def test_the_idle_check_passes_on_the_check_stage(stage2):
     env, logs = stage2['env'], stage2['logs']
     extra = ['--seconds', '10', '--limits', stage2['limits'],
              '--expect-active', 'joint_state_broadcaster']
-    ws = workspace()
+    ws = robot_workspace()
     if ws:
         extra += ['--workspace', ws]
     process, data_dir = start_check(env, 'idle', logs, 'idle', *extra)
