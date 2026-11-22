@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ranger_xarm_teleop_hardware</name>
+  <version>0.1.0</version>
+  <description>The teleop stack attached to a real arm bring-up it did not start (motion disabled by default, a preflight that checks the bring-up), and a hardware-shaped mock with the real bring-up's controllers, rates and gripper action to rehearse the hardware procedure on.</description>
+  <maintainer email="solanrewaju2020@fau.edu">Shuaib Olanrewaju</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>ranger_xarm_teleop_bringup</exec_depend>
+  <exec_depend>ranger_xarm_teleop_servo</exec_depend>
+  <exec_depend>ranger_xarm_teleop_record</exec_depend>
+  <exec_depend>ranger_xarm_teleop_interfaces</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>moveit_ros_move_group</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

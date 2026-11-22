@@ -1,0 +1,18 @@
+# Used only by the hardware-shaped mock (hwmock.launch.py, stage execution). On hardware the
+# joint state broadcaster publishes the six arm joints; the gripper is not a ros2_control system
+# there. The mock plugin's description does have a gripper system, so the broadcaster is
+# restricted to the arm joints here and the mock's gripper stand-in is the only publisher of
+# xarm_drive_joint, as on hardware. (The broadcaster publishes every interface unless both
+# joints and interfaces are set; the arm's state interfaces are position and velocity.)
+joint_state_broadcaster:
+  ros__parameters:
+    joints:
+      - xarm_joint1
+      - xarm_joint2
+      - xarm_joint3
+      - xarm_joint4
+      - xarm_joint5
+      - xarm_joint6
+    interfaces:
+      - position
+      - velocity

@@ -72,7 +72,7 @@ import math
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 from ament_index_python.packages import get_package_share_directory
 from control_msgs.msg import JointJog
@@ -88,6 +88,7 @@ from ranger_xarm_teleop_servo import calls
 from ranger_xarm_teleop_servo import gripper as grip
 from ranger_xarm_teleop_servo import keepout as ko
 from ranger_xarm_teleop_servo import params as gate_params
+from ranger_xarm_teleop_servo import preview
 from ranger_xarm_teleop_servo import rigid_pairs
 from ranger_xarm_teleop_servo import solver as dls
 from ranger_xarm_teleop_servo.gate import (Env, Frame, frame_fault, GateState, Hold, Limit,
@@ -114,6 +115,7 @@ from tf2_msgs.msg import TFMessage
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 TARGET_TOPIC = '/teleop/target_pose'
+PREVIEW_TOPIC = '/teleop/preview/target_pose'   # only while motion is disabled
 STATE_TOPIC = '/teleop/state'
 OWNER_TOPIC = '/teleop/mux/owner'
 SET_OWNER_SERVICE = '/teleop/mux/set_owner'
@@ -223,6 +225,22 @@ _OPTIONAL = {
 }
 
 
+class NoPublisher:
+    """
+    Stands in for a command publisher that is never created while motion is disabled.
+
+    With ``motion_enabled`` false the node has no publisher for the target, the joint
+    command or the gripper command at all, so nothing can reach them; a later change that
+    tried to publish there would raise here instead of commanding the arm.
+    """
+
+    def __init__(self, topic: str) -> None:
+        self.topic = topic
+
+    def publish(self, msg) -> None:
+        raise RuntimeError(f'motion is disabled: this node has no publisher on {self.topic}')
+
+
 class StartupRefused(RuntimeError):
     """The node must not start with this configuration."""
 
@@ -328,6 +346,9 @@ class TeleopNode(Node):
         super().__init__(node_name, parameter_overrides=parameter_overrides)
         self.declare_parameter('motion_enabled', False)                 # G-1
         self.declare_parameter('limits_are_simulation_only', False)
+        # Set by the launch whenever the path is not a simulation (limits.RESERVED): then the
+        # simulation-only values are refused and every hardware value must be in the file.
+        self.declare_parameter('hardware_limits', False)
         for name in _REQUIRED_DOUBLES:
             self.declare_parameter(name, Parameter.Type.DOUBLE)         # no default (INV-10)
         for name, kind in _OPTIONAL.items():
@@ -364,6 +385,18 @@ class TeleopNode(Node):
         self.quest_frame = str(self.get_parameter('quest_frame').value)
         servo = str(self.get_parameter('servo_node').value).rstrip('/')
         self.simulation_only = bool(self.get_parameter('limits_are_simulation_only').value)
+        if bool(self.get_parameter('hardware_limits').value):
+            if self.simulation_only:
+                raise StartupRefused(
+                    'the hardware path never loads simulation-only limit values: pass your own '
+                    'limits file, filled in from hardware_limits_TEMPLATE.yaml')
+            missing = [name for name in gate_params.HARDWARE_REQUIRED
+                       if self._value_or_none(name) is None]
+            if missing:
+                raise StartupRefused(
+                    'hardware limits file incomplete: ' + ', '.join(missing) + ' not set; '
+                    'fill in every value of your copy of hardware_limits_TEMPLATE.yaml '
+                    '(docs/HARDWARE_PROCEDURE.md, "Values you supply")')
 
         values = {'motion_enabled': bool(self.get_parameter('motion_enabled').value)}
         for name in list(_REQUIRED_DOUBLES) + list(_OPTIONAL):
@@ -448,7 +481,12 @@ class TeleopNode(Node):
         # the headset input in this node's executor. Each callback stores one tuple (a
         # single assignment, safe across the threads).
         self.joint_state_arrival: Optional[float] = None
-        self.joint_state = None             # (arrival, stamp ns, {name: position})
+        # The newest arm sample: (arrival, stamp ns, {name: position}). The positions also hold
+        # the newest value of every other joint seen, which may come in messages of their own.
+        self.joint_state = None
+        self.joint_stamps: Dict[str, int] = {}  # stamp ns of the message last carrying each joint
+        self._joints_before_arm: Dict[str, float] = {}   # joints seen before the first arm sample
+        self._sample_names: tuple = ()      # joints of the last arm sample (before the model)
         self.measured_stamp_ns = 0          # stamp of the joint state measured() last used
         self.servo_output = None            # (arrival, {name: position}) of the last point
         self.watcher = Node(f'{node_name}_watcher',
@@ -508,6 +546,7 @@ class TeleopNode(Node):
 
         # Gripper teleop.
         self.gripper_state = grip.GripperState()
+        self.owned_while_armed = False      # G-17: teleop owned the arm in this arming
         self.gripper_output: Optional[grip.GripperOutput] = None
         self.gripper_tripped = False        # a frame since the last cycle tripped (any clutch)
         self.owner_gripper = False          # the mux swaps the gripper with the arm
@@ -522,13 +561,25 @@ class TeleopNode(Node):
         self.gripper_last_hold = None
         self.gripper_pub = None
         if self.gripper_params.enabled:
-            self.gripper_pub = self.create_publisher(GripperCommand, GRIPPER_COMMAND_TOPIC, 10)
+            self.gripper_pub = (
+                self.create_publisher(GripperCommand, GRIPPER_COMMAND_TOPIC, 10)
+                if self.params.motion_enabled else NoPublisher(GRIPPER_COMMAND_TOPIC))
             self.watcher.create_subscription(JointState, GRIPPER_HELD_TOPIC,
                                              self._on_gripper_held, 10)
 
-        self.target_pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 10)
+        # Motion disabled (fixed point of the hardware path): no command publisher exists, and
+        # the preview of the target has its own topic, which exists only then.
+        self.preview_pub = None
+        self.preview_state = preview.PreviewState()
+        self.preview_reason = ''
+        if self.params.motion_enabled:
+            self.target_pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 10)
+            self.servo_pub = self.create_publisher(JointJog, f'{servo}/delta_joint_cmds', 10)
+        else:
+            self.target_pub = NoPublisher(TARGET_TOPIC)
+            self.servo_pub = NoPublisher(f'{servo}/delta_joint_cmds')
+            self.preview_pub = self.create_publisher(PoseStamped, PREVIEW_TOPIC, 10)
         self.state_pub = self.create_publisher(TeleopState, STATE_TOPIC, 10)
-        self.servo_pub = self.create_publisher(JointJog, f'{servo}/delta_joint_cmds', 10)
         self.tf_static_pub = self.create_publisher(TFMessage, '/tf_static', TF_STATIC_QOS)
 
         self.create_subscription(PoseStamped, POSE_TOPICS['right'], self._on_pose,
@@ -818,9 +869,42 @@ class TeleopNode(Node):
             pass
 
     def _on_joint_state(self, msg: JointState) -> None:
+        """
+        Take in one joint state.
+
+        A real bring-up has more than one publisher on /joint_states: the joint state
+        broadcaster with the arm, and a gripper proxy with only the gripper joint (10 Hz). A
+        message without every arm joint is not an arm sample: its joints are taken in, but it
+        neither replaces the arm's positions nor makes the arm's measurement look fresh.
+        """
         arrival = self.mono()
-        self.joint_state = (arrival, stamp_key(msg.header.stamp),
-                            dict(zip(msg.name, msg.position)))
+        stamp = stamp_key(msg.header.stamp)
+        positions = dict(zip(msg.name, msg.position))
+        stamps = dict(self.joint_stamps)
+        stamps.update({name: stamp for name in positions})
+        self.joint_stamps = stamps          # one assignment: read from the timer thread
+        latest = self.joint_state
+        if self.arm is not None:
+            arm = self.arm.joint_names
+        elif latest is not None:
+            arm = self._sample_names        # the joints of the last arm sample
+        else:
+            arm = ()
+        # Before anything is known, a message with a single joint (a gripper's own) is not
+        # taken as an arm sample either.
+        partial = (not all(name in positions for name in arm)) if arm else len(positions) < 2
+        if partial:
+            if latest is None:
+                self._joints_before_arm = {**self._joints_before_arm, **positions}
+            else:
+                # Its joints are taken in, with the arm sample's own arrival and stamp: a new
+                # tuple and a new dict, never a change to the one another thread may read.
+                self.joint_state = (latest[0], latest[1], {**latest[2], **positions})
+            return
+        merged = dict(latest[2]) if latest is not None else dict(self._joints_before_arm)
+        merged.update(positions)
+        self._sample_names = tuple(positions)
+        self.joint_state = (arrival, stamp, merged)
         self.joint_state_arrival = arrival
 
     def _on_servo_output(self, msg: JointTrajectory) -> None:
@@ -1108,6 +1192,8 @@ class TeleopNode(Node):
         marks.append(('tool pose', self.mono()))
         engaged_before = self.state.engaged
         self.state, output = tick(self.state, env, self.params)
+        if self.preview_pub is not None:
+            self.preview_cycle(env)
         marks.append(('gate', self.mono()))
         for event in output.events:
             self.get_logger().info(event)
@@ -1166,10 +1252,13 @@ class TeleopNode(Node):
         latest = self.joint_state
         if latest is None:
             return None
-        value = latest[2].get(self.gripper_params.joint)
+        joint = self.gripper_params.joint
+        value = latest[2].get(joint)
         if value is None or not math.isfinite(value):
             return None
-        return float(value), latest[1]
+        # The stamp of the message that carried the gripper joint, which on a real bring-up is
+        # not the arm's (the gripper proxy publishes its own).
+        return float(value), self.joint_stamps.get(joint, latest[1])
 
     def gripper_clearance(self, joints):
         """Return the gripper's keep-out clearance as a function of its commanded position."""
@@ -1257,6 +1346,21 @@ class TeleopNode(Node):
             msg.request = int(out.request)
             msg.reference_source = int(out.source)
             self.gripper_pub.publish(msg)
+
+    def preview_cycle(self, env: Env) -> None:
+        """Publish the target an engagement would command (motion disabled), or say why not."""
+        self.preview_state, target, why = preview.step(self.preview_state, self.state, env,
+                                                       self.params)
+        if why != self.preview_reason:
+            self.get_logger().info(f'preview: {why or "publishing the target"}')
+            self.preview_reason = why
+        if target is None:
+            return
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.base_frame
+        fill_pose(msg.pose, target)
+        self.preview_pub.publish(msg)
 
     def publish_target(self, target: Pose, stamp) -> None:
         """Publish the tool-frame target (the recorded action)."""
@@ -1492,6 +1596,7 @@ class TeleopNode(Node):
             fill_pose(msg.measured_tool_pose, tool)
             msg.measured_tool_pose_stamp.sec = int(tool_stamp_ns // 1_000_000_000)
             msg.measured_tool_pose_stamp.nanosec = int(tool_stamp_ns % 1_000_000_000)
+        msg.preview_reason = self.preview_reason if self.preview_pub is not None else ''
         msg.keepout_margin = self.keepout_margin
         clearance, pair = self.idle_clearance()
         msg.keepout_clearance = float(clearance)
@@ -1804,7 +1909,27 @@ class TeleopNode(Node):
         return self.owner
 
     def manage_ownership(self, now: float, owner: int) -> None:
-        """Ask the mux for teleop when armed and for MoveIt when disarmed."""
+        """
+        Ask the mux for teleop when armed and for MoveIt when disarmed.
+
+        G-17: armed teleop that has owned the arm and finds it under another owner (or none)
+        without having asked for the change disarms and stays disarmed: an arm error or an
+        emergency stop makes the robot's driver switch every controller off and on again,
+        bypassing the mux. Teleop never asks for the arm again by itself; arming again takes
+        a fresh press of the arm button and a new reference from the measured state. Only a
+        fresh report of the mux counts: a silent mux (its report too old) holds the arm
+        (NOT_OWNER) but is not a report that the arm changed hands.
+        """
+        armed = self.state.want_armed and self.params.motion_enabled
+        reported = (self.owner_arrival is not None
+                    and now - self.owner_arrival <= OWNER_TIMEOUT_S)
+        if not armed:
+            self.owned_while_armed = False
+        elif owner == ArmOwner.OWNER_TELEOP:
+            self.owned_while_armed = True
+        elif self.owned_while_armed and reported:
+            self._ownership_lost(owner)
+            return
         if self.owner_request_since is not None:
             if now - self.owner_request_since < 5.0:
                 return
@@ -1815,6 +1940,9 @@ class TeleopNode(Node):
                 wanted = ArmOwner.OWNER_TELEOP
         elif (owner == ArmOwner.OWNER_TELEOP
               and self.servo_state in (SERVO_PAUSED, SERVO_UNKNOWN)):
+            # The mux reports TELEOP only for an arm it switched there itself: a teleop
+            # controller that became active some other way (G-17) is reported as no owner and
+            # is the mux's to undo, so handing back never answers an outside switch.
             wanted = ArmOwner.OWNER_MOVEIT
         if self.state.want_armed and not self.params.motion_enabled:
             self._disarm('motion_enabled is false')
@@ -1863,6 +1991,23 @@ class TeleopNode(Node):
         response.success = True
         response.message = 'disarmed' if was else 'was not armed'
         return response
+
+    def _ownership_lost(self, owner: int) -> None:
+        """G-17: disarm, and forget teleop's own references, after an unrequested owner change."""
+        names = {ArmOwner.OWNER_MOVEIT: 'MoveIt', ArmOwner.OWNER_TELEOP: 'teleop'}
+        self.get_logger().error(
+            'G-17: the arm left teleop without teleop asking (now owned by '
+            f'{names.get(owner, "nobody")}): an arm error, an emergency stop or a controller '
+            'switch outside the mux; teleop disarms and stays disarmed: press the arm button '
+            'to arm again once the arm is ready')
+        self.owned_while_armed = False
+        self.owner_request_since = None
+        self.owner_request_ros_ns = None
+        # Teleop's own gripper command is not a reference any more: the next arming starts
+        # from the held reference after its own switch, or the measured opening. Nothing is
+        # commanded here (a freeze never opens or closes the gripper).
+        self.gripper_state = grip.GripperState()
+        self._disarm('G-17: ownership lost without a request')
 
     def _disarm(self, why: str) -> None:
         if self.state.want_armed:

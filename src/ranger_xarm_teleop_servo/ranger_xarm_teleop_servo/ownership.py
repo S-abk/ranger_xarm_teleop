@@ -127,6 +127,21 @@ def switch_lists(states: Mapping[str, str], pairs: Sequence[Tuple[str, str]],
     return (activate, deactivate), ''
 
 
+def outside_activation(states: Mapping[str, str], teleop_controllers: Sequence[str],
+                       switched_by_mux: bool) -> List[str]:
+    """
+    Return the teleop controllers that are active although the mux did not switch them there.
+
+    The robot's driver switches every controller off after an arm error and asks for all of
+    them to be activated again once the arm is ready, bypassing the mux (G-17). Such a teleop
+    controller is reported and, once the arm is still, deactivated; nothing is activated in
+    response.
+    """
+    if switched_by_mux:
+        return []
+    return [name for name in teleop_controllers if states.get(name) == 'active']
+
+
 def any_goal_active(statuses: Sequence[int]) -> bool:
     """Return True when any goal status is accepted, executing or canceling."""
     return any(int(s) in ACTIVE_GOAL_STATES for s in statuses)

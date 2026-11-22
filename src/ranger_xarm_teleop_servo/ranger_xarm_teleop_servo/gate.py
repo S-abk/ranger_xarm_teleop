@@ -350,7 +350,11 @@ def on_frame(state: GateState, frame: Frame, params: GateParams) -> GateState:
         # Button edges, against the last frame that had a controller. The first such
         # frame only sets the reference: a button already held is not a press.
         if buttons is not None:
-            if frame.arm and not buttons[2]:
+            if frame.arm and not buttons[2] and not want_armed and not params.motion_enabled:
+                # INV-2: with motion disabled (every hardware profile starts so) arming is
+                # refused at the press, not taken and undone later.
+                events.append(ARM_REFUSED_MOTION_DISABLED)
+            elif frame.arm and not buttons[2]:
                 want_armed = not want_armed
                 arm_pending = want_armed
                 coarse = False              # every arming starts at the fine scale
@@ -555,6 +559,11 @@ def _released(state: GateState, latched: Hold) -> GateState:
     return replace(state, engaged=False, waiting_since=None, clutch=None, tool0=None,
                    anchor=None, filtered=None, last_target=None, trip=Hold.NONE, latched=latched,
                    events=())
+
+
+ARM_REFUSED_MOTION_DISABLED = (
+    'arm refused: teleop motion is disabled (motion_enabled is false); to allow arming, stop '
+    'the teleop launch and start it again with motion_enabled:=true')
 
 
 def _check_arming(state: GateState, env: Env, params: GateParams,

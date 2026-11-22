@@ -22,6 +22,13 @@ side (``ranger_xarm_teleop_bridge`` bridge or replay) is launched separately.
 simulation-only is refused unless ``simulation:=true``, which only the mock and
 simulator wrappers pass. ``motion_enabled`` defaults to false.
 
+Without ``simulation:=true`` this is the hardware path (ranger_xarm_teleop_hardware
+teleop_hardware.launch.py wraps it): every hardware value of the limits file must be set
+(``limits.check_hardware_limits_file``, and the teleop node checks again); the teleop
+controller is the bring-up's own and is not loaded here; the reset and gripper teleop are
+refused. With motion disabled, MoveIt Servo is not started there, the teleop node creates no
+command publisher and the mux refuses every switch to teleop.
+
 Gripper teleop (``gripper_enabled``, default false): adds the teleop gripper controller
 (inactive), names both gripper controllers to the mux so it swaps them with the arm's,
 and starts the gripper relay. The limits file must then hold the gripper's range and speed.
@@ -50,7 +57,8 @@ from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from ranger_xarm_teleop_bringup.limits import (check_extra_params_file, check_gripper_limits,
-                                               check_limits_file, load_limits)
+                                               check_hardware_limits_file, check_limits_file,
+                                               load_limits)
 import yaml
 
 
@@ -69,9 +77,23 @@ def launch_setup(context, *args, **kwargs):
 
     simulation = _true(arg('simulation'))
     use_sim_time = _true(arg('use_sim_time'))
+    motion_enabled = _true(arg('motion_enabled'))
     limits_file = arg('limits_file')
-    limits = check_limits_file(limits_file, simulation)      # raises: the launch stops here
     gripper = _true(arg('gripper_enabled'))
+    if simulation:
+        limits = check_limits_file(limits_file, simulation)  # raises: the launch stops here
+    else:
+        # Not a simulation: the hardware path. Every hardware value must be set by the
+        # human (the template and the simulation-only file are refused); the stack attaches
+        # to a bring-up it did not start, so nothing is loaded into its controller manager;
+        # the reset and gripper teleop are simulation only.
+        limits = check_hardware_limits_file(limits_file)     # raises: the launch stops here
+        if _true(arg('reset')):
+            raise ValueError('reset:=true is refused outside simulation: the reset (G-16) is '
+                             'simulation only')
+        if gripper:
+            raise ValueError('gripper_enabled:=true is refused outside simulation: the '
+                             'gripper adapter for the real gripper action is not built yet')
     if gripper:
         check_gripper_limits(limits_file, limits)
         if not arg('moveit_gripper_controller'):
@@ -174,13 +196,17 @@ def launch_setup(context, *args, **kwargs):
                      'moveit_gripper_controller': (arg('moveit_gripper_controller')
                                                    if gripper else ''),
                      'teleop_gripper_controller': teleop_gripper if gripper else '',
-                     'gripper_joints': [arg('gripper_joint')]}, sim_time])
+                     'gripper_joints': [arg('gripper_joint')],
+                     # Motion disabled: the mux refuses every switch to teleop, so the teleop
+                     # controller stays inactive (it ignores anything sent to it).
+                     'refuse_teleop': not motion_enabled}, sim_time])
 
     teleop_parameters = [limits_file]
     if arg('teleop_params_file'):
         check_extra_params_file(arg('teleop_params_file'))     # raises: no overriding
         teleop_parameters.append(arg('teleop_params_file'))
-    teleop_parameters.append({'motion_enabled': _true(arg('motion_enabled')),
+    teleop_parameters.append({'motion_enabled': motion_enabled,
+                              'hardware_limits': not simulation,
                               'tool_frame': arg('tool_frame'),
                               'servo_tip_frame': arg('servo_tip_frame'),
                               'servo_node': '/servo_node',
@@ -227,7 +253,13 @@ def launch_setup(context, *args, **kwargs):
             parameters=[reset_params, {'reset_speed_scaling': float(speed),
                                        'enabled': True}, sim_time]))
 
-    return [spawner, servo_node, mux, teleop] + gripper_nodes + feedback_nodes + reset_nodes
+    nodes = [mux, teleop] + gripper_nodes + feedback_nodes + reset_nodes
+    if simulation:
+        return [spawner, servo_node] + nodes
+    # Hardware path: the teleop controller is the bring-up's own (spawned inactive there), and
+    # with motion disabled MoveIt Servo is not started, so nothing publishes on the teleop
+    # controller's command topic at all.
+    return ([servo_node] if motion_enabled else []) + nodes
 
 
 def generate_launch_description():

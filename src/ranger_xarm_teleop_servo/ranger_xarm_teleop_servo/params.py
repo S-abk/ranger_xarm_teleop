@@ -40,6 +40,12 @@ REQUIRED = (
     'max_translation_scale',        # largest fine or coarse translation scale
 )
 
+# On the hardware path (``hardware_limits``, set by the launch whenever it is not a
+# simulation) these must also come from the limits file: the link keep-out margin (PENDING in
+# the gate document) and the joint-state age limit, which on a real arm depends on how often
+# its driver reports and is chosen from the stage 2 check, not taken from simulation.
+HARDWARE_REQUIRED = REQUIRED + ('link_keepout_margin_m', 'tool_pose_timeout_s')
+
 # Set in the gate document.
 INPUT_TIMEOUT_S = 0.1
 TARGET_RATE_HZ = 50.0

@@ -1,0 +1,67 @@
+# HARDWARE LIMITS TEMPLATE
+#
+# This file has no values. Every value is PENDING: it has no default and must come from
+# whoever is responsible for the robot, with a reason you can write down.
+#
+# To use it: copy this file OUTSIDE any checkout, replace every PENDING with a number, delete
+# the first line of your copy (the marker line that names this file as the template), and pass
+# your copy as limits_file. The template itself is refused, and so is any copy that still has
+# the marker line or a PENDING, missing or non-positive value. The hardware path also refuses
+# the simulation-only limits file, so numbers cannot be borrowed from it by pointing at it.
+#
+# Gripper teleop and the reset are simulation only: they are refused on hardware, so their
+# values (gripper_enabled, gripper_open_position, gripper_closed_position, gripper_max_speed,
+# reset_speed_scaling) are not here and must not be set in your copy.
+#
+# How to choose each value is in docs/HARDWARE_PROCEDURE.md, "Values you supply".
+/**:
+  ros__parameters:
+    # What it bounds: how far the tool target may be from the tool pose at clutch engagement,
+    # translation. Unit: metres. How to choose: a fraction of the simulation value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    max_offset_translation_m: PENDING
+    # What it bounds: the same offset in rotation. Unit: degrees. How to choose: a fraction of
+    # the simulation value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    max_offset_rotation_deg: PENDING
+    # What it bounds: the angle between the view cone's axis (the headset's forward axis, tilted by
+    # view_cone_tilt_deg) and the direction to the controller, beyond which there is no motion.
+    # Unit: degrees. How to choose: a fraction of the simulation value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    view_cone_half_angle_deg: PENDING
+    # What it bounds: the largest translation of the target in one target cycle (20 ms); a larger
+    # step releases the clutch. Divided by the cycle it is also the raw controller speed above which
+    # input is held as a jump. Unit: metres per cycle. How to choose: a fraction of the simulation
+    # value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    step_translation_limit_m: PENDING
+    # What it bounds: the largest rotation of the target in one target cycle (20 ms); a larger step
+    # releases the clutch. Divided by the cycle it is also the raw controller rate above which input
+    # is held as a jump. Unit: degrees per cycle. How to choose: a fraction of the simulation
+    # value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    step_rotation_limit_deg: PENDING
+    # What it bounds: the tool's linear speed, enforced on the joint command. Unit: metres per
+    # second. How to choose: a fraction of the simulation value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    linear_speed_cap_m_s: PENDING
+    # What it bounds: the tool's angular speed, enforced on the joint command. Unit: radians per
+    # second. How to choose: a fraction of the simulation value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    angular_speed_cap_rad_s: PENDING
+    # What it bounds: how far the target may lead the measured tool pose, translation. Unit:
+    # metres. How to choose: at least the linear speed cap times the lag you measured between
+    # command and motion on this arm, or the clamp holds the arm below its cap; see
+    # docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    max_lead_translation_m: PENDING
+    # What it bounds: the same lead in rotation. Unit: degrees. How to choose: at least the
+    # angular speed cap times the measured lag, converted to degrees; see
+    # docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    max_lead_rotation_deg: PENDING
+    # What it bounds: the largest translation scale the operator may select (fine or coarse); a
+    # translation_scale_coarse or translation_scale_fine you add to your copy must not exceed it, or
+    # the file is refused. Unit: none (arm travel per unit of hand travel). How to choose: a fraction
+    # of the simulation value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    max_translation_scale: PENDING
+    # What it bounds: the clearance the arm's links and the tool keep from the robot's fixed
+    # structure, by the keep-out model. Unit: metres. How to choose: above MoveIt Servo's
+    # self-collision threshold and move_group's planning padding, plus the overshoot you measured on
+    # this arm's controller; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    link_keepout_margin_m: PENDING
+    # What it bounds: how old the measured tool pose may be before the gate stops motion.
+    # Unit: seconds. How to choose: from the stage 2 joint-state check: at least 3 times the
+    # largest gap it measured; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    tool_pose_timeout_s: PENDING

@@ -24,15 +24,21 @@ temporary directories for a few runs). Keeping logs is opt-in: the project's tes
 
 import os
 import shutil
+import sys
 
 import pytest
-from stack_helpers import keep_logs, KEEP_LOGS_ENV, TEMP_LOG_DIRS
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
+    # The stack tests import stack_helpers (ROS); the pure unit tests under test/unit must run
+    # without ROS, so it is imported by the test modules, never here.
+    helpers = sys.modules.get('stack_helpers')
+    if helpers is None:
+        return
+    keep_logs, KEEP_LOGS_ENV = helpers.keep_logs, helpers.KEEP_LOGS_ENV
     destination = os.environ.get(KEEP_LOGS_ENV)
     if destination and report.failed and report.when in ('setup', 'call'):
         module = item.nodeid.split('::')[0]
@@ -46,5 +52,8 @@ def pytest_runtest_makereport(item, call):
 
 def pytest_sessionfinish(session, exitstatus):
     """Remove the temporary ROS log directories (a failed test's were copied already)."""
-    for path in TEMP_LOG_DIRS:
+    helpers = sys.modules.get('stack_helpers')
+    if helpers is None:
+        return
+    for path in helpers.TEMP_LOG_DIRS:
         shutil.rmtree(path, ignore_errors=True)
