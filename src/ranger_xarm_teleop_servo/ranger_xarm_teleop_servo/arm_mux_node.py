@@ -79,8 +79,8 @@ ACTION_STATUS_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                                history=HistoryPolicy.KEEP_LAST, depth=1,
                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
 TELEOP_STATE_TIMEOUT_S = 0.5
-# As the controller manager publishes ~/activity (reliable, transient local); deeper on this
-# side so that two switches in quick succession are both taken in.
+# As the controller manager publishes ~/activity (reliable, transient local). Its own history
+# is one message deep, so a switch reported right after another can replace it before delivery.
 ACTIVITY_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                           history=HistoryPolicy.KEEP_LAST, depth=10,
                           durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -162,6 +162,10 @@ class ArmMuxNode(Node):
         sim_time = [self.get_parameter('use_sim_time')]
         self.observer = Node(f'{node_name}_observer', parameter_overrides=sim_time)
         self.client = Node(f'{node_name}_client', parameter_overrides=sim_time)
+        # The controller manager's switch reports on a node and thread of their own, so they
+        # are never queued behind the 150 Hz joint states of the observer.
+        self.activity = Node(f'{node_name}_activity', parameter_overrides=sim_time)
+        self.switch_requested_ns = 0    # ROS time of this mux's newest switch request
         self.owner_pub = self.create_publisher(ArmOwner, OWNER_TOPIC, 10)
         # Deep enough that a stall of this process loses no sample (150 Hz for over 1 s).
         self.observer.create_subscription(JointState, '/joint_states', self._on_joint_state,
@@ -173,7 +177,7 @@ class ArmMuxNode(Node):
                 ACTION_STATUS_QOS)
         self.observer.create_subscription(TeleopState, STATE_TOPIC, self._on_teleop_state, 10)
         # Every controller switch, as the controller manager reports it (G-17 bookkeeping).
-        self.observer.create_subscription(ControllerManagerActivity, f'{manager}/activity',
+        self.activity.create_subscription(ControllerManagerActivity, f'{manager}/activity',
                                           self._on_activity, ACTIVITY_QOS)
         self.list_client = self.client.create_client(ListControllers,
                                                      f'{manager}/list_controllers')
@@ -297,8 +301,9 @@ class ArmMuxNode(Node):
         """
         if not states:
             return
-        teleop = [self.teleop_controller] + ([self.teleop_gripper] if self.gripper else [])
-        if not all(states.get(name) == 'active' for name in teleop):
+        # The arm's teleop controller only, as for the outside activation itself: a gripper
+        # split stays the split rule's (reported, resolved to MoveIt on request).
+        if states.get(self.teleop_controller) != 'active':
             with self.lock:
                 self.teleop_by_mux = False
 
@@ -309,6 +314,11 @@ class ArmMuxNode(Node):
         Polling can miss a deactivation followed by a reactivation between two reads (a read
         not answered, or the timer held up by a request); the manager publishes each switch.
         """
+        stamp = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        with self.lock:
+            older = stamp < self.switch_requested_ns
+        if older:
+            return                      # from before this mux's own switch: says nothing of it
         self.note_states({c.name: c.state.label for c in msg.controllers})
 
     def restore_order(self, states: Dict[str, str]) -> None:
@@ -412,6 +422,13 @@ class ArmMuxNode(Node):
                 return MuxStatus.SWITCH_FAILED, (
                     f'{", ".join(active)} active without a switch by the mux (an outside '
                     'switch): it is deactivated before teleop may have the arm')
+        if wanted == Owner.MOVEIT and outside_activation(states, [self.teleop_controller],
+                                                         self.teleop_by_mux):
+            # An outside activation is undone by deactivating it (restore_order), never
+            # answered by activating MoveIt's controller.
+            return MuxStatus.SWITCH_FAILED, (
+                f'{self.teleop_controller} active without a switch by the mux (an outside '
+                'switch): it is deactivated first, then MoveIt may have the arm')
         if current == wanted:
             return MuxStatus.OK, ''
         # "Stopped" needs an unbroken run of still joint-state samples. If that run is
@@ -447,6 +464,8 @@ class ArmMuxNode(Node):
             return MuxStatus.SWITCH_FAILED, why
         request = SwitchController.Request()
         request.activate_controllers, request.deactivate_controllers = lists
+        with self.lock:
+            self.switch_requested_ns = self.get_clock().now().nanoseconds
         request.strictness = SwitchController.Request.STRICT
         request.activate_asap = True
         request.timeout.sec = int(self.switch_timeout)
@@ -479,7 +498,7 @@ def main(args=None) -> None:
     rclpy.init(args=args)
     node = ArmMuxNode()
     threads = []
-    for other in (node.observer, node.client):
+    for other in (node.observer, node.client, node.activity):
         executor = SingleThreadedExecutor()
         executor.add_node(other)
         thread = threading.Thread(target=_spin, args=(executor,), daemon=True)

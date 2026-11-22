@@ -175,3 +175,30 @@ def test_only_the_arm_teleop_controller_counts_as_an_outside_activation(ros, mon
         assert node.outside == '' and calls == []
     finally:
         node.destroy_node()
+
+
+def test_moveit_is_not_activated_in_answer_to_an_outside_activation(ros, monkeypatch):
+    node, calls, published = make_mux(monkeypatch, [MuxStatus.OK] * 10)
+    try:
+        status, detail = node.set_owner(Owner.MOVEIT)
+        assert status == MuxStatus.SWITCH_FAILED and 'deactivated first' in detail
+        assert calls == []
+    finally:
+        node.destroy_node()
+
+
+def test_activity_from_before_the_mux_own_switch_is_ignored(ros, monkeypatch):
+    node, calls, published = make_mux(monkeypatch, [MuxStatus.OK] * 10)
+    try:
+        node.teleop_by_mux = True
+        node.switch_requested_ns = 2_000_000_000
+        old = activity({'teleop_arm_controller': 'inactive'})
+        old.header.stamp.sec = 1                    # stamped before the switch request
+        node._on_activity(old)
+        assert node.teleop_by_mux is True
+        new = activity({'teleop_arm_controller': 'inactive'})
+        new.header.stamp.sec = 3
+        node._on_activity(new)
+        assert node.teleop_by_mux is False
+    finally:
+        node.destroy_node()
