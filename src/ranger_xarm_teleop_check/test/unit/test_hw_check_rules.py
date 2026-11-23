@@ -356,7 +356,9 @@ def test_stage_composition():
              for s in ('idle', 'motion', 'teleop')}
     assert 'joint_states rate' in names['idle'] and 'wrist oscillation' not in names['idle']
     # The teleop stage judges the Servo output instead of the joint-state acceleration.
-    assert names['idle'] < names['motion']
+    # The arm's own state topic is read in the idle stage only.
+    assert names['idle'] - {'arm state (/xarm/robot_states)'} < names['motion']
+    assert 'arm state (/xarm/robot_states)' in names['idle'] - names['motion']
     assert names['motion'] - {'peak joint acceleration'} < names['teleop']
     assert 'peak joint acceleration' not in names['teleop']
     assert 'target lag' in names['teleop'] and 'stale repeats while moving' in names['motion']

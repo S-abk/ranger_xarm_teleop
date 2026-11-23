@@ -233,3 +233,34 @@ def test_gripper_step_toward():
     assert hwmock.step_toward(0.2, 0.2, 1.0, 0.1) == 0.2
     assert hwmock.step_toward(0.0, 0.5, 1.0, 0.0) == 0.0
     assert hwmock.step_toward(0.0, 0.5, 1.0, -1.0) == 0.0
+
+
+def test_robot_state_fields_default_to_ready_servo_with_every_axis_enabled():
+    fields = hwmock.robot_state_fields()
+    assert fields == {'err': 0, 'warn': 0, 'mode': 1, 'state': 2, 'mt_brake': 63,
+                      'mt_able': 63, 'angle': []}
+    assert hwmock.ROBOT_STATES_TOPIC == '/xarm/robot_states'
+    assert hwmock.ROBOT_STATES_RATE_HZ == 5.0
+
+
+def test_robot_state_fields_take_err_mode_state_and_angles():
+    fields = hwmock.robot_state_fields(err=3, mode=0, state=4, angles=(1, 2.5))
+    assert (fields['err'], fields['mode'], fields['state']) == (3, 0, 4)
+    assert fields['warn'] == 0 and fields['angle'] == [1.0, 2.5]
+
+
+def test_arm_angles_are_in_joint_order_and_only_from_a_full_arm_message():
+    names = list(reversed(hwmock.ARM_JOINTS)) + [hwmock.GRIPPER_JOINT]
+    positions = [6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.5]
+    assert hwmock.arm_angles(names, positions) == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    assert hwmock.arm_angles([hwmock.GRIPPER_JOINT], [0.3]) == []
+    assert hwmock.arm_angles(list(hwmock.ARM_JOINTS[:5]), [0.0] * 5) == []
+    assert hwmock.arm_angles([], []) == []
+
+
+def test_robot_states_standin_is_started_in_every_stage_and_installed():
+    text = LAUNCH.read_text(encoding='utf-8')
+    assert text.count("executable='robot_states_standin'") == 1
+    assert 'robot_states_standin' in (PKG_DIR / 'setup.py').read_text(encoding='utf-8')
+    assert '<exec_depend>xarm_msgs</exec_depend>' in (
+        PKG_DIR / 'package.xml').read_text(encoding='utf-8')

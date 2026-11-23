@@ -18,10 +18,11 @@ What it is: a stand-in with the shape of the robot workspace's real bring-up
 (real_hardware_check.launch.py for stage check, real_execution.launch.py for stage
 execution). The same robot description, ros2_control_node, controller files, controller
 spawners and move_group, with the real xArm plugin replaced by mock_components/GenericSystem
-and the real gripper proxy replaced by a stand-in (hwmock_gripper_proxy). The execution stage
-also loads this package's teleop controller file and spawns teleop_arm_controller inactive,
-as the real bring-up does once that fragment is added there. Everything runs on the system
-clock; nothing publishes /clock.
+and the real gripper proxy replaced by a stand-in (hwmock_gripper_proxy). Both stages also run
+a stand-in for the vendor driver's /xarm/robot_states (robot_states_standin: err 0, mode 1,
+state 2, 5 Hz). The execution stage also loads this package's teleop controller file and
+spawns teleop_arm_controller inactive, as the real bring-up does once that fragment is added
+there. Everything runs on the system clock; nothing publishes /clock.
 
 What it is not: a robot. Nothing here talks to hardware, nothing is measured, and it proves
 nothing about real timing, tracking, limits or the gripper. The arm starts wherever
@@ -166,6 +167,9 @@ def _stage_actions(context):
     for name, extra in hwmock.spawner_specs(stage):
         actions.append(Node(package='controller_manager', executable='spawner',
                             output='screen', arguments=hwmock.spawner_arguments(name, extra)))
+    actions.append(Node(
+        package='ranger_xarm_teleop_hardware', executable='robot_states_standin',
+        name='robot_states_standin', output='screen'))
     if not execution:
         actions.append(Node(
             package='rviz2', executable='rviz2', output='screen',

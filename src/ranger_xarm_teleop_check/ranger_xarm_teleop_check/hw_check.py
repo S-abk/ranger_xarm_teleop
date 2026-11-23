@@ -45,6 +45,9 @@ TELEOP_STATE_DEPTH = 50
 ROSOUT_DEPTH = 1000
 # MoveIt Servo's output topic, about 50 Hz: no message lost over a stall of one second.
 COMMAND_DEPTH = 50
+# The vendor driver's state topic (about 5 Hz): no message lost over a stall of ten seconds.
+ROBOT_STATES_DEPTH = 50
+ROBOT_STATES_RETRY_S = 0.5
 CAMERA_DEFAULT_QOS = {'reliability': 'best_effort', 'depth': 10}
 
 
@@ -188,7 +191,7 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
     data = {'arm': [], 'gripper': [], 'js_publishers': [], 'clock_publishers': [],
             'activity': None, 'controller_state': {}, 'description': None, 'states': [],
             'targets': [], 'command': [], 'command_capture': None, 'clutch': [],
-            'warnings': [],
+            'warnings': [], 'robot_states': None,
             'rosout': {'overruns': 0, 'read_failures': 0, 'overrun_examples': [],
                        'read_examples': []},
             'cameras': {}, 'qos': {}}
@@ -216,8 +219,11 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
             _subscribe_stack(stage, opts, data, subscribe, system_clock)
         began = time.monotonic()
         deadline = began + seconds
+        robot_states = _RobotStates(node, data, subscribe) if stage == 'idle' else None
         while True:
             now = time.monotonic()
+            if robot_states is not None:
+                robot_states.poll(now)
             if now >= deadline and (stage == 'cameras' or data['activity'] is not None
                                     or now - began >= rules.ACTIVITY_WAIT_S):
                 break
@@ -332,6 +338,51 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
     # /rosout is published transient_local with a 10 s lifespan; a volatile subscriber does
     # not replay what happened before the run.
     subscribe(Log, '/rosout', on_rosout, ROSOUT_DEPTH, 'reliable', 'volatile')
+
+
+class _RobotStates:
+    """
+    The vendor driver's /xarm/robot_states, read-only, idle stage.
+
+    Subscribes once a publisher of the topic is on the graph (looked up again twice a second
+    until then, so a driver that is a little late is still read). Never a service client: the
+    topic is the only thing asked of the driver. ``xarm_msgs`` is imported only then, so a
+    machine without it says so instead of failing.
+    """
+
+    def __init__(self, node, data, subscribe):
+        self._node = node
+        self._subscribe = subscribe
+        self._next = 0.0
+        self._done = False
+        self._record = data['robot_states'] = {'publishers': [], 'unavailable': None,
+                                               'messages': []}
+
+    def poll(self, now: float):
+        """Subscribe when a publisher has appeared; record the publishers seen."""
+        if self._done or now < self._next:
+            return
+        self._next = now + ROBOT_STATES_RETRY_S
+        publishers = _publisher_names(self._node, rules.ARM_STATE_TOPIC)
+        if not publishers:
+            return
+        self._record['publishers'] = publishers
+        self._done = True
+        try:
+            from xarm_msgs.msg import RobotMsg
+        except ImportError as exc:
+            print(f'xarm_msgs cannot be imported ({exc}): {rules.ARM_STATE_TOPIC} not read',
+                  file=sys.stderr, flush=True)
+            self._record['unavailable'] = 'xarm_msgs not installed'
+            return
+        messages = self._record['messages']
+
+        def on_state(msg):
+            messages.append((time.monotonic(), int(msg.err), int(msg.warn), int(msg.state),
+                             int(msg.mode), int(msg.mt_brake), int(msg.mt_able)))
+
+        self._subscribe(RobotMsg, rules.ARM_STATE_TOPIC, on_state, ROBOT_STATES_DEPTH,
+                        'reliable', 'volatile')
 
 
 def _subscribe_cameras(node, opts, data):

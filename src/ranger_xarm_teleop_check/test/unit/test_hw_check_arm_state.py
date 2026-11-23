@@ -1,0 +1,138 @@
+# Copyright 2026 Shuaib Olanrewaju
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The arm-state rule on /xarm/robot_states, from synthetic captures."""
+
+from ranger_xarm_teleop_check import rules
+from ranger_xarm_teleop_check.rules import FAIL, INFO, NOT_JUDGED, Options, PASS
+from test_hw_check_rules import idle_data
+
+RULE = 'arm state (/xarm/robot_states)'
+THRESHOLD = 'err 0, mode 1 (servo), state <= 2 (1 running, 2 ready) in every message'
+
+
+def message(t, err=0, warn=0, state=2, mode=1, brake=63, able=63):
+    return (t, err, warn, state, mode, brake, able)
+
+
+def capture(n=50, **last):
+    """Return ``data['robot_states']`` for ``n`` messages at 5 Hz; ``last`` edits the last."""
+    messages = [message(1000.0 + 0.2 * i) for i in range(n)]
+    if last:
+        messages[-1] = message(1000.0 + 0.2 * (n - 1), **last)
+    return {'publishers': ['/xarm/driver'], 'unavailable': None, 'messages': messages}
+
+
+def judged(robot_states):
+    data = idle_data(robot_states=robot_states)
+    _, results = rules.evaluate('idle', data, Options())
+    return next(r for r in results if r.rule == RULE)
+
+
+def test_all_messages_good_pass():
+    r = judged(capture())
+    assert r.verdict == PASS and r.threshold == THRESHOLD
+    assert '50 messages at 5.0 Hz' in r.measured
+    assert 'last err 0, warn 0, state 2, mode 1' in r.measured
+    assert '0 of 50 messages broke the rule' in r.measured
+    assert r.line().startswith(f'PASS  {RULE}: ')
+
+
+def test_state_1_running_passes():
+    assert judged(capture(state=1)).verdict == PASS
+
+
+def test_one_message_with_an_error_fails_and_names_it():
+    r = judged(capture(err=3))
+    assert r.verdict == FAIL
+    assert 'err != 0 in 1 of 50 messages' in r.measured
+    assert 'last err 3' in r.measured and '1 of 50 messages broke the rule' in r.measured
+    assert "clear the error in the vendor's software and restart from stage 2" in r.advice
+    assert r.advice.startswith('stop')
+    assert 'err 3' in r.advice
+    assert 'to do: stop' in r.line()
+
+
+def test_mode_not_servo_fails():
+    r = judged(capture(mode=0))
+    assert r.verdict == FAIL
+    assert 'mode != 1 in 1 of 50' in r.measured and 'last err 0' in r.measured
+    assert 'set servo mode (mode 1) as the procedure says' in r.advice
+    assert 'error' not in r.advice
+
+
+def test_state_above_two_fails():
+    r = judged(capture(state=4))
+    assert r.verdict == FAIL
+    assert 'state > 2 in 1 of 50' in r.measured and 'state 4' in r.measured
+    assert 'the arm is not ready (stopped, paused or configuration changed)' in r.advice
+
+
+def test_a_message_breaking_two_ways_counts_once_and_gives_both_advices():
+    r = judged(capture(err=7, state=5))
+    assert r.verdict == FAIL
+    assert '1 of 50 messages broke the rule' in r.measured
+    assert 'err != 0 in 1' in r.measured and 'state > 2 in 1' in r.measured
+    assert 'vendor' in r.advice and 'not ready' in r.advice
+
+
+def test_no_topic_is_info_not_available_and_leaves_a_simulation_clean():
+    r = judged(None)
+    assert r.verdict == INFO and r.measured == 'not available: no publisher of /xarm/robot_states'
+    absent = judged({'publishers': [], 'unavailable': None, 'messages': []})
+    assert absent.verdict == INFO and absent.measured == r.measured
+    _, results = rules.evaluate('idle', idle_data(), Options())
+    assert rules.exit_status([x for x in results if x.rule == RULE]) == 0
+
+
+def test_xarm_msgs_missing_is_info_not_available():
+    r = judged({'publishers': ['/xarm/driver'], 'unavailable': 'xarm_msgs not installed',
+                'messages': []})
+    assert r.verdict == INFO and r.measured == 'not available (xarm_msgs not installed)'
+
+
+def test_a_publisher_that_sent_nothing_is_not_judged():
+    r = judged({'publishers': ['/xarm/driver'], 'unavailable': None, 'messages': []})
+    assert r.verdict == NOT_JUDGED and '/xarm/driver' in r.measured and r.advice
+
+
+def test_axis_bits_are_six_characters_with_joint_1_first():
+    assert rules.axis_bits(63) == '111111'
+    assert rules.axis_bits(0) == '000000'
+    assert rules.axis_bits(1) == '100000'          # bit 0 is joint 1
+    assert rules.axis_bits(0b100000) == '000001'   # bit 5 is joint 6
+    assert rules.axis_bits(0b000110) == '011000'
+    assert rules.axis_bits(-1) == '111111'         # int16 sign bits are not axes
+    assert rules.axis_bits(64 + 3) == '110000'     # nothing beyond six axes
+
+
+def test_the_bit_strings_are_shown_in_the_stated_order():
+    r = judged(capture(brake=0b000011, able=0b100001))
+    assert 'mt_brake 110000, mt_able 100001' in r.measured
+    assert '6 bits, joint 1 first' in r.measured
+
+
+def test_measures_carry_the_counts_and_last_values_for_the_report():
+    measures, _ = rules.evaluate('idle', idle_data(robot_states=capture(err=3, mode=0)),
+                                 Options())
+    am = measures['arm_state']
+    assert am['messages'] == 50 and am['bad_err'] == 1 and am['bad_mode'] == 1
+    assert am['bad_state'] == 0 and am['bad_messages'] == 1
+    assert am['last']['err'] == 3 and am['last']['mt_brake'] == '111111'
+
+
+def test_only_the_idle_stage_judges_it():
+    for stage in ('motion', 'teleop'):
+        data = idle_data(robot_states=capture(err=3))
+        _, results = rules.evaluate(stage, data, Options())
+        assert RULE not in {r.rule for r in results}

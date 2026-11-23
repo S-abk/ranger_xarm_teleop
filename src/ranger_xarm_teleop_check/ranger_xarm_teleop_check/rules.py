@@ -755,6 +755,87 @@ def info_joint_state_acceleration(jm: dict, opts: Options) -> Result:
                   f"MoveIt's max_acceleration {moveit} for reference")
 
 
+# ---- the arm's own state (vendor driver, /xarm/robot_states) ----------------------------
+
+ARM_STATE_RULE = 'arm state (/xarm/robot_states)'
+ARM_STATE_TOPIC = '/xarm/robot_states'
+ARM_STATE_THRESHOLD = 'err 0, mode 1 (servo), state <= 2 (1 running, 2 ready) in every message'
+ARM_STATE_MODE = 1
+ARM_STATE_MAX_STATE = 2
+ARM_AXES = 6
+ARM_ERR_ADVICE = "stop: clear the error in the vendor's software and restart from stage 2"
+ARM_MODE_ADVICE = 'set servo mode (mode 1) as the procedure says'
+ARM_STATE_ADVICE = 'the arm is not ready (stopped, paused or configuration changed)'
+
+
+def axis_bits(value) -> str:
+    """Return the low six bits of a per-axis flag as a string, joint 1 (bit 0) first."""
+    return format(int(value) & ((1 << ARM_AXES) - 1), f'0{ARM_AXES}b')[::-1]
+
+
+def arm_state_measures(data: dict) -> dict:
+    """
+    Return what /xarm/robot_states showed.
+
+    ``data['robot_states']`` is None or {'publishers': [names], 'unavailable': reason or None,
+    'messages': [(arrival s, err, warn, state, mode, mt_brake, mt_able)]}.
+    """
+    raw = data.get('robot_states') or {}
+    messages = list(raw.get('messages') or [])
+    out = {'publishers': sorted(raw.get('publishers') or []),
+           'unavailable': raw.get('unavailable'), 'messages': len(messages),
+           'rate_hz': stats.period_distribution([m[0] for m in messages], None)['rate_hz'],
+           'bad_err': sum(1 for m in messages if m[1] != 0),
+           'bad_mode': sum(1 for m in messages if m[4] != ARM_STATE_MODE),
+           'bad_state': sum(1 for m in messages if m[3] > ARM_STATE_MAX_STATE),
+           'bad_messages': sum(1 for m in messages if _breaks_arm_state(m)), 'last': None}
+    if messages:
+        _, err, warn, state, mode, brake, able = messages[-1]
+        out['last'] = {'err': err, 'warn': warn, 'state': state, 'mode': mode,
+                       'mt_brake': axis_bits(brake), 'mt_able': axis_bits(able)}
+    return out
+
+
+def _breaks_arm_state(message) -> bool:
+    return (message[1] != 0 or message[4] != ARM_STATE_MODE
+            or message[3] > ARM_STATE_MAX_STATE)
+
+
+def rule_arm_state(am: dict) -> Result:
+    """Judge the vendor driver's err, mode and state in every message; INFO when absent."""
+    name, threshold = ARM_STATE_RULE, ARM_STATE_THRESHOLD
+    if am['unavailable']:
+        return Result(name, INFO, f"not available ({am['unavailable']})", threshold)
+    if not am['publishers'] and not am['messages']:
+        return Result(name, INFO, f'not available: no publisher of {ARM_STATE_TOPIC}', threshold)
+    if not am['messages']:
+        return Result(name, NOT_JUDGED,
+                      f'no message arrived from {", ".join(am["publishers"])}', threshold,
+                      f'{ARM_STATE_TOPIC} has a publisher but sent nothing during the run: '
+                      'check that the vendor driver is connected to the arm')
+    last = am['last']
+    n = am['messages']
+    measured = (f"{n} messages at {_hz(am['rate_hz'])}; last err {last['err']}, warn "
+                f"{last['warn']}, state {last['state']}, mode {last['mode']}; mt_brake "
+                f"{last['mt_brake']}, mt_able {last['mt_able']} (6 bits, joint 1 first; "
+                f"mt_brake 1 = brake on, mt_able 1 = servo enabled); {am['bad_messages']} of "
+                f'{n} messages broke the rule')
+    if not am['bad_messages']:
+        return Result(name, PASS, measured, threshold)
+    wrong, advice = [], []
+    if am['bad_err']:
+        wrong.append(f"err != 0 in {am['bad_err']}")
+        advice.append(ARM_ERR_ADVICE + f" (last err {last['err']})")
+    if am['bad_mode']:
+        wrong.append(f"mode != {ARM_STATE_MODE} in {am['bad_mode']}")
+        advice.append(ARM_MODE_ADVICE + f" (last mode {last['mode']})")
+    if am['bad_state']:
+        wrong.append(f"state > {ARM_STATE_MAX_STATE} in {am['bad_state']}")
+        advice.append(ARM_STATE_ADVICE + f" (last state {last['state']})")
+    return Result(name, FAIL, f"{', '.join(wrong)} of {n} messages; {measured}", threshold,
+                  '; '.join(advice))
+
+
 # ---- cameras ----------------------------------------------------------------------------
 
 def camera_measures(data: dict, streams: List[dict]) -> dict:
@@ -837,7 +918,9 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
     [(time_from_start s, positions)]) of the Servo output), ``command_capture``
     ({'began', 'ended'} on the arrival clock), ``clutch`` ((header stamp ns, clutch_engaged)
     of /teleop/state), ``rosout`` (counts and examples), ``machine``, ``versions``,
-    ``gate`` (driver_gate), ``cameras`` ({stream: {mono, stamps, first}}).
+    ``gate`` (driver_gate), ``robot_states`` (idle: None or {publishers, unavailable, messages
+    of (arrival s, err, warn, state, mode, mt_brake, mt_able)}), ``cameras`` ({stream: {mono,
+    stamps, first}}).
     """
     measures: Dict[str, Any] = {}
     results: List[Result] = []
@@ -863,6 +946,9 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
     measures['driver_gate'] = data.get('gate', {})
     results.append(rule_driver_gate(data.get('gate') or {'verdict': NOT_JUDGED,
                                                          'reason': 'no gate result'}))
+    if stage == 'idle':
+        measures['arm_state'] = arm_state_measures(data)
+        results.append(rule_arm_state(measures['arm_state']))
     if stage in ('motion', 'teleop'):
         mm = motion_measures(data)
         measures['motion'] = mm

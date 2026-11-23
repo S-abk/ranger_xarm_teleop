@@ -40,6 +40,7 @@ setup(
     entry_points={
         'console_scripts': [
             'hwmock_gripper_proxy = ranger_xarm_teleop_hardware.hwmock_gripper_proxy:main',
+            'robot_states_standin = ranger_xarm_teleop_hardware.robot_states_standin:main',
             'attach_preflight = ranger_xarm_teleop_hardware.preflight:main',
         ],
     },
