@@ -339,6 +339,7 @@ def at(node, t, owner=None):
     node.mono = lambda: t
     if owner is not None:
         node.owner, node.owner_arrival = owner, t
+        node.owner_stamp_ns = node.get_clock().now().nanoseconds   # made now, by the mux
     node.manage_ownership(t, node.current_owner(t))
 
 
@@ -483,5 +484,24 @@ def test_a_late_answer_after_g17_changes_nothing(ros):
         assert not node.state.want_armed and node.owner == ArmOwner.OWNER_NONE
         assert node.owner_request_since is None
         assert any(text.startswith('late answer') for _, text in node.log.lines)
+    finally:
+        node.close()
+
+
+def test_a_report_stamped_before_the_request_is_not_read_back(ros):
+    """Reports queued from before the request (a stall of teleop) arrive fresh but say nothing."""
+    node = asking_node(ros)
+    try:
+        at(node, 10.0, ArmOwner.OWNER_MOVEIT)
+        made_before = node.owner_request_sent_ns - 1
+        node.mono = lambda: 15.2
+        node.owner, node.owner_arrival, node.owner_stamp_ns = (ArmOwner.OWNER_MOVEIT, 15.2,
+                                                               made_before)
+        node.manage_ownership(15.2, node.current_owner(15.2))
+        assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP]   # not asked again
+        lines = no_answer_lines(node)
+        assert len(lines) == 1 and 'stamped before the request' in lines[0]
+        at(node, 15.4, ArmOwner.OWNER_MOVEIT)                    # a report made after it
+        assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP] * 2
     finally:
         node.close()

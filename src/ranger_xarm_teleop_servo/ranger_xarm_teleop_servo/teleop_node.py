@@ -586,6 +586,8 @@ class TeleopNode(Node):
         self.owner = ArmOwner.OWNER_NONE
         self.mux_status = ArmOwner.STATUS_OK
         self.owner_arrival: Optional[float] = None
+        self.owner_stamp_ns = 0             # ROS time the mux stamped its newest report with
+        self.owner_request_sent_ns = 0      # ROS time the newest ownership request was sent
         self.owner_request_since: Optional[float] = None
         self.owner_request_wanted: Optional[int] = None
         self.owner_request_id = 0           # the newest request; older answers are late ones
@@ -994,6 +996,7 @@ class TeleopNode(Node):
         self.owner = msg.owner
         self.owner_gripper = bool(msg.gripper)
         self.owner_arrival = self.mono()
+        self.owner_stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
 
     def _on_gripper_held(self, msg: JointState) -> None:
         try:
@@ -2132,7 +2135,8 @@ class TeleopNode(Node):
         # Teleop's request window: opened when it asks for the arm, closed when it gives it back
         # (a later owner switch it did not ask for has no request: no held report counts). A
         # request asked again opens it anew: the switch, if any, follows the new request.
-        self.owner_request_ros_ns = (self.get_clock().now().nanoseconds
+        self.owner_request_sent_ns = self.get_clock().now().nanoseconds
+        self.owner_request_ros_ns = (self.owner_request_sent_ns
                                      if wanted == ArmOwner.OWNER_TELEOP else None)
         future = self.owner_client.call_async(SetArmOwner.Request(owner=wanted))
         future.add_done_callback(lambda f: self._owner_answered(f, wanted, request_id))
@@ -2141,8 +2145,10 @@ class TeleopNode(Node):
         """
         Settle an ownership request that had no answer in time; return (settled, ask again).
 
-        The outcome is unknown, so the mux's own report is read back. Without a fresh report
-        (the mux silent, or busy with the request: it reports from the thread that serves it),
+        The outcome is unknown, so the mux's own report is read back. A report is fresh for the
+        request when it arrived lately and its stamp is later than the request was sent.
+        Without a fresh report (the mux silent, or busy with the request: it reports from the
+        thread that serves it; or only reports made before the request, queued in a stall),
         or while it reports a switch in progress, nothing is asked again (never blindly); an
         arm request still unknown after OWNER_UNKNOWN_LIMIT_S, or with the mux's service gone,
         disarms. A fresh report settles it: the owner asked for (the switch was made, its
@@ -2152,12 +2158,16 @@ class TeleopNode(Node):
         wanted = OWNER_NAMES[self.owner_request_wanted]
         waited = (f'no answer from the command mux within {OWNER_REQUEST_TIMEOUT_S:g} s to the '
                   f'request for {wanted}')
-        if not reported or self.owner == ArmOwner.OWNER_SWITCHING:
+        # Fresh for this request: arrived lately and made after the request was sent (its stamp),
+        # so reports queued from before it (a stall of this process) are not read back.
+        after = self.owner_stamp_ns >= self.owner_request_sent_ns
+        if not reported or not after or self.owner == ArmOwner.OWNER_SWITCHING:
             if not self.owner_unknown_logged:
                 age = (now - self.owner_arrival if self.owner_arrival is not None
                        else math.inf)
                 why = (f'its newest owner report is {age:.1f} s old' if not reported
-                       else 'it reports a switch in progress')
+                       else 'its newest owner report is stamped before the request'
+                       if not after else 'it reports a switch in progress')
                 self.get_logger().warning(
                     f'{waited}, and {why}: the outcome is unknown; nothing is asked again '
                     'until the mux reports an owner')
