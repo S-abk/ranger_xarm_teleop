@@ -88,22 +88,27 @@ first real session (0.51 to 0.72 m/s logged), so start at 0.020 to 0.025.
 **The keep-out margin drops a pair it can never keep.** A pair of an arm link and a fixed
 link that is closer than the margin in every posture is left out of the keep-out altogether,
 not kept clear. On the hardware path the teleop node then refuses to start and names the pair
-and its clearance range; in simulation it logs a WARN line. On this arm, `xarm_link2` against
-the arm base has at most 48 mm of clearance: a margin of 0.05 left that pair out, and 0.04
-keeps it. Choose a margin below the largest clearance the refusal names. If that clearance is
-below the smallest margin you can accept (MoveIt Servo's self-collision threshold and
-move_group's planning padding, plus the overshoot measured on this arm), stop: the robot
-description's geometry needs a look first.
+and its clearance range; in simulation it logs a WARN line. Choose a margin below the largest
+clearance the refusal names. If that clearance is below the smallest margin you can accept
+(MoveIt Servo's self-collision threshold and move_group's planning padding, plus the overshoot
+measured on this arm), stop: the robot description's geometry needs a look first.
 
-**A kept pair can still hold the arm back.** The model covers both links with spheres, so it
-reads `xarm_link2` against the arm base at 31 to 48 mm where the true surfaces are about 70 mm
-apart; at the stage 4 posture it reads about 35 mm. At a margin of 0.04 that pair is at or
-inside the margin there, the keep-out removes every motion of joints 1 and 2, and the tool only
-pivots about the wrist: the first stage 4 run on the arm did exactly this, with every judged
-check rule passing. 0.025 is the value that has worked on the arm: about 7 mm of room for that
-pair on 10 cm strokes from the stage 4 posture. The sphere model reads this pair 20 to 40 mm
-closer than the true geometry, so the model's room is not the real room. Whatever margin you
-choose, check it in the preview at the stage 4 posture (3b') before arming.
+**A kept pair can still hold the arm back.** The model covers links with spheres, which read a
+pair closer than its surfaces are. Where a pair stays within that error of the margin across
+its whole range, as `xarm_link2` against the arm base does, the model covers both sides
+finer (15 mm cells; the start-up log names them). That pair then reads 47 to 54 mm over joint
+1 and joint 2 within 1.6 rad, where the true surfaces are about 70 mm apart (31 to 48 mm with
+the coarser cells, which at a margin of 0.04 held joints 1 and 2 still at the stage 4 posture
+and left the tool pivoting about the wrist on the first stage 4 run). If a kept pair is still
+inside the margin over more than a quarter of the joint range the solver allows, the hardware
+path refuses the start, naming the pair and the largest margin that frees it: on this arm 0.05
+is refused that way (free up to about 48 mm), 0.045 is not. At the stage 4 posture and on
+10 cm strokes from it, no pair is inside a margin up to about 0.042 in open space; pulling the
+tool back over the base brings link 2 within the margin of the structure behind the arm,
+which is real structure and is meant to hold it. 0.025 is the value that has worked on the
+arm. The node logs at every start the largest margin no pair is inside around the posture it
+starts in. Whatever margin you choose, check it in the preview at the stage 4 posture (3b')
+before arming.
 
 **The joint speed cap and the joint acceleration limit (G-18).** The arm's streamed servo mode
 (the firmware's mode 1, which the ros2_control driver uses) executes each point it receives at

@@ -52,6 +52,20 @@ centroid or its cell's centre, whichever needs less). When both sides are covere
 fixed mesh, or the tool against an arm link), the two sides add. Measured on the mock
 robot it is about one radius per side, more where an obstacle faces a concave patch.
 
+**Finer cells where the model, not the geometry, holds a pair.** A kept pair whose model
+clearance stays below ``margin + E`` at every sampled posture (``E``: the largest sphere radius
+of each covered side of the pair, added) could be put inside the margin anywhere in its range
+by the covers' own error; where it holds the arm is then decided by the model. Every covered
+side of such a pair (the moving link; a fixed mesh or, for a tool pair, the other link) is
+covered again with cells of ``FINE_CELL_RATIO`` times the cell, which keeps the containment
+above and gives less away. Nothing is named: the selection is sampled from the description.
+
+**Held at work** (``Model.held``). A kept pair that, on the refined model, still never gets
+more than ``E`` clear of the margin and is inside it at more than ``HELD_SHARE`` of the
+postures sampled within the range the solver allows would hold the arm over much of its
+working range. It is reported with the largest margin at which it would not be (the hardware
+path refuses the start then, simulation warns).
+
 STL meshes only (binary or ASCII); any other mesh format refuses the model.
 """
 
@@ -69,6 +83,12 @@ TOOL_ARM_JOINTS = 3            # tool against arm links at least this many joint
 DEFAULT_CELL = 0.025           # m (20 mm was 50 % slower per cycle in the node)
 DEFAULT_SPACING = 0.002        # m
 NEAR_SAMPLES = 3000            # postures sampled to find structurally near pairs
+FINE_CELL_RATIO = 0.6          # cells of a pair the model holds, relative to the cell
+REFINE_SAMPLES = 3000          # postures sampled to find the pairs the model holds
+HELD_SHARE = 0.25              # inside the margin at more of the solver's range: held at work
+JOINT_MARGIN = 0.15            # rad: the solver's default distance kept from a joint limit
+ROOM_STEP = 0.1                # rad: the neighbourhood of the start posture, either way
+ROOM_WITHIN = 0.15             # m: the start posture's room is reported exactly up to this
 CYLINDER_SIDES = 16
 
 
@@ -241,6 +261,16 @@ def sample_triangles(tris: np.ndarray, spacing: float) -> np.ndarray:
     return np.concatenate(out)
 
 
+def _unique_rows(keys: np.ndarray):
+    """``np.unique(keys, axis=0, return_inverse=True)`` for N x 3 integers, through one key."""
+    low = keys.min(axis=0)
+    span = keys.max(axis=0) - low + 1
+    flat = ((keys[:, 0] - low[0]) * span[1] + (keys[:, 1] - low[1])) * span[2] \
+        + (keys[:, 2] - low[2])
+    _, first, inverse = np.unique(flat, return_index=True, return_inverse=True)
+    return keys[first], inverse.reshape(-1)
+
+
 def sphere_cover(tris: np.ndarray, cell: float = DEFAULT_CELL,
                  spacing: float = DEFAULT_SPACING) -> Tuple[np.ndarray, np.ndarray]:
     """Return ``(centres M x 3, radii M)`` of spheres that contain every triangle."""
@@ -248,8 +278,7 @@ def sphere_cover(tris: np.ndarray, cell: float = DEFAULT_CELL,
     if len(points) == 0:
         return np.zeros((0, 3)), np.zeros(0)
     keys = np.floor(points / cell).astype(np.int64)
-    unique, inverse = np.unique(keys, axis=0, return_inverse=True)
-    inverse = inverse.reshape(-1)
+    unique, inverse = _unique_rows(keys)
     count = len(unique)
     sums = np.zeros((count, 3))
     np.add.at(sums, inverse, points)
@@ -273,9 +302,7 @@ def _groups(centres: np.ndarray, radii: np.ndarray, size: float):
     """Return per-sphere group index and each group's bounding sphere (centre, radius)."""
     if len(centres) == 0:
         return np.zeros(0, dtype=int), np.zeros((0, 3)), np.zeros(0)
-    _, group = np.unique(np.floor(centres / size).astype(np.int64), axis=0,
-                         return_inverse=True)
-    group = group.reshape(-1)
+    _, group = _unique_rows(np.floor(centres / size).astype(np.int64))
     count = int(group.max()) + 1
     lo = np.full((count, 3), np.inf)
     hi = np.full((count, 3), -np.inf)
@@ -469,6 +496,27 @@ def excluded_text(item: Excluded, margin: float) -> str:
 
 
 @dataclass(frozen=True)
+class Held:
+    """A kept pair the refined model still holds inside the margin over much of its range."""
+
+    moving: str
+    other: str
+    share: float                     # of the sampled postures, inside the margin
+    low: float                       # clearance range over them (m)
+    high: float
+    free_up_to: float                # the largest margin at which the share is HELD_SHARE
+
+
+def held_text(item: Held, margin: float) -> str:
+    """Return one line on a pair held at work: where, its clearance, the margin that frees it."""
+    return (f'{item.moving} - {item.other} is inside the margin of {margin * 1000.0:.1f} mm at '
+            f'{item.share * 100.0:.0f} % of the postures sampled within the joint range the '
+            f'solver allows (clearance {item.low * 1000.0:.1f} to {item.high * 1000.0:.1f} mm); '
+            f'it is outside the margin at all but {HELD_SHARE * 100.0:.0f} % of them up to a '
+            f'margin of {item.free_up_to * 1000.0:.1f} mm')
+
+
+@dataclass(frozen=True)
 class Rows:
     """Keep-out rows at one posture: ``d_dot = grad @ qdot`` for each sphere pair."""
 
@@ -509,6 +557,10 @@ class Model:
     cell: float
     spacing: float
     chain_segments: list
+    refined: List[str] = field(default_factory=list)              # links covered finer
+    refined_by: List[Tuple[str, str]] = field(default_factory=list)  # the pairs that chose them
+    fine_cell: Optional[float] = None
+    held: List[Held] = field(default_factory=list)
 
     @property
     def pairs(self) -> List[Tuple[str, str]]:
@@ -699,6 +751,15 @@ class Model:
                 world = np.einsum('pij,pj->pi', rot[body], self._sphere_centre[spheres]) \
                     + pos[body]
                 d, normal = units.pair_distance(world, pair_units)
+                # A cluster's bounding sphere is no farther than any of its members: an entry
+                # already beyond the limit there is dropped before its members are expanded
+                # (exact: none of them can be within the limit).
+                bound = d - self._sphere_radius[spheres]
+                reach = bound <= limit
+                if not reach.all():
+                    lower = min(lower, float(bound[~reach].min()))
+                    d, normal, spheres = d[reach], normal[reach], spheres[reach]
+                    pair_units, body, world = pair_units[reach], body[reach], world[reach]
                 cluster = units.mem_count[pair_units] > 0
                 if cluster.any():
                     # Replace each cluster's lower bound by its member spheres.
@@ -839,6 +900,26 @@ class Model:
         rows = self.evaluate(q, extra, influence=within, per_pair=1)
         return rows.clearance, rows.nearest
 
+    def room_around(self, q: Sequence[float], extra: Optional[Mapping[str, float]] = None,
+                    step: float = ROOM_STEP, within: float = ROOM_WITHIN):
+        """
+        Return the largest margin no pair is inside at ``q`` and ``step`` either way of each joint.
+
+        ``(clearance, pair, exact)``: the smallest clearance over those postures and its pair;
+        beyond ``within`` it is only known to be larger (``exact`` False, no pair).
+        """
+        q = np.asarray(q, dtype=float)
+        postures = [q] + [q + sign * step * np.eye(len(q))[i] for i in range(len(q))
+                          for sign in (1.0, -1.0)]
+        best, pair, exact = math.inf, ('', ''), False
+        for posture in postures:
+            clearance, nearest = self.clearance(posture, extra, within=within)
+            if clearance < best:
+                best, pair, exact = clearance, nearest, nearest != ('', '')
+        if not exact:
+            return within, ('', ''), False
+        return best, pair, True
+
     def pair_minima(self, q: Sequence[float], extra: Optional[Mapping[str, float]] = None,
                     limit: float = math.inf) -> np.ndarray:
         """Return each pair's clearance, or ``limit`` when it is certainly not below it."""
@@ -850,6 +931,44 @@ class Model:
         if len(d):
             np.minimum.at(out, pair, d)
         return out
+
+    def cover_error(self, index: int) -> float:
+        """Return ``E`` of pair ``index``: each covered side's largest sphere radius, added."""
+        kind, a, b = self.pair_list[index]
+        out = float(self.bodies[a].radii.max()) if len(self.bodies[a].radii) else 0.0
+        if kind == 'tool':
+            return out + (float(self.bodies[b].radii.max()) if len(self.bodies[b].radii)
+                          else 0.0)
+        units = self.units
+        clusters = np.nonzero((units.link == b) & (units.mem_count > 0))[0]
+        if len(clusters):
+            members = np.concatenate([np.arange(units.mem_start[u],
+                                                units.mem_start[u] + units.mem_count[u])
+                                      for u in clusters])
+            out += float(units.mem_rad[members].max())
+        return out
+
+    def held_by_model(self, samples: np.ndarray):
+        """
+        Return the pairs whose clearance stays below ``margin + E`` at every posture sampled.
+
+        ``(indices, values)``: the pairs, and their clearance at each sample (samples x pairs;
+        exact, as every one is below ``margin + E``).
+        """
+        limit = np.array([self.margin + self.cover_error(i) for i in range(len(self.pair_list))])
+        candidates = np.arange(len(self.pair_list))
+        values = np.full((len(samples), len(self.pair_list)), math.nan)
+        sub = self
+        for k, q in enumerate(samples):
+            if len(candidates) == 0:
+                break
+            here = sub.pair_minima(q, limit=float(limit[candidates].max()))
+            values[k, candidates] = here
+            keep = here < limit[candidates]
+            if not keep.all():
+                candidates = candidates[keep]
+                sub = self.subset(candidates)
+        return candidates, values[:, candidates]
 
     def pairs_moved_by(self, joint: str) -> List[int]:
         """
@@ -921,17 +1040,53 @@ def _shape_triangles(geometry, resolve: Callable[[str], bytes], hasher):
 BOX, CYLINDER, SPHERE = 0, 1, 2
 
 
+def _cover_body(body: _Body, tris: np.ndarray, cell: float, spacing: float) -> _Body:
+    """Return ``body`` with its spheres (and their groups and bound) covering ``tris``."""
+    centres, radii = sphere_cover(tris, cell, spacing)
+    group, gc, gr = _groups(centres, radii, GROUP_SIZE)
+    centre = (centres.min(axis=0) + centres.max(axis=0)) / 2.0
+    reach = float((np.linalg.norm(centres - centre, axis=1) + radii).max())
+    return replace(body, centres=centres, radii=radii, group=group, group_centre=gc,
+                   group_radius=gr, bound_centre=centre, bound_radius=reach)
+
+
+def _held_at_work(model: Model, lower: np.ndarray, upper: np.ndarray, joint_margin: float,
+                  count: int, seed: int) -> List[Held]:
+    """Return the kept pairs held at work (module docstring), sampled in the solver's range."""
+    low = np.where(upper - lower > 2.0 * joint_margin, lower + joint_margin, lower)
+    high = np.where(upper - lower > 2.0 * joint_margin, upper - joint_margin, upper)
+    samples = np.random.default_rng([seed, 2]).uniform(low, high, size=(count, len(low)))
+    candidates, values = model.held_by_model(samples)
+    out = []
+    for column, i in enumerate(candidates):
+        share = float((values[:, column] < model.margin).mean())
+        if share > HELD_SHARE:
+            moving, other = model.pairs[i]
+            out.append(Held(moving, other, share, float(values[:, column].min()),
+                            float(values[:, column].max()),
+                            float(np.quantile(values[:, column], HELD_SHARE))))
+    return out
+
+
 def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margin: float,
           influence_extra: float = 0.06, cell: float = DEFAULT_CELL,
           fixed_cell: Optional[float] = None,
           spacing: float = DEFAULT_SPACING, near_samples: int = NEAR_SAMPLES,
-          seed: int = 0) -> Model:
+          seed: int = 0, fine_cell_ratio: Optional[float] = FINE_CELL_RATIO,
+          refine_samples: int = REFINE_SAMPLES, joint_margin: float = JOINT_MARGIN,
+          _fingerprint_only: bool = False) -> Model:
     """
     Build the keep-out model of the arm ``base`` -> ``tip`` in URDF text.
 
     ``resolve(filename)`` returns a mesh file's bytes (it handles ``package://``).
-    ``margin`` is the keep-out margin (m), used here only to find structurally near pairs.
+    ``margin`` is the keep-out margin (m): it decides the pairs the model holds (covered finer,
+    ``fine_cell_ratio``; None covers nothing finer), the structurally near pairs and the pairs
+    held at work. ``near_samples`` postures are sampled for the last two (0: neither is
+    looked for), within the joint limits less ``joint_margin`` for the pairs held at work.
+    With ``_fingerprint_only`` it returns the fingerprint string alone (no covers are made).
     """
+    if fine_cell_ratio is not None and not 0.0 < fine_cell_ratio <= 1.0:
+        raise ModelError('fine_cell_ratio must be within (0, 1]')
     if not (math.isfinite(margin) and margin > 0.0):
         raise ModelError('the margin must be a positive number')
     try:
@@ -951,6 +1106,9 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
     hasher = hashlib.sha256()
     hasher.update(f'{base}|{tip}|{arm_names}|{cell}|{fixed_cell}|{spacing}|'
                   f'{TOOL_ARM_JOINTS}'.encode())
+    if fine_cell_ratio is not None:
+        # The finer cover's rule; the margin it is sampled at is not geometry (left out).
+        hasher.update(f'|fine {fine_cell_ratio}|{refine_samples}|{seed}'.encode())
     for seg in chain.segments:
         hasher.update(joints[seg.name].text.encode())
 
@@ -982,6 +1140,7 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
 
     chain_names = [s.name for s in chain.segments]
     bodies: List[_Body] = []
+    body_tris: Dict[str, np.ndarray] = {}
     extra_joints: Dict[str, Tuple[str, float, float]] = {}
     for link in sorted(moving):
         element = links.get(link)
@@ -1020,15 +1179,13 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
             hasher.update(np.round(pose, 9).tobytes())
             local, _ = _shape_triangles(geometry[0], resolve, hasher)
             tris.append(_apply(pose, local))
-        centres, radii = sphere_cover(np.concatenate(tris), cell, spacing)
-        group, gc, gr = _groups(centres, radii, GROUP_SIZE)
-        centre = (centres.min(axis=0) + centres.max(axis=0)) / 2.0
-        reach = float((np.linalg.norm(centres - centre, axis=1) + radii).max())
-        bodies.append(_Body(link, depth, prefix, tail, centres, radii, group, gc, gr, centre,
-                            reach))
+        body_tris[link] = np.concatenate(tris)
+        if not _fingerprint_only:
+            bodies.append(_cover_body(_Body(link, depth, prefix, tail, *([None] * 7)),
+                                      body_tris[link], cell, spacing))
 
     fixed_names: List[str] = []
-    boxes, cylinders, spheres = [], [], []
+    fixed_items = []                    # (fixed link index, pose, triangles, exact shape)
     for link in sorted(seen):
         element = links.get(link)
         collisions = element.findall('collision') if element is not None else []
@@ -1044,8 +1201,15 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
             pose = fixed_poses[link] @ _origin(collision)
             hasher.update(np.round(_origin(collision), 9).tobytes())
             tris, exact = _shape_triangles(geometry[0], resolve, hasher)
+            fixed_items.append((f, pose, tris, exact))
+
+    def fixed_units(fine: Mapping[int, float]) -> _Units:
+        """Return the fixed shapes; a mesh of a fixed link in ``fine`` gets that cell."""
+        boxes, cylinders, spheres = [], [], []
+        for f, pose, tris, exact in fixed_items:
             if exact is None:
-                c, r = sphere_cover(_apply(pose, tris), fixed_cell or cell, spacing)
+                c, r = sphere_cover(_apply(pose, tris), fine.get(f, fixed_cell or cell),
+                                    spacing)
                 group, gcentre, gradius = _groups(c, r, GROUP_SIZE)
                 for g in range(len(gradius)):
                     inside = group == g
@@ -1057,7 +1221,13 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
                 cylinders.append((f, pose[:3, :3], pose[:3, 3], exact[1]))
             else:
                 spheres.append((f, np.eye(3), pose[:3, 3], exact[1]))
-    units = _Units.make(fixed_names, boxes, cylinders, spheres)
+        return _Units.make(fixed_names, boxes, cylinders, spheres)
+
+    if _fingerprint_only:
+        # The hash covers every input above; the covers and the sampling follow from them.
+        hasher.update(f'{sorted(extra_joints.items())}'.encode())
+        return hasher.hexdigest()
+    units = fixed_units({})
 
     n_arm = len(arm_names)
     adjacent = {(j.child, j.parent) for j in joints.values()
@@ -1082,14 +1252,39 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
                   not_covered=not_covered, fingerprint='', cell=cell, spacing=spacing,
                   chain_segments=list(chain.segments))
     model._index()
+    lower = np.array([j.lower for j in chain.joints])
+    upper = np.array([j.upper for j in chain.joints])
+    lower = np.where(np.isfinite(lower), lower, -math.pi)
+    upper = np.where(np.isfinite(upper), upper, math.pi)
+
+    # The pairs the model holds: their covered sides are covered again, finer.
+    if fine_cell_ratio is not None and refine_samples > 0 and pair_list:
+        samples = np.random.default_rng([seed, 1]).uniform(lower, upper,
+                                                           size=(refine_samples, n_arm))
+        chosen, _ = model.held_by_model(samples)
+        fine_bodies, fine_fixed = set(), set()
+        for i in chosen:
+            kind, a, b = pair_list[i]
+            fine_bodies.add(a)
+            if kind == 'tool':
+                fine_bodies.add(b)
+            elif ((units.link == b) & (units.mem_count > 0)).any():
+                fine_fixed.add(b)
+        if chosen.size:
+            model.fine_cell = fine_cell_ratio * cell
+            model.refined_by = [model.pairs[i] for i in chosen]
+            model.refined = ([bodies[b].name for b in sorted(fine_bodies)]
+                             + [fixed_names[f] for f in sorted(fine_fixed)])
+            for b in fine_bodies:
+                bodies[b] = _cover_body(bodies[b], body_tris[bodies[b].name], model.fine_cell,
+                                        spacing)
+            units = fixed_units({f: fine_cell_ratio * (fixed_cell or cell) for f in fine_fixed})
+            model.bodies, model.units = bodies, units
+            model._index()
 
     # Structurally near: below the margin at every sampled posture.
     if near_samples > 0 and pair_list:
         rng = np.random.default_rng(seed)
-        lower = np.array([j.lower for j in chain.joints])
-        upper = np.array([j.upper for j in chain.joints])
-        lower = np.where(np.isfinite(lower), lower, -math.pi)
-        upper = np.where(np.isfinite(upper), upper, math.pi)
         samples = rng.uniform(lower, upper, size=(near_samples, n_arm))
         candidates = np.arange(len(pair_list))
         for q in samples:
@@ -1108,12 +1303,17 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
         drop = {int(i) for i in candidates}
         model.pair_list = [p for i, p in enumerate(pair_list) if i not in drop]
         model._index()
+        model.held = _held_at_work(model, lower, upper, joint_margin, near_samples, seed)
     hasher.update(f'{sorted(extra_joints.items())}'.encode())
     model.fingerprint = hasher.hexdigest()
     return model
 
 
 def fingerprint(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str,
-                margin: float) -> str:
-    """Return the fingerprint of the model ``urdf`` gives (no pair sampling)."""
-    return build(urdf, resolve, base, tip, margin, near_samples=0).fingerprint
+                margin: float, cell: float = DEFAULT_CELL) -> str:
+    """
+    Return the fingerprint of the model ``urdf`` gives (no pair sampling).
+
+    ``cell`` must be the one the compared model was built with: the fingerprint covers it.
+    """
+    return build(urdf, resolve, base, tip, margin, cell=cell, _fingerprint_only=True)

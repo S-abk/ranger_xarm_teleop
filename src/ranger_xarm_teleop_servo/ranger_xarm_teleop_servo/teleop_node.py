@@ -533,6 +533,7 @@ class TeleopNode(Node):
         self.path = PathRecorder()
         self._idle_count = 0
         self._idle_clearance = None
+        self._room_logged = False
         self._recording = False
         # Joint states and MoveIt Servo's output arrive at the controller rate. A second
         # node on its own executor thread receives both, so they never queue in front of
@@ -859,11 +860,13 @@ class TeleopNode(Node):
     def _build_keepout(self) -> None:
         """Build the link keep-out model from the robot description (refuses the start)."""
         self._keepout_tried = True
+        self._room_logged = False
         started = time.perf_counter()
         try:
             self.keepout = ko.build(self.urdf, self._resolver(), self.base_frame,
                                     self.tip_frame, self.keepout_margin,
-                                    cell=self.keepout_cell)
+                                    cell=self.keepout_cell,
+                                    joint_margin=self.solver_params.limit_margin)
         except ChainError as err:
             # No arm chain: the solver has none either and teleop stays not ready.
             self.get_logger().error(f'no link keep-out model: {err}')
@@ -879,8 +882,15 @@ class TeleopNode(Node):
             f'side), {len(model.pair_list)} pairs, fixed '
             f'links {model.units.names}, built in {took:.2f} s, fingerprint '
             f'{model.fingerprint[:12]}')
+        if model.refined:
+            self.get_logger().info(
+                f'link keep-out: finer cells ({model.fine_cell * 1000.0:.0f} mm) on '
+                f'{model.refined}: the pairs {model.refined_by} stayed within the margin plus '
+                "their covers' own error at every sampled posture")
         for item in model.excluded:
             self.get_logger().warning(f'link keep-out: {ko.excluded_text(item, model.margin)}')
+        for item in model.held:
+            self.get_logger().warning(f'link keep-out: {ko.held_text(item, model.margin)}')
         keepable = [item for item in model.excluded if ko.kept_by_smaller_margin(item)]
         if keepable and self.hardware_limits:
             # A pair the margin silently drops is not kept clear at all; on hardware the
@@ -888,6 +898,15 @@ class TeleopNode(Node):
             raise StartupRefused(
                 f'link keep-out: link_keepout_margin_m {model.margin:g} m leaves out '
                 + '; '.join(ko.excluded_text(item, model.margin) for item in keepable)
+                + '; choose a smaller margin (docs/HARDWARE_PROCEDURE.md, "Values you supply")')
+        if model.held and self.hardware_limits:
+            # A kept pair inside the margin over much of the working range holds joints
+            # without a word, as on the first stage 4 run: on hardware the margin is chosen
+            # again instead.
+            raise StartupRefused(
+                f'link keep-out: link_keepout_margin_m {model.margin:g} m holds the arm over much '
+                'of its range: ' + '; '.join(ko.held_text(item, model.margin)
+                                             for item in model.held)
                 + '; choose a smaller margin (docs/HARDWARE_PROCEDURE.md, "Values you supply")')
         if model.not_covered:
             self.get_logger().warning(
@@ -921,7 +940,7 @@ class TeleopNode(Node):
         """Disable teleop if ``text`` has other geometry than the keep-out model's."""
         try:
             other = ko.fingerprint(text, self._resolver(), self.base_frame, self.tip_frame,
-                                   self.keepout_margin)
+                                   self.keepout_margin, cell=self.keepout_cell)
         except (ko.ModelError, ChainError, ValueError) as err:
             other = f'unusable: {err}'
         if other == self.keepout.fingerprint:
@@ -1668,6 +1687,11 @@ class TeleopNode(Node):
                          + ('' if item.reason == 'adjacent' else
                             f' (clearance {item.low * 1000.0:.1f} to '
                             f'{item.high * 1000.0:.1f} mm)'))
+        if model.refined:
+            lines.append(f'finer cells ({model.fine_cell * 1000.0:.0f} mm): {model.refined}, '
+                         f'for {model.refined_by}')
+        for item in model.held:
+            lines.append(f'held at work: {ko.held_text(item, model.margin)}')
         if model.not_covered:
             lines.append(f'not covered: {model.not_covered}')
         if self.keepout_fault:
@@ -1912,7 +1936,26 @@ class TeleopNode(Node):
         except (KeyError, ko.ModelError, ValueError):
             return self._idle_clearance
         self._idle_clearance = (rows.clearance, rows.nearest)
+        if not self._room_logged and not self.state.engaged and not self.state.want_armed:
+            # Once per model, before any arming: the lookup takes up to a few hundred ms.
+            self._room_logged = True
+            self.log_room(q, positions)
         return self._idle_clearance
+
+    def log_room(self, q, positions) -> None:
+        """Log once per start the largest margin no pair is inside around the start posture."""
+        started = time.perf_counter()
+        try:
+            room, pair, exact = self.keepout.room_around(q, self.keepout.extra_values(positions))
+        except (ko.ModelError, ValueError):
+            return
+        took = time.perf_counter() - started
+        near = (f'{room * 1000.0:.1f} mm (nearest {pair[0]} - {pair[1]})' if exact
+                else f'more than {room * 1000.0:.0f} mm')
+        self.get_logger().info(
+            f'link keep-out at the start posture: no pair is inside a margin up to {near}, '
+            f'here and {ko.ROOM_STEP:g} rad either way of each joint; the margin is '
+            f'{self.keepout_margin * 1000.0:.1f} mm (looked up in {took * 1000.0:.0f} ms)')
 
     # ---- MoveIt Servo ----
 

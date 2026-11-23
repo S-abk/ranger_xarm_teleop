@@ -13,6 +13,7 @@
 # limitations under the License.
 """Teleop node and the link keep-out (G-15): model, description checks, state, joint path."""
 
+import dataclasses
 import math
 import os
 import sys
@@ -127,6 +128,63 @@ def test_hardware_builds_the_model_when_no_pair_is_dropped(node):
     assert n.keepout is not None and ('l2', 'screen') in n.keepout.pairs
 
 
+def test_hardware_refuses_a_margin_that_holds_the_arm_over_much_of_its_range(node):
+    # The arm base as a mesh close under l2: the finer cover still holds that pair inside a
+    # 40 mm margin at about half of the solver's range; at 25 mm it does not.
+    urdf = robot_urdf(base_mesh_top=0.16)
+    with pytest.raises(StartupRefused) as refused:
+        node(urdf, link_keepout_margin_m=0.04, **HARDWARE)
+    text = str(refused.value)
+    assert text.startswith('link keep-out: link_keepout_margin_m 0.04 m holds the arm over much '
+                           'of its range: l2 - xarm_link_base is inside the margin of 40.0 mm')
+    assert 'up to a margin of' in text and '"Values you supply"' in text
+    n = node(urdf, **HARDWARE)
+    assert n.keepout is not None and n.keepout.held == []
+    assert n.keepout.refined == ['l2', 'xarm_link_base']
+
+
+def test_simulation_warns_of_a_pair_held_at_work_and_reports_the_finer_cells(node):
+    n = node(robot_urdf(base_mesh_top=0.16), link_keepout_margin_m=0.04)
+    assert [(h.moving, h.other) for h in n.keepout.held] == [('l2', 'xarm_link_base')]
+    lines, warnings = [], []
+    n.get_logger().info = lambda text, **_: lines.append(text)
+    n.get_logger().warning = lambda text, **_: warnings.append(text)
+    n.keepout, n._keepout_tried = None, False
+    n._build_keepout()
+    assert any(w.startswith('link keep-out: l2 - xarm_link_base is inside the margin of 40.0 mm')
+               for w in warnings)
+    assert any(line.startswith("link keep-out: finer cells (15 mm) on ['l2', 'xarm_link_base']")
+               for line in lines)
+    info = n._on_keepout_info(Trigger.Request(), Trigger.Response()).message
+    assert "finer cells (15 mm): ['l2', 'xarm_link_base']" in info
+    assert 'held at work: l2 - xarm_link_base' in info
+
+
+def test_the_room_around_the_start_posture_is_logged_once(node):
+    n = node(robot_urdf())
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    lines = []
+    n.get_logger().info = lambda text, **_: lines.append(text)
+    _joints(n, READY)
+    n.idle_clearance()
+    room = [line for line in lines if line.startswith('link keep-out at the start posture')]
+    assert len(room) == 1 and 'no pair is inside a margin up to ' in room[0]
+    clearance, _ = n.keepout.clearance(READY, n.keepout_extra(), within=0.15)
+    shown = float(room[0].split('up to ')[1].split(' mm')[0]) / 1000.0
+    assert shown <= clearance + 1e-4
+    n._idle_clearance = None
+    n.idle_clearance()
+    assert len([line for line in lines if 'start posture' in line]) == 1
+    # Not while the arm is wanted: the lookup would hold the cycle up.
+    m = node(robot_urdf())
+    m._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    m.get_logger().info = lambda text, **_: lines.append(text)
+    _joints(m, READY)
+    m.state = dataclasses.replace(m.state, want_armed=True)
+    m.idle_clearance()
+    assert len([line for line in lines if 'start posture' in line]) == 1
+
+
 def test_model_is_built_from_the_description_and_reported(node):
     n = node(robot_urdf())
     assert n.keepout is not None and n.keepout.margin == 0.025
@@ -189,6 +247,18 @@ def test_a_later_description_with_other_geometry_disables_teleop(node, later, fa
 
 def test_servo_checking_another_description_disables_teleop(node):
     n = node(robot_urdf())
+    n._compare_description(robot_urdf(), "MoveIt Servo's robot description")
+    assert not n.keepout_fault
+    n._compare_description(robot_urdf(screen_height=0.30), "MoveIt Servo's robot description")
+    assert "MoveIt Servo's robot description does not match" in n.keepout_fault
+
+
+@pytest.mark.parametrize('values', [{'link_keepout_margin_m': 0.04},
+                                    {'link_keepout_cell_m': 0.03},
+                                    {'link_keepout_margin_m': 0.04, 'link_keepout_cell_m': 0.03}])
+def test_another_margin_or_cell_alone_does_not_disable_teleop(node, values):
+    """The comparison is of geometry: the node's own margin and cell are used on both sides."""
+    n = node(robot_urdf(), **values)
     n._compare_description(robot_urdf(), "MoveIt Servo's robot description")
     assert not n.keepout_fault
     n._compare_description(robot_urdf(screen_height=0.30), "MoveIt Servo's robot description")

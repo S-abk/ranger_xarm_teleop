@@ -92,8 +92,14 @@ def resolve(name: str) -> bytes:
 
 
 def robot_urdf(screen_x=-0.30, screen_height=0.27, extra_tool=False, drop_screen=False,
-               gripper=True) -> str:
-    """Return the URDF text of the test robot (keyword arguments vary its geometry)."""
+               gripper=True, base_mesh_top=None) -> str:
+    """
+    Return the URDF text of the test robot (keyword arguments vary its geometry).
+
+    ``base_mesh_top``: the arm base as a mesh (a box, 0.14 m square) reaching this height (m)
+    instead of its cylinder; at about 0.17 m it sits close under the upper arm at every
+    posture.
+    """
     parts = ['<robot name="test_robot">', '<link name="base_footprint"/>',
              '<link name="base_link"><collision><origin xyz="0 0 -0.18"/><geometry>'
              '<box size="0.8 0.5 0.36"/></geometry></collision></link>',
@@ -133,6 +139,11 @@ def robot_urdf(screen_x=-0.30, screen_height=0.27, extra_tool=False, drop_screen
                   f'<child link="screen"/><origin xyz="{screen_x} 0 0.198" rpy="0 0 3.14159"/>'
                   '</joint>']
     for name, shape in _ARM_SHAPES.items():
+        if name == 'xarm_link_base' and base_mesh_top is not None:
+            mesh = f'package://test_robot/meshes/base_{base_mesh_top * 1000.0:.0f}.stl'
+            MESHES[mesh] = box_stl((0.07, 0.07, base_mesh_top / 2.0))
+            shape = (f'<origin xyz="0 0 {base_mesh_top / 2.0}"/><geometry><mesh '
+                     f'filename="{mesh}"/></geometry>')
         parts.append(f'<link name="{name}"><collision>{shape}</collision></link>')
     for name, parent, child, xyz, rpy, lower, upper in _ARM:
         parts.append(
