@@ -765,13 +765,91 @@ def test_release_ramps_the_command_to_zero_starting_in_the_same_cycle(harness):
 
 @pytest.mark.parametrize('fixture, hold', [('gate_emulated', TeleopState.HOLD_POSE_EMULATED),
                                            ('gate_out_of_view', TeleopState.HOLD_OUT_OF_VIEW),
-                                           ('clutch_stall', TeleopState.HOLD_INPUT_STALE)])
+                                           ('clutch_stall', TeleopState.HOLD_INPUT_STALE),
+                                           ('gate_absent', TeleopState.HOLD_POSE_ABSENT),
+                                           ('gate_head_emulated', TeleopState.HOLD_HEAD_EMULATED),
+                                           ('gate_reset', TeleopState.HOLD_RESET_CHANGED),
+                                           ('gate_session', TeleopState.HOLD_SESSION_CHANGED),
+                                           ('gate_seq_backwards', TeleopState.HOLD_SEQ_BACKWARDS),
+                                           ('clutch_jump', TeleopState.HOLD_INPUT_JUMP)])
 def test_every_g4_trigger_and_stale_input_ramp_the_joint_command_to_zero(harness, fixture, hold):
-    """G-18 (replaces INV-8 for G-3 and G-4): a gate fault ramps, as a release does."""
+    """G-18 (replaces INV-8 for G-3 and G-4; G-5's input jump added): a fault ramps."""
     h = harness()
     h.play(fixture)
     first = next(s for s in h.states if s.hold_reason == hold)
     _ramp_from(h, first)
+
+
+def test_every_release_of_a_re_engagement_ramps(harness):
+    """G-18: each release of clutch_reengage starts a ramp in its own cycle (the old test's)."""
+    h = harness()
+    h.play('clutch_reengage')
+    releases = [b for a, b in zip(h.states, h.states[1:]) if a.clutch_engaged
+                and not b.clutch_engaged]
+    assert len(releases) >= 2
+    for state in releases:
+        _ramp_from(h, state)
+
+
+def _all_steps_within_the_limit(h, a=ACCELERATION):
+    previous = np.zeros(6)
+    for c in h.commands:
+        v = np.array(c.velocities)
+        assert np.max(np.abs(v - previous)) <= a * 0.02 * (1 + 1e-9)
+        previous = v
+    assert not np.any(previous), 'the last command is not zero'
+
+
+def test_a_solver_failure_ramps_from_the_last_good_command(ros):
+    """G-18: no new command is guessed; the last one is ramped to zero at the limit."""
+    def pushed(node):
+        h.arm_follows = False
+        h.measured_q = h.measured_q + np.array([0.4, 0, 0, 0, 0, 0])
+    h = _Midway(ros, 1.6, pushed)
+    try:
+        h.play('clutch_line')
+        assert any(s.hold_reason == TeleopState.HOLD_SOLVER for s in h.states)
+        _all_steps_within_the_limit(h)
+    finally:
+        h.close()
+
+
+def test_a_silent_mux_is_not_a_loss_of_the_arm_and_the_command_ramps(ros):
+    """G-18: an owner report gone stale is not a fresh report of another owner: ramp."""
+    class Silent(_Midway):
+
+        def __init__(self, bridge):
+            super().__init__(bridge, 2.5, None)
+
+        def tick(self, now):
+            if now >= 2.5:
+                self.node.manage_ownership = lambda now, owner: None
+            super().tick(now)
+    h = Silent(ros)
+    try:
+        h.play('clutch_line')
+        first = next(s for i, s in enumerate(h.states)
+                     if s.hold_reason == TeleopState.HOLD_NOT_OWNER and i * 0.02 >= 2.5)
+        _ramp_from(h, first)
+    finally:
+        h.close()
+
+
+def test_an_unanswered_servo_call_does_not_pause_servo_during_a_ramp(ros):
+    """G-18: a Servo whose state became unknown is paused only after the ramp's zero."""
+    node = TeleopNode(node_name='teleop_servo_unknown',
+                      parameter_overrides=overrides({**LIMITS, 'motion_enabled': True}))
+    try:
+        node.pause_client = _Client(lambda request: _Ok())
+        node.servo_state = teleop_node.SERVO_UNKNOWN
+        node.manage_servo(10.0, True)               # engaged or ramping: no pause
+        assert node.pause_client.requests == []
+        node.servo_call_since = None
+        node.manage_servo(10.0, False)              # afterwards: paused
+        assert [r.data for r in node.pause_client.requests] == [True]
+    finally:
+        node.close()
+        node.destroy_node()
 
 
 def test_the_command_never_changes_faster_than_the_limit_nor_exceeds_the_cap(harness):

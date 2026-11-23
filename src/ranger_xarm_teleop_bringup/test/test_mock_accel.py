@@ -49,6 +49,8 @@ T = 0.02
 JOINTS = [f'xarm_joint{i}' for i in range(1, 7)]
 JOINT_LIMIT_START = [0.0, -0.6, -0.7, 0.0, -1.2, 0.0]
 BEYOND_HARD_STOP = [0.0, -0.6, -0.7, 0.0, 0.05, 0.0]
+JOINT5_LOWER = -1.69297         # the URDF's lower bound of joint 5 (as test_mock_dls)
+KEEPOUT_MARGIN = 0.025          # the simulation-only link keep-out margin
 # fixture: (start posture, engaged seconds expected for a clean replay)
 FIXTURES = {
     'clutch_release_moving': (READY, 1.0),
@@ -190,6 +192,13 @@ def test_the_command_stays_within_the_limit_and_stops_within_the_stop_time(stack
           f'{max(servo):.2f}, {len(over)} of {len(servo)} points above the limit'
           + (f' (largest {max(over):.2f})' if over else ''))
     assert max(servo) <= 2 * A * 1.02, (fixture, max(servo))
+    # INV-5: the bounds keep their meaning under the limit.
+    engaged = [s for _, s in timed if s.clutch_engaged]
+    if fixture == 'clutch_joint_limit':
+        q5 = [q[4] for q in probe.joints_since(start)]
+        assert min(q5) - JOINT5_LOWER >= 0.15 - 0.002, min(q5) - JOINT5_LOWER
+    if fixture == 'clutch_keepout_reverse':
+        assert min(s.keepout_clearance_commanded for s in engaged) >= KEEPOUT_MARGIN - 1e-3
     # Every stop: ramp length and tool travel against the formula.
     ordered = sorted(commands, key=lambda c: c[1])
     for i in range(1, len(timed)):

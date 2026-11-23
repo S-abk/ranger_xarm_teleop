@@ -198,9 +198,11 @@ SOLVER_LIMITS = {dls.LIMIT_JOINT_POSITION: Limit.JOINT_POSITION,
                  dls.LIMIT_JOINT_VELOCITY: Limit.JOINT_VELOCITY,
                  dls.LIMIT_TOOL_SPEED: Limit.TOOL_SPEED,
                  dls.LIMIT_LINK_KEEPOUT: Limit.LINK_KEEPOUT}
-# The limits the acceleration limit (G-18) is shown instead of when it acted: speed-type limits
-# it acts after. Position-type bounds (offset, keep-out, joint position) stay the ones shown.
-ACCELERATION_OUTRANKS = (Limit.NONE, Limit.TOOL_SPEED, Limit.JOINT_VELOCITY, Limit.LEAD)
+# The limits the acceleration limit (G-18) is shown instead of when it acted: the speed-type
+# limits it acts after (the panel ranks them alike). The lead clamp and the position-type bounds
+# (offset, keep-out, joint position) rank higher and stay the ones shown;
+# joint_acceleration_limited still says the limit acted.
+ACCELERATION_OUTRANKS = (Limit.NONE, Limit.TOOL_SPEED, Limit.JOINT_VELOCITY)
 # Solver tuning parameters (not safety limits) and their SolverParams fields.
 SOLVER_TUNING = {'solver_gain': 'gain', 'damping_threshold': 'damping_threshold',
                  'max_damping': 'max_damping',
@@ -1035,8 +1037,9 @@ class TeleopNode(Node):
             if not self.output_confirmed:
                 self.output_confirmed = True
                 self.confirmed_at = self.servo_output[0]
-            if self.solution is not None:
-                servo = servo + self.solution.qdot * self.params.target_period
+            if self.sent is not None:
+                # The command actually sent (G-18 may have limited it), not the request.
+                servo = servo + self.sent * self.params.target_period
             return servo
         if (not self.output_confirmed and self.first_command_at is not None
                 and now - self.first_command_at <= SERVO_OUTPUT_TIMEOUT_S):
@@ -1561,10 +1564,11 @@ class TeleopNode(Node):
         A release, every gate fault and a disarm ramp the last command to zero at the
         acceleration limit, all joints scaled together; MoveIt Servo stays active until the
         zero has been sent. Immediate (one zero now) only where this node cannot command the
-        arm through Servo: teleop no longer owns the arm, Servo has halted (its halt status,
-        or its collision slow-down holding the arm still: HOLD_SERVO_HALTED), or Servo is not
-        running. The rest are not this node's to shape: Servo's and the controller's command
-        timeouts, an emergency stop.
+        arm through Servo: teleop no longer owns the arm, or Servo has halted (its halt status,
+        or its collision slow-down holding the arm still: HOLD_SERVO_HALTED). A Servo whose
+        state is unknown or paused still gets the ramp: if it runs, it executes it; if not,
+        nothing moves either way. The rest are not this node's to shape: Servo's and the
+        controller's command timeouts, an emergency stop.
         """
         moving = (self.commanding and self.sent is not None and self.arm is not None
                   and bool(np.any(self.sent != 0.0)))
@@ -1589,13 +1593,18 @@ class TeleopNode(Node):
 
     def immediate_stop_reason(self, owner: int, hold: Optional[Hold] = None) -> str:
         """Return why the joint command cannot be ramped through MoveIt Servo, or ''."""
-        if owner != ArmOwner.OWNER_TELEOP:
+        # Only a fresh report of another owner (or none) is a loss of the arm; a silent mux
+        # (its report too old) is not known to have switched anything, so the ramp goes out.
+        if owner != ArmOwner.OWNER_TELEOP and self.owner_report_fresh():
             return 'teleop no longer owns the arm'
         if self.servo_halted() or hold == Hold.SERVO_HALTED:
             return 'MoveIt Servo halted'
-        if self.servo_state != SERVO_ACTIVE:
-            return 'MoveIt Servo is not running'
         return ''
+
+    def owner_report_fresh(self) -> bool:
+        """Return whether the mux's newest owner report is recent enough to act on."""
+        return (self.owner_arrival is not None
+                and self.mono() - self.owner_arrival <= OWNER_TIMEOUT_S)
 
     def owner_reported_teleop(self) -> bool:
         """Return whether the newest owner report says teleop owns the arm."""
@@ -1784,6 +1793,11 @@ class TeleopNode(Node):
             self.servo_state = SERVO_UNKNOWN
             self.servo_verified = False
         if self.servo_state == SERVO_UNKNOWN:
+            # A call that went unanswered does not show that Servo stopped running. While the
+            # gate still wants it (the cycle before the gate sees it unknown and releases) or a
+            # stop ramp runs, it is not paused: the ramp goes out whole (G-18), then the pause.
+            if want_active:
+                return
             if self.pause_client.service_is_ready():
                 self._call(self.pause_client, SetBool.Request(data=True), self._paused)
             return
@@ -2041,7 +2055,7 @@ class TeleopNode(Node):
             if owner != ArmOwner.OWNER_TELEOP:
                 wanted = ArmOwner.OWNER_TELEOP
         elif (owner == ArmOwner.OWNER_TELEOP
-              and self.servo_state in (SERVO_PAUSED, SERVO_UNKNOWN)):
+              and self.servo_state in (SERVO_PAUSED, SERVO_UNKNOWN) and not self.stopping):
             # The mux reports TELEOP only for an arm it switched there itself: a teleop
             # controller that became active some other way (G-17) is reported as no owner and
             # is the mux's to undo, so handing back never answers an outside switch.
