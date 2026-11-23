@@ -35,8 +35,13 @@ from ranger_xarm_teleop_interfaces.msg import ArmOwner, TeleopState
 from ranger_xarm_teleop_interfaces.srv import SetArmOwner
 from stack_helpers import (arm_by_replay, child_environment, graph_nodes, node_pids, prime,
                            Probe, replay, start_input)
+import yaml
 
 PREVIEW = '/teleop/preview/target_pose'
+# Allowed where n . x >= d: x <= 0.30 m in the arm base frame. The clutch_line stroke takes the
+# preview from x 0.207 to 0.407 m (measured without the plane), so the plane cuts it halfway.
+PREVIEW_PLANE = (-1.0, 0.0, 0.0, -0.30)
+WRIST_FRAME = 'xarm_link6'
 TELEOP_COMMAND = '/teleop_arm_controller/joint_trajectory'
 
 
@@ -60,7 +65,14 @@ def stage2(tmp_path_factory):
         bringup_nodes = graph_nodes(probe)
         manager_pids = node_pids('ros2_control_node', environ=f'ROS_HOME={env["ROS_HOME"]}')
         limits = write_hardware_limits(logs)
-        attach = start_attach(env, 'check', limits, logs, 'disabled')
+        # A keep-out plane across the preview stroke, and the flange as the wrist point, set
+        # as the procedure has the operator set them: in the attach's teleop parameter file.
+        planes = logs / 'keep_out_planes.yaml'
+        planes.write_text(yaml.safe_dump(
+            {'/**': {'ros__parameters': {'keep_out_planes': list(PREVIEW_PLANE),
+                                         'wrist_frame': WRIST_FRAME}}}))
+        attach = start_attach(env, 'check', limits, logs, 'disabled',
+                              f'teleop_params_file:={planes}')
         # The node builds its kinematic chain and keep-out model from the description first
         # (over a second): the stage is attached once the measured tool pose is valid.
         probe.wait_for(lambda: probe.state() is not None
@@ -135,7 +147,7 @@ def test_arming_is_refused_at_the_press_with_the_reason(stage2):
     assert 'motion_enabled:=true' in line
 
 
-def test_the_preview_follows_a_stroke_and_is_never_a_command(stage2):
+def test_the_preview_follows_a_stroke_to_the_keep_out_plane_and_is_never_a_command(stage2):
     probe, env, logs = stage2['probe'], stage2['env'], stage2['logs']
     start = time.monotonic()
     process = replay(env, 'clutch_line', str(logs / 'preview_stroke.log'), start_delay=1.0)
@@ -152,6 +164,14 @@ def test_the_preview_follows_a_stroke_and_is_never_a_command(stage2):
     zs = [m.pose.position.z for m in shown]
     travel = max(max(v) - min(v) for v in (xs, ys, zs))
     assert travel > 0.02, f'the preview did not move ({travel:.4f} m)'
+    # keep_out_planes bound the preview as they bound an armed target: the stroke goes on to
+    # x 0.407 m, the preview stops on the plane's allowed side and stays there.
+    limit_x = -PREVIEW_PLANE[3]
+    assert max(xs) <= limit_x + 1e-6, f'the preview crossed the keep-out plane: {max(xs):.4f}'
+    assert max(xs) > limit_x - 0.03, f'the preview stopped short of the plane: {max(xs):.4f}'
+    assert abs(xs[-1] - max(xs)) < 1e-4, 'the preview left the plane while the hand went on'
+    # The wrist point the planes also bound came from the parameter file.
+    assert f'wrist point {WRIST_FRAME} at' in stage2['attach'].output()
     assert all(m.header.frame_id == 'xarm_link_base' for m in shown)
     assert probe.targets_since(start) == []
     assert all(not s.armed for s in probe.states_since(start))
