@@ -1246,7 +1246,7 @@ class TeleopNode(Node):
                 self.publish_target(output.target, stamp)
                 self._command_steps.append(('publish target', self.mono() - published))
         else:
-            self.stop_cycle(stamp, owner)
+            self.stop_cycle(stamp, owner, output.hold)
             self.solver_fault = ''
         marks.append(('target and joint command', self.mono()))
         if self.gripper_params.enabled:
@@ -1554,14 +1554,15 @@ class TeleopNode(Node):
         response.message = '\n'.join(lines)
         return response
 
-    def stop_cycle(self, stamp, owner: int) -> None:
+    def stop_cycle(self, stamp, owner: int, hold: Optional[Hold] = None) -> None:
         """
         Bring the joint command to rest in a cycle without a target (G-18).
 
         A release, every gate fault and a disarm ramp the last command to zero at the
         acceleration limit, all joints scaled together; MoveIt Servo stays active until the
         zero has been sent. Immediate (one zero now) only where this node cannot command the
-        arm through Servo: teleop no longer owns the arm, Servo has halted, or Servo is not
+        arm through Servo: teleop no longer owns the arm, Servo has halted (its halt status,
+        or its collision slow-down holding the arm still: HOLD_SERVO_HALTED), or Servo is not
         running. The rest are not this node's to shape: Servo's and the controller's command
         timeouts, an emergency stop.
         """
@@ -1570,7 +1571,7 @@ class TeleopNode(Node):
         if not moving:
             self.stop_command(stamp)
             return
-        immediate = self.immediate_stop_reason(owner)
+        immediate = self.immediate_stop_reason(owner, hold)
         if immediate:
             self.get_logger().warning(f'joint command stopped at once: {immediate}',
                                       throttle_duration_sec=1.0)
@@ -1586,11 +1587,11 @@ class TeleopNode(Node):
         if not step.limited:                # the zero went out this cycle
             self.commanding = False
 
-    def immediate_stop_reason(self, owner: int) -> str:
+    def immediate_stop_reason(self, owner: int, hold: Optional[Hold] = None) -> str:
         """Return why the joint command cannot be ramped through MoveIt Servo, or ''."""
         if owner != ArmOwner.OWNER_TELEOP:
             return 'teleop no longer owns the arm'
-        if self.servo_halted():
+        if self.servo_halted() or hold == Hold.SERVO_HALTED:
             return 'MoveIt Servo halted'
         if self.servo_state != SERVO_ACTIVE:
             return 'MoveIt Servo is not running'

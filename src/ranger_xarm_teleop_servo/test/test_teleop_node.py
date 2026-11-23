@@ -67,7 +67,10 @@ LIMITS = {
     'max_lead_rotation_deg': 12.0,
     'max_translation_scale': 2.0,
     'link_keepout_margin_m': 0.025,
+    'joint_acceleration_limit_rad_s2': 10.0,    # G-18, the simulation values
+    'joint_speed_cap_rad_s': 1.9,
 }
+ACCELERATION = LIMITS['joint_acceleration_limit_rad_s2']
 TIP_IN_TOOL = Pose((0.0, 0.0, -0.10), (0.0, 0.0, 0.0, 1.0))
 TCP_START = pose_from_matrix(dls.tool_pose(
     dls.make_arm(dls.chain_from_urdf(arm_urdf())), READY))
@@ -711,32 +714,167 @@ def _engaged_span(h):
     return [s for s in h.states if s.clutch_engaged]
 
 
-def test_release_sends_a_zero_command_in_the_same_cycle(harness):
-    """INV-8: the cycle that releases the clutch sends velocity zero, same stamp as its state."""
+def _ramp_from(h, state, a=ACCELERATION):
+    """
+    Check the stop ramp that starts in ``state``'s cycle; return its commands.
+
+    G-18: it starts in that cycle (same stamp), every joint changes by at most a T per cycle,
+    all joints scaled together (each command parallel to the last command before the stop),
+    and it ends in an exact zero within the stop time, after which nothing more is sent.
+    """
+    stamps = [stamp_key(c.header.stamp) for c in h.commands]
+    i = stamps.index(stamp_key(state.header.stamp))
+    before = np.array(h.commands[i - 1].velocities)
+    ramp = []
+    for c in h.commands[i:]:
+        ramp.append(np.array(c.velocities))
+        if not np.any(ramp[-1]):
+            break
+    assert not np.any(ramp[-1]), 'the ramp never reached zero'
+    previous = before
+    for v in ramp:
+        assert np.max(np.abs(v - previous)) <= a * 0.02 * (1 + 1e-9)
+        if np.any(v):
+            assert np.allclose(v / np.linalg.norm(v), before / np.linalg.norm(before), atol=1e-9)
+        previous = v
+    assert len(ramp) <= math.ceil(np.max(np.abs(before)) / (a * 0.02)) + 1
+    assert (len(ramp) - 1) * 0.02 <= 0.2 + 1e-9
+    return ramp
+
+
+def test_release_ramps_the_command_to_zero_starting_in_the_same_cycle(harness):
+    """G-18 (replaces INV-8's zero in the release cycle): the release cycle starts the ramp."""
     h = harness()
-    h.play('clutch_reengage')
-    commands = {stamp_key(c.header.stamp): c for c in h.commands}
-    releases = [b for a, b in zip(h.states, h.states[1:]) if a.clutch_engaged
-                and not b.clutch_engaged]
-    assert len(releases) >= 2
-    for state in releases:
-        command = commands[stamp_key(state.header.stamp)]
-        assert list(command.velocities) == [0.0] * 6
-    # Nothing is sent while the clutch stays released.
-    held = [s for s in h.states if not s.clutch_engaged and s not in releases]
-    assert not any(stamp_key(s.header.stamp) in commands for s in held)
+    h.play('clutch_release_moving')
+    releases = [(i, b) for i, (a, b) in enumerate(zip(h.states, h.states[1:]), 1)
+                if a.clutch_engaged and not b.clutch_engaged]
+    assert releases
+    i, state = releases[0]
+    ramp = _ramp_from(h, state)
+    assert len(ramp) >= 3                           # it was moving: a real ramp
+    # The states of the ramp say so; the cycle that sends the zero ends it.
+    assert all(s.stopping and s.joint_acceleration_limited
+               for s in h.states[i:i + len(ramp) - 1])
+    assert not h.states[i + len(ramp) - 1].stopping
+    # Nothing is sent while the clutch stays released after the ramp.
+    end = stamp_key(h.states[i + len(ramp) - 1].header.stamp)
+    held = [s for s in h.states[i + len(ramp):] if not s.clutch_engaged]
+    assert not any(stamp_key(s.header.stamp) in {stamp_key(c.header.stamp) for c in h.commands}
+                   for s in held if stamp_key(s.header.stamp) > end)
 
 
 @pytest.mark.parametrize('fixture, hold', [('gate_emulated', TeleopState.HOLD_POSE_EMULATED),
                                            ('gate_out_of_view', TeleopState.HOLD_OUT_OF_VIEW),
                                            ('clutch_stall', TeleopState.HOLD_INPUT_STALE)])
-def test_every_g4_trigger_and_stale_input_stop_the_joint_command_at_once(harness, fixture, hold):
-    """INV-8 for G-3 and G-4 triggers."""
+def test_every_g4_trigger_and_stale_input_ramp_the_joint_command_to_zero(harness, fixture, hold):
+    """G-18 (replaces INV-8 for G-3 and G-4): a gate fault ramps, as a release does."""
     h = harness()
     h.play(fixture)
-    commands = {stamp_key(c.header.stamp): c for c in h.commands}
     first = next(s for s in h.states if s.hold_reason == hold)
-    assert list(commands[stamp_key(first.header.stamp)].velocities) == [0.0] * 6
+    _ramp_from(h, first)
+
+
+def test_the_command_never_changes_faster_than_the_limit_nor_exceeds_the_cap(harness):
+    """INV-1 at the node: every command against the one before, engaged and stopping."""
+    h = harness(joint_acceleration_limit_rad_s2=2.0, joint_speed_cap_rad_s=0.4)
+    h.play('clutch_fast')
+    previous = np.zeros(6)
+    limited = False
+    for c in h.commands:
+        v = np.array(c.velocities)
+        assert np.max(np.abs(v - previous)) <= 2.0 * 0.02 * (1 + 1e-9)
+        assert np.max(np.abs(v)) <= 0.4 + 1e-9
+        previous = v
+    limited = any(s.joint_acceleration_limited for s in h.states if s.clutch_engaged)
+    assert limited
+    shown = {s.active_limit for s in h.states if s.joint_acceleration_limited and s.clutch_engaged}
+    assert TeleopState.LIMIT_JOINT_ACCELERATION in shown
+
+
+def test_disarm_by_the_service_ramps_and_hands_back_only_after_it(ros):
+    """G-18: a disarm while moving ramps; Servo stays active until the zero is out."""
+    def disarm(node):
+        node._disarm('test: disarm by the service')
+
+    class Mux(_Midway):
+        """Like the node's own request: the arm goes back to MoveIt once Servo is paused."""
+
+        def _ownership(self, now, owner):
+            if not self.node.state.want_armed and \
+                    self.node.servo_state == teleop_node.SERVO_ACTIVE:
+                self.node.owner_arrival = now
+                return
+            super()._ownership(now, owner)
+    h = Mux(ros, 2.5, disarm)
+    h.node.manage_ownership = h._ownership
+    try:
+        h.play('clutch_line')
+        first = next(s for i, s in enumerate(h.states)
+                     if s.hold_reason == TeleopState.HOLD_NOT_ARMED and i * 0.02 >= 2.5)
+        ramp = _ramp_from(h, first)
+        assert len(ramp) >= 2
+        assert h.states[-1].owner == ArmOwner.OWNER_MOVEIT       # handed back after it
+    finally:
+        h.close()
+
+
+@pytest.mark.parametrize('code', [5, 6])   # MoveIt Servo halts: collision, joint bound
+def test_a_servo_halt_stops_the_command_at_once(ros, code):
+    """G-18: a halt by MoveIt Servo is immediate, outside the limit."""
+    def halt(node):
+        status(node, code)
+    h = _Midway(ros, 2.5, halt)
+    try:
+        h.play('clutch_line')
+        first = next(s for s in h.states if s.hold_reason == TeleopState.HOLD_SERVO_HALTED)
+        commands = {stamp_key(c.header.stamp): c for c in h.commands}
+        assert list(commands[stamp_key(first.header.stamp)].velocities) == [0.0] * 6
+        assert not first.stopping
+    finally:
+        h.close()
+
+
+def test_ownership_lost_stops_the_command_at_once(ros):
+    """G-17 / G-18: the arm left teleop without teleop asking: no ramp, one zero now."""
+    class Lost(_Midway):
+
+        def __init__(self, bridge):
+            super().__init__(bridge, 2.5, None)
+
+        def tick(self, now):
+            if now >= 2.5:
+                self.node.manage_ownership = lambda now, owner: None
+                self.node.owner = ArmOwner.OWNER_MOVEIT
+                self.node.owner_arrival = now
+            super().tick(now)
+    h = Lost(ros)
+    try:
+        h.play('clutch_line')
+        first = next(s for i, s in enumerate(h.states)
+                     if s.hold_reason == TeleopState.HOLD_NOT_OWNER and i * 0.02 >= 2.5)
+        commands = {stamp_key(c.header.stamp): c for c in h.commands}
+        assert list(commands[stamp_key(first.header.stamp)].velocities) == [0.0] * 6
+        later = [c for c in h.commands
+                 if stamp_key(c.header.stamp) > stamp_key(first.header.stamp)]
+        assert not later
+    finally:
+        h.close()
+
+
+@pytest.mark.parametrize('values, names', [
+    ({'joint_acceleration_limit_rad_s2': 2.0, 'joint_speed_cap_rad_s': 0.5},
+     ('joint_acceleration_limit_rad_s2', 'joint_speed_cap_rad_s')),
+    ({'joint_acceleration_limit_rad_s2': 9.0, 'joint_speed_cap_rad_s': 1.9},
+     ('joint_acceleration_limit_rad_s2',)),
+])
+def test_a_stop_longer_than_the_stop_time_is_refused_at_start_up(ros, values, names):
+    """G-18: speed cap / acceleration limit above 0.2 s: one line naming what to change."""
+    with pytest.raises(StartupRefused) as refused:
+        TeleopNode(node_name='teleop_refused',
+                   parameter_overrides=overrides({**LIMITS, 'motion_enabled': True, **values}))
+    line = str(refused.value)
+    assert '\n' not in line and '0.2 s' in line
+    assert all(name in line for name in names)
 
 
 def test_state_reports_the_solver(harness):

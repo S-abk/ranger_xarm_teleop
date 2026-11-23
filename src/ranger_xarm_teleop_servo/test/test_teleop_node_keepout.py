@@ -42,6 +42,8 @@ LIMITS = {
     'max_lead_rotation_deg': 12.0,
     'max_translation_scale': 2.0,
     'link_keepout_margin_m': 0.025,
+    'joint_acceleration_limit_rad_s2': 10.0,    # G-18, the simulation values
+    'joint_speed_cap_rad_s': 1.9,
     'motion_enabled': True,
 }
 
