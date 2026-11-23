@@ -24,8 +24,9 @@ from dataclasses import replace
 from helpers import frame, HAND, moved, params, TOOL_START
 from ranger_xarm_teleop_servo import preview
 from ranger_xarm_teleop_servo.calibration import Calibration
-from ranger_xarm_teleop_servo.gate import (ARM_REFUSED_MOTION_DISABLED, Env, GateState, Hold,
-                                           on_frame, tick)
+from ranger_xarm_teleop_servo.gate import (_plane_depth, ARM_REFUSED_MOTION_DISABLED, Env,
+                                           GateState, Hold, on_frame, tick)
+from ranger_xarm_teleop_servo.params import Plane
 from ranger_xarm_teleop_servo.rotations import v_norm, v_sub
 
 CAL = Calibration(0.0, 7, 0)
@@ -139,6 +140,39 @@ def test_the_preview_is_bounded_by_the_offset_limit():
     shown = [target for *_, target, _ in results if target is not None]
     assert shown
     assert max(v_norm(v_sub(t.p, TOOL_START.p)) for t in shown) <= 0.10 + 1e-9
+
+
+def test_the_preview_stops_at_a_keep_out_plane():
+    """The preview is bounded by keep_out_planes as an armed target is: tool and wrist point."""
+    p = params(motion_enabled=False)
+    wall = Plane((-1.0, 0.0, 0.0), -(TOOL_START.p[0] + 0.05))     # allowed: x <= start + 5 cm
+    floor = Plane((0.0, 0.0, 1.0), TOOL_START.p[2] - 0.30)       # far below: never touched
+    bounded = replace(p, keep_out_planes=(wall, floor))
+    results = drive(stroke(n=270, dx=0.30), bounded, state=GateState(calibration=CAL))
+    shown = [target for *_, target, _ in results if target is not None]
+    free = [target for *_, target, _ in drive(stroke(n=270, dx=0.30), p,
+                                              state=GateState(calibration=CAL))
+            if target is not None]
+    assert shown and free
+    assert max(t.p[0] for t in free) > TOOL_START.p[0] + 0.10     # the hand goes beyond it
+    for plane in bounded.keep_out_planes:
+        assert max(_plane_depth(t, plane, bounded) for t in shown) <= 1e-9
+    # It reaches the plane and stays on it while the hand goes on.
+    assert abs(_plane_depth(shown[-1], wall, bounded)) < 1e-9
+    assert all(abs(t.p[1] - shown[0].p[1]) < 1e-9 and abs(t.p[2] - shown[0].p[2]) < 1e-9
+               for t in shown)
+
+
+def test_the_wrist_point_stops_the_preview_first_when_it_reaches_a_plane_first():
+    """With a wrist point 4 cm ahead of the tool point, the tool stops 4 cm short of the plane."""
+    p = replace(params(motion_enabled=False), wrist_offset=(0.04, 0.0, 0.0))
+    wall = Plane((-1.0, 0.0, 0.0), -(TOOL_START.p[0] + 0.05))
+    bounded = replace(p, keep_out_planes=(wall,))
+    results = drive(stroke(n=270, dx=0.30), bounded, state=GateState(calibration=CAL))
+    shown = [target for *_, target, _ in results if target is not None]
+    assert shown
+    assert max(t.p[0] for t in shown) <= TOOL_START.p[0] + 0.01 + 1e-9
+    assert abs(shown[-1].p[0] - (TOOL_START.p[0] + 0.01)) < 1e-9
 
 
 def test_a_jump_ends_the_preview_until_the_grip_is_released():

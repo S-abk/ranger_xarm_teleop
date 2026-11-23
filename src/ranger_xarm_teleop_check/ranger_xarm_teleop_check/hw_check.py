@@ -79,6 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument('--joint-limits',
                     help='MoveIt joint_limits.yaml (max_acceleration): the limit of the motion '
                     "stage's peak joint acceleration; shown for reference in the teleop stage")
+    ap.add_argument('--jog-topic', default=rules.DEFAULT_JOG_TOPIC,
+                    help="teleop stage: the teleop node's joint-jog commands to MoveIt Servo, "
+                    "read to tell Servo's skips (default: %(default)s)")
     ap.add_argument('--command-topic', default=rules.DEFAULT_COMMAND_TOPIC,
                     help='teleop stage: the controller trajectory topic MoveIt Servo publishes '
                     'on, read for the acceleration and stop-time rules (default: %(default)s)')
@@ -102,7 +105,7 @@ def resolve_options(args) -> tuple:
                    expect_active=_names(args.expect_active),
                    expect_inactive=_names(args.expect_inactive),
                    expect_fingerprint=args.expect_fingerprint,
-                   command_topic=args.command_topic)
+                   command_topic=args.command_topic, jog_topic=args.jog_topic)
     if args.limits:
         data, problem = sysinfo.load_yaml_file(args.limits)
         if problem:
@@ -189,7 +192,7 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
     executor.add_node(node)
     data = {'arm': [], 'gripper': [], 'js_publishers': [], 'clock_publishers': [],
             'activity': None, 'controller_state': {}, 'description': None, 'states': [],
-            'targets': [], 'command': [], 'command_capture': None, 'clutch': [],
+            'targets': [], 'command': [], 'jog': [], 'command_capture': None, 'clutch': [],
             'warnings': [], 'robot_states': None,
             'rosout': {'overruns': 0, 'read_failures': 0, 'overrun_examples': [],
                        'read_examples': []},
@@ -249,7 +252,7 @@ def _stamp_ns(header) -> int:
 
 
 def _subscribe_stack(stage, opts, data, subscribe, system_clock):
-    from control_msgs.msg import JointTrajectoryControllerState
+    from control_msgs.msg import JointJog, JointTrajectoryControllerState
     from controller_manager_msgs.msg import ControllerManagerActivity
     from geometry_msgs.msg import PoseStamped
     from rcl_interfaces.msg import Log
@@ -324,6 +327,11 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
         subscribe(JointTrajectory, opts.command_topic, on_command, COMMAND_DEPTH, 'reliable',
                   'volatile')
 
+        def on_jog(msg):
+            data['jog'].append((tuple(msg.joint_names), tuple(msg.velocities)))
+
+        subscribe(JointJog, opts.jog_topic, on_jog, COMMAND_DEPTH, 'reliable', 'volatile')
+
     overrun = re.compile('overrun', re.IGNORECASE)
 
     def on_rosout(msg):
@@ -344,46 +352,60 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
 
 class _RobotStates:
     """
-    The vendor driver's /xarm/robot_states, read-only, idle stage.
+    The arm driver's state topic (xarm_msgs/msg/RobotMsg), read-only, idle stage.
 
-    Looked up once, after discovery and before the capture window opens, and subscribed if a
-    publisher is on the graph then (the driver starts before the check). Nothing about it runs
-    inside the window, so it cannot delay the joint-state callbacks the gap rules time. Never a
-    service client: the topic is the only thing asked of the driver. ``xarm_msgs`` is imported
-    only then, so a machine without it says so instead of failing.
+    Found by its message type, not by a name: the driver publishes it in its hardware namespace
+    (on the real driver /xarm_xarm/robot_states). Looked up once, after discovery and before the
+    capture window opens, and subscribed if exactly one publisher of that type is on the graph
+    then (the driver starts before the check); with several, they are named and none is read.
+    Nothing about it runs inside the window, so it cannot delay the joint-state callbacks the
+    gap rules time. Never a service client: the topic is the only thing asked of the driver.
+    ``xarm_msgs`` is imported only then, so a machine without it says so instead of failing.
     """
 
     def __init__(self, node, data, subscribe):
         self._node = node
         self._subscribe = subscribe
         self._done = False
-        self._record = data['robot_states'] = {'publishers': [], 'unavailable': None,
+        self._record = data['robot_states'] = {'topics': {}, 'topic': None, 'unavailable': None,
                                                'messages': []}
 
     def poll(self, now: float):
-        """Subscribe when a publisher has appeared; record the publishers seen."""
+        """Subscribe when one publisher of the type has appeared; record every one seen."""
         if self._done:
             return
-        publishers = _publisher_names(self._node, rules.ARM_STATE_TOPIC)
-        if not publishers:
+        topics = {}
+        for topic, types in self._node.get_topic_names_and_types():
+            if rules.ARM_STATE_TYPE in types:
+                # Every publisher counts, two of one name too (not _publisher_names' set).
+                publishers = sorted(i.node_namespace.rstrip('/') + '/' + i.node_name
+                                    for i in self._node.get_publishers_info_by_topic(topic))
+                if publishers:          # a topic with subscribers only is not a source
+                    topics[topic] = publishers
+        if not topics:
             return
-        self._record['publishers'] = publishers
+        self._record['topics'] = topics
         self._done = True
+        if sum(len(p) for p in topics.values()) > 1:
+            print(f'several publishers of {rules.ARM_STATE_TYPE} ({topics}): none read',
+                  file=sys.stderr, flush=True)
+            return
+        topic = next(iter(topics))
         try:
             from xarm_msgs.msg import RobotMsg
         except ImportError as exc:
-            print(f'xarm_msgs cannot be imported ({exc}): {rules.ARM_STATE_TOPIC} not read',
+            print(f'xarm_msgs cannot be imported ({exc}): {topic} not read',
                   file=sys.stderr, flush=True)
             self._record['unavailable'] = 'xarm_msgs not installed'
             return
+        self._record['topic'] = topic
         messages = self._record['messages']
 
         def on_state(msg):
             messages.append((time.monotonic(), int(msg.err), int(msg.warn), int(msg.state),
                              int(msg.mode), int(msg.mt_brake), int(msg.mt_able)))
 
-        self._subscribe(RobotMsg, rules.ARM_STATE_TOPIC, on_state, ROBOT_STATES_DEPTH,
-                        'reliable', 'volatile')
+        self._subscribe(RobotMsg, topic, on_state, ROBOT_STATES_DEPTH, 'reliable', 'volatile')
 
 
 def _subscribe_cameras(node, opts, data):

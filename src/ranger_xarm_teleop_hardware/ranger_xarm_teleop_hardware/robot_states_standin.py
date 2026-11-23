@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Stand-in for the vendor driver's /xarm/robot_states, for the hardware-shaped mock.
+Stand-in for the vendor driver's /xarm_xarm/robot_states, for the hardware-shaped mock.
 
 Publishes xarm_msgs/RobotMsg at 5 Hz: err 0, warn 0, mode 1 (servo), state 2 (ready), every
 axis braked and enabled (mt_brake and mt_able 63), the arm angles from /joint_states when

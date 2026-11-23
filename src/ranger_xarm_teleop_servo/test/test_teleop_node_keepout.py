@@ -91,6 +91,39 @@ def test_margin_has_no_default(ros):
                                         {**LIMITS, 'link_keepout_margin_m': -0.01}.items()])
 
 
+# A collar on the arm base, around the first two links: l1 - collar is in contact at every
+# posture (no margin keeps it); l2 - collar is closer than 25 mm at every posture but clear in
+# some (a smaller margin would keep it).
+COLLAR = ('<link name="collar"><collision><origin xyz="0 0 0.20"/><geometry>'
+          '<cylinder radius="0.10" length="0.02"/></geometry></collision></link>'
+          '<joint name="base_to_collar" type="fixed"><parent link="xarm_link_base"/>'
+          '<child link="collar"/></joint></robot>')
+HARDWARE = {'tool_pose_timeout_s': 0.05, 'hardware_limits': True}
+
+
+def test_hardware_refuses_a_margin_that_drops_a_pair_a_smaller_one_would_keep(node):
+    with pytest.raises(StartupRefused) as refused:
+        node(robot_urdf().replace('</robot>', COLLAR), **HARDWARE)
+    text = str(refused.value)
+    assert text.startswith('link keep-out: link_keepout_margin_m 0.025 m leaves out l2 - collar')
+    assert 'a smaller margin would keep the pair' in text
+    assert 'l1 - collar' not in text          # in contact everywhere: no margin keeps it
+    assert 'docs/HARDWARE_PROCEDURE.md, "Values you supply"' in text
+
+
+def test_simulation_warns_and_keeps_the_rest(node):
+    n = node(robot_urdf().replace('</robot>', COLLAR))
+    assert n.keepout is not None
+    near = {(e.moving, e.other) for e in n.keepout.excluded if e.reason == 'structurally near'}
+    assert near == {('l1', 'collar'), ('l2', 'collar')}
+    assert ('l2', 'collar') not in n.keepout.pairs and ('l2', 'screen') in n.keepout.pairs
+
+
+def test_hardware_builds_the_model_when_no_pair_is_dropped(node):
+    n = node(robot_urdf(), **HARDWARE)
+    assert n.keepout is not None and ('l2', 'screen') in n.keepout.pairs
+
+
 def test_model_is_built_from_the_description_and_reported(node):
     n = node(robot_urdf())
     assert n.keepout is not None and n.keepout.margin == 0.025

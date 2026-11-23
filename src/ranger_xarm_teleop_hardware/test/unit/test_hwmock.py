@@ -239,7 +239,7 @@ def test_robot_state_fields_default_to_ready_servo_with_every_axis_enabled():
     fields = hwmock.robot_state_fields()
     assert fields == {'err': 0, 'warn': 0, 'mode': 1, 'state': 2, 'mt_brake': 63,
                       'mt_able': 63, 'angle': []}
-    assert hwmock.ROBOT_STATES_TOPIC == '/xarm/robot_states'
+    assert hwmock.ROBOT_STATES_TOPIC == '/xarm_xarm/robot_states'
     assert hwmock.ROBOT_STATES_RATE_HZ == 5.0
 
 

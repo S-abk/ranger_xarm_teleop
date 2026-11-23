@@ -27,7 +27,9 @@ Built at start-up from the robot description, never written by hand:
   last arm joint) against arm links at least ``TOOL_ARM_JOINTS`` joints up the chain.
   Excluded, and reported: a moving link attached directly to a fixed link (adjacent), and
   a pair whose clearance stays below the margin over the whole sampled range of the
-  joints it depends on (structurally near: it cannot be kept clear).
+  joints it depends on (structurally near: it cannot be kept clear at this margin). When
+  some sampled posture had positive clearance, a smaller margin would keep the pair
+  (``kept_by_smaller_margin``); the hardware path refuses to start then.
 
 **Sphere cover, and why the model never reports more clearance than the geometry has.**
 Every collision shape of a moving body (and every fixed mesh) is turned into triangles; a
@@ -438,6 +440,32 @@ class Excluded:
     reason: str                      # 'adjacent' or 'structurally near'
     low: float = math.nan            # clearance range over the sampled postures (m)
     high: float = math.nan
+
+
+NEAR = 'structurally near'
+
+
+def kept_by_smaller_margin(item: Excluded) -> bool:
+    """
+    Return whether a smaller margin would keep a left-out pair.
+
+    A structurally near pair is below the margin at every sampled posture; if one of them had
+    positive clearance, any margin at or below it keeps the pair. One in contact at every
+    sampled posture is kept by no margin.
+    """
+    return item.reason == NEAR and item.high > 0.0
+
+
+def excluded_text(item: Excluded, margin: float) -> str:
+    """Return one line on a left-out pair: why, its clearance range, and what would keep it."""
+    text = f'{item.moving} - {item.other} left out: {item.reason}'
+    if item.reason != NEAR:
+        return text
+    text += (f' (clearance {item.low * 1000.0:.1f} to {item.high * 1000.0:.1f} mm over the '
+             f'sampled postures, below the margin of {margin * 1000.0:.1f} mm in every one)')
+    if kept_by_smaller_margin(item):
+        return text + '; a smaller margin would keep the pair'
+    return text + '; no margin keeps it (in contact at every sampled posture)'
 
 
 @dataclass(frozen=True)
@@ -1074,7 +1102,7 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
             values = np.array([sub.pair_minima(q) for q in samples])
             for column, i in enumerate(candidates):
                 moving_name, other = model.pairs[i]
-                excluded.append(Excluded(moving_name, other, 'structurally near',
+                excluded.append(Excluded(moving_name, other, NEAR,
                                          float(values[:, column].min()),
                                          float(values[:, column].max())))
         drop = {int(i) for i in candidates}

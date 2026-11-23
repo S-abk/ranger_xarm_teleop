@@ -118,6 +118,22 @@ def test_a_pair_always_inside_the_margin_is_excluded_and_reported():
     assert all((e.moving, e.other) not in model.pairs for e in near)
 
 
+def test_a_left_out_pair_says_whether_a_smaller_margin_keeps_it():
+    keep = ko.Excluded('xarm_link2', 'xarm_link_base', ko.NEAR, -0.007, 0.048)
+    assert ko.kept_by_smaller_margin(keep)
+    assert ko.excluded_text(keep, 0.05) == (
+        'xarm_link2 - xarm_link_base left out: structurally near (clearance -7.0 to 48.0 mm '
+        'over the sampled postures, below the margin of 50.0 mm in every one); a smaller '
+        'margin would keep the pair')
+    touching = ko.Excluded('l1', 'collar', ko.NEAR, -0.0257, -0.0257)
+    assert not ko.kept_by_smaller_margin(touching)
+    assert ko.excluded_text(touching, 0.025).endswith(
+        '; no margin keeps it (in contact at every sampled posture)')
+    adjacent = ko.Excluded('l1', 'xarm_link_base', 'adjacent')
+    assert not ko.kept_by_smaller_margin(adjacent)
+    assert ko.excluded_text(adjacent, 0.025) == 'l1 - xarm_link_base left out: adjacent'
+
+
 def test_measured_values_place_the_fingers_and_a_missing_one_is_refused(model):
     with pytest.raises(ko.ModelError, match='finger_left_joint'):
         model.extra_values({})

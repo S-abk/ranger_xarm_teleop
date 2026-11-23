@@ -87,10 +87,16 @@ WRIST_JOINTS = (3, 5)
 # MoveIt Servo's output, the teleop command (G-18): the controller's trajectory topic, and the
 # command period (s).
 DEFAULT_COMMAND_TOPIC = '/teleop_arm_controller/joint_trajectory'
+# The teleop node's joint-jog commands to MoveIt Servo, read to tell Servo's skips.
+DEFAULT_JOG_TOPIC = '/servo_node/delta_joint_cmds'
 COMMAND_PERIOD_S = 0.02
-# A Servo skip can join two consecutive command steps into one: a point is accepted up to this
-# many times the acceleration limit.
+# A Servo skip can join two consecutive command steps into one, at most 2 x the limit; Servo's
+# point timing moves that slightly either way. A point FAILs only above SKIP_FACTOR x
+# SKIP_MARGIN x the limit. The first real reports decide whether to tighten it.
 SKIP_FACTOR = 2.0
+SKIP_MARGIN = 1.05
+# Points above this many times the limit that no detected skip explains are reported (INFO).
+EXPLAINED_ABOVE = 1.1
 # Relative slack for floating-point rounding in the comparisons with the limit.
 COMMAND_ROUNDING = 1e-6
 
@@ -139,6 +145,7 @@ class Options:
     # from the servo.yaml the teleop launch loads; None when it could not be read.
     servo_latency_s: Any = None
     command_topic: str = DEFAULT_COMMAND_TOPIC
+    jog_topic: str = DEFAULT_JOG_TOPIC
     expect_fingerprint: Optional[str] = None
     expect_active: Tuple[str, ...] = ()
     expect_inactive: Tuple[str, ...] = ()
@@ -635,10 +642,28 @@ def command_measures(data: dict, limit: Optional[float], latency: float = 0.0) -
                           'max': _ms(max(spacing) if spacing else None)},
            'releases_seen': len(releases), 'stops': stops,
            'above_1x': None, 'above_2x': None}
+    # Servo's skips, from its steps matched to the teleop node's commands (stats.servo_skips).
+    jog = stats.jog_commands(data.get('jog', []))
+    out['jog_messages'] = len(data.get('jog', []))
+    step_limit = limit * COMMAND_PERIOD_S if limit is not None else math.inf
+    skips = (stats.servo_skips(p, an['runs'], jog, COMMAND_PERIOD_S, step_limit)
+             if jog else None)
+    out['skips'] = ({k: v for k, v in skips.items() if k != 'skip_points'}
+                    if skips is not None else None)
+    out['judged_points'] = int(judged.sum())
+    out['above_explained_limit'] = None
+    out['unexplained'] = None
     if limit is not None:
         finite = point_peak[np.isfinite(point_peak)]
         out['above_1x'] = int((finite > limit * (1.0 + COMMAND_ROUNDING)).sum())
-        out['above_2x'] = int((finite > SKIP_FACTOR * limit * (1.0 + COMMAND_ROUNDING)).sum())
+        out['above_2x'] = int((finite > SKIP_FACTOR * SKIP_MARGIN * limit
+                               * (1.0 + COMMAND_ROUNDING)).sum())
+        high = [i for i in range(len(t)) if np.isfinite(point_peak[i])
+                and point_peak[i] > EXPLAINED_ABOVE * limit * (1.0 + COMMAND_ROUNDING)]
+        out['above_explained_limit'] = len(high)
+        if skips is not None:
+            explained = set(skips['skip_points'])
+            out['unexplained'] = sum(1 for i in high if i not in explained)
     return out
 
 
@@ -647,14 +672,16 @@ def _ms(seconds) -> Optional[float]:
 
 
 def rule_command_acceleration(cm: dict, opts: Options) -> Result:
-    """Servo's output: every point's acceleration within 2 x the limit (a stop above)."""
+    """Servo's output: every point's acceleration within 2 x 1.05 x the limit (a stop above)."""
     name = 'commanded joint acceleration (MoveIt Servo output)'
+    bound = SKIP_FACTOR * SKIP_MARGIN
     skip = ('a Servo skip can join two consecutive command steps into one, so a single step '
-            f'is accepted up to {SKIP_FACTOR:g} x the limit')
+            f'is accepted up to {SKIP_FACTOR:g} x the limit, with {SKIP_MARGIN:g} for '
+            "Servo's point timing")
     limit, todo = _command_limit(opts)
-    threshold = f'every point <= {SKIP_FACTOR:g} x {ACCELERATION_NAME}'
+    threshold = f'every point <= {SKIP_FACTOR:g} x {SKIP_MARGIN:g} x {ACCELERATION_NAME}'
     if limit is not None:
-        threshold += f' = {SKIP_FACTOR * limit:g} rad/s^2 (limit {limit:g}'
+        threshold += f' = {bound * limit:g} rad/s^2 (limit {limit:g}'
     else:
         threshold += ' (limit not known'
     threshold += f'; {skip})'
@@ -686,11 +713,40 @@ def rule_command_acceleration(cm: dict, opts: Options) -> Result:
                       'topic?)')
     if cm['above_2x']:
         return Result(name, FAIL, measured + f"; {cm['above_2x']} points above "
-                      f'{SKIP_FACTOR:g} x limit', threshold,
+                      f'{bound:g} x limit', threshold,
                       'a stop: (procedure stage 4): the joint command accelerates faster than '
-                      f'{SKIP_FACTOR:g} x the limit; release the grip, keep the report and '
+                      f'{bound:g} x the limit; release the grip, keep the report and '
                       'report it')
     return Result(name, PASS, measured, threshold)
+
+
+def info_unexplained_acceleration(cm: dict, opts: Options) -> Result:
+    """INFO: Servo-output points above 1.1 x the limit that no detected skip explains."""
+    name = 'Servo output above 1.1 x limit without a skip (INFO)'
+    threshold = (f'informational: the share of points above {EXPLAINED_ABOVE:g} x '
+                 f'{ACCELERATION_NAME} that no detected Servo skip explains (a skip: a step of '
+                 "Servo's matches a teleop command more than one ahead of the last, on "
+                 f'{opts.jog_topic}; it explains a point only if the commands it jumped each '
+                 'change within the limit), and the number of skips; the first real reports '
+                 'decide whether the stop rule is tightened')
+    limit, _ = _command_limit(opts)
+    sk = cm.get('skips')
+    if limit is None or cm.get('above_explained_limit') is None:
+        return Result(name, INFO, 'not judged: the acceleration limit is not known', threshold)
+    high, total = cm['above_explained_limit'], cm.get('judged_points') or 0
+    if sk is None:
+        return Result(name, INFO,
+                      f'{high} of {total} points above {EXPLAINED_ABOVE:g} x limit; skips not '
+                      f'detectable: no teleop command on {opts.jog_topic} '
+                      f"({cm.get('jog_messages', 0)} messages)", threshold)
+    unexplained = cm['unexplained']
+    share = f'{100.0 * unexplained / high:.1f} %' if high else 'none above'
+    return Result(name, INFO,
+                  f'{unexplained} of {high} points above {EXPLAINED_ABOVE:g} x limit ({share}) '
+                  f'without a skip that explains them, of {total} judged points; '
+                  f"{sk['skips']} skips ({sk['skipped_commands']} commands skipped), "
+                  f"{sk['reused']} reused, {sk['unmatched']} steps matching no command, over "
+                  f"{sk['steps']} steps and {cm.get('jog_messages', 0)} commands", threshold)
 
 
 def rule_stop_time(cm: dict, latency=None) -> Result:
@@ -755,10 +811,12 @@ def info_joint_state_acceleration(jm: dict, opts: Options) -> Result:
                   f"MoveIt's max_acceleration {moveit} for reference")
 
 
-# ---- the arm's own state (vendor driver, /xarm/robot_states) ----------------------------
+# ---- the arm's own state (vendor driver, xarm_msgs/msg/RobotMsg) -----------------------
 
-ARM_STATE_RULE = 'arm state (/xarm/robot_states)'
-ARM_STATE_TOPIC = '/xarm/robot_states'
+ARM_STATE_RULE = 'arm state (xarm_msgs/RobotMsg)'
+# Found by type: the driver publishes it in its hardware namespace (on the real driver
+# /xarm_xarm/robot_states), so no fixed name is assumed.
+ARM_STATE_TYPE = 'xarm_msgs/msg/RobotMsg'
 ARM_STATE_THRESHOLD = 'err 0, mode 1 (servo), state <= 2 (1 running, 2 ready) in every message'
 ARM_STATE_MODE = 1
 ARM_STATE_MAX_STATE = 2
@@ -775,14 +833,19 @@ def axis_bits(value) -> str:
 
 def arm_state_measures(data: dict) -> dict:
     """
-    Return what /xarm/robot_states showed.
+    Return what the arm driver's state topic (xarm_msgs/msg/RobotMsg) showed.
 
-    ``data['robot_states']`` is None or {'publishers': [names], 'unavailable': reason or None,
-    'messages': [(arrival s, err, warn, state, mode, mt_brake, mt_able)]}.
+    ``data['robot_states']`` is None or {'topics': {topic: [publisher names]}, 'topic': the
+    topic read or None, 'unavailable': reason or None, 'messages': [(arrival s, err, warn,
+    state, mode, mt_brake, mt_able)]}. ``topics`` holds every topic of that type with a
+    publisher; more than one publisher in all is ambiguous, and nothing is read then.
     """
     raw = data.get('robot_states') or {}
+    topics = {t: sorted(p) for t, p in sorted((raw.get('topics') or {}).items()) if p}
     messages = list(raw.get('messages') or [])
-    out = {'publishers': sorted(raw.get('publishers') or []),
+    out = {'topics': topics, 'topic': raw.get('topic'),
+           'publishers': [f'{name} on {topic}' for topic, names in topics.items()
+                          for name in names],
            'unavailable': raw.get('unavailable'), 'messages': len(messages),
            'rate_hz': stats.period_distribution([m[0] for m in messages], None)['rate_hz'],
            'bad_err': sum(1 for m in messages if m[1] != 0),
@@ -804,18 +867,25 @@ def _breaks_arm_state(message) -> bool:
 def rule_arm_state(am: dict) -> Result:
     """Judge the vendor driver's err, mode and state in every message; INFO when absent."""
     name, threshold = ARM_STATE_RULE, ARM_STATE_THRESHOLD
+    if len(am['publishers']) > 1:
+        return Result(name, NOT_JUDGED,
+                      f"{len(am['publishers'])} publishers of {ARM_STATE_TYPE}: "
+                      f"{'; '.join(am['publishers'])}; none judged", threshold,
+                      'which one is the arm is not known: stop every publisher of that type '
+                      "but the arm's driver, and run the check again")
     if am['unavailable']:
         return Result(name, INFO, f"not available ({am['unavailable']})", threshold)
     if not am['publishers'] and not am['messages']:
-        return Result(name, INFO, f'not available: no publisher of {ARM_STATE_TOPIC}', threshold)
+        return Result(name, INFO, f'not available: no publisher of {ARM_STATE_TYPE}', threshold)
     if not am['messages']:
         return Result(name, NOT_JUDGED,
-                      f'no message arrived from {", ".join(am["publishers"])}', threshold,
-                      f'{ARM_STATE_TOPIC} has a publisher but sent nothing during the run: '
+                      f"no message arrived from {', '.join(am['publishers'])}", threshold,
+                      f'{ARM_STATE_TYPE} has a publisher but sent nothing during the run: '
                       'check that the vendor driver is connected to the arm')
     last = am['last']
     n = am['messages']
-    measured = (f"{n} messages at {_hz(am['rate_hz'])}; last err {last['err']}, warn "
+    measured = (f"{n} messages on {am['topic']} at {_hz(am['rate_hz'])}; last err "
+                f"{last['err']}, warn "
                 f"{last['warn']}, state {last['state']}, mode {last['mode']}; mt_brake "
                 f"{last['mt_brake']}, mt_able {last['mt_able']} (6 bits, joint 1 first; "
                 f"mt_brake 1 = brake on, mt_able 1 = servo enabled); {am['bad_messages']} of "
@@ -918,9 +988,9 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
     [(time_from_start s, positions)]) of the Servo output), ``command_capture``
     ({'began', 'ended'} on the arrival clock), ``clutch`` ((header stamp ns, clutch_engaged)
     of /teleop/state), ``rosout`` (counts and examples), ``machine``, ``versions``,
-    ``gate`` (driver_gate), ``robot_states`` (idle: None or {publishers, unavailable, messages
-    of (arrival s, err, warn, state, mode, mt_brake, mt_able)}), ``cameras`` ({stream: {mono,
-    stamps, first}}).
+    ``gate`` (driver_gate), ``robot_states`` (idle: None or {topics, topic, unavailable,
+    messages of (arrival s, err, warn, state, mode, mt_brake, mt_able)}), ``cameras``
+    ({stream: {mono, stamps, first}}).
     """
     measures: Dict[str, Any] = {}
     results: List[Result] = []
@@ -967,5 +1037,6 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
         cm = command_measures(data, _command_limit(opts)[0],
                               latency if isinstance(latency, (int, float)) else 0.0)
         measures['servo_command'] = cm
-        results += [rule_command_acceleration(cm, opts), rule_stop_time(cm, latency)]
+        results += [rule_command_acceleration(cm, opts), info_unexplained_acceleration(cm, opts),
+                    rule_stop_time(cm, latency)]
     return measures, results

@@ -62,7 +62,7 @@ en.main(['--ros-args', '-p', 'session_dir:=' + sys.argv[1]])
 
 
 def test_a_second_sigint_during_shutdown_still_marks_the_episode_interrupted(tmp_path):
-    env = child_environment(offset=20)
+    env = child_environment(offset=24)
     session_dir = tmp_path / 'data' / 'session'
     node = Process([sys.executable, '-c', CHILD, str(session_dir)], env,
                    str(tmp_path / 'episode_node.log'))

@@ -80,8 +80,8 @@ from geometry_msgs.msg import PoseStamped, TransformStamped
 from moveit_msgs.msg import ServoStatus
 from moveit_msgs.srv import ServoCommandType
 import numpy as np
-from ranger_xarm_teleop_bridge.bridge_node import (HEAD_POSE_TOPIC, JOY_TOPIC,
-                                                   POSE_TOPICS, STATUS_QOS, STATUS_TOPIC)
+from ranger_xarm_teleop_bridge.topics import (HEAD_POSE_TOPIC, JOY_TOPIC, POSE_TOPICS,
+                                              STATUS_QOS, STATUS_TOPIC)
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, InputStatus, TeleopState
 from ranger_xarm_teleop_interfaces.srv import GetJointPath, SetArmOwner
 from ranger_xarm_teleop_servo import calls
@@ -417,7 +417,8 @@ class TeleopNode(Node):
         self.quest_frame = str(self.get_parameter('quest_frame').value)
         servo = str(self.get_parameter('servo_node').value).rstrip('/')
         self.simulation_only = bool(self.get_parameter('limits_are_simulation_only').value)
-        if bool(self.get_parameter('hardware_limits').value):
+        self.hardware_limits = bool(self.get_parameter('hardware_limits').value)
+        if self.hardware_limits:
             if self.simulation_only:
                 raise StartupRefused(
                     'the hardware path never loads simulation-only limit values: pass your own '
@@ -586,6 +587,8 @@ class TeleopNode(Node):
         self.owner = ArmOwner.OWNER_NONE
         self.mux_status = ArmOwner.STATUS_OK
         self.owner_arrival: Optional[float] = None
+        self.owner_stamp_ns = 0             # ROS time the mux stamped its newest report with
+        self.owner_request_sent_ns = 0      # ROS time the newest ownership request was sent
         self.owner_request_since: Optional[float] = None
         self.owner_request_wanted: Optional[int] = None
         self.owner_request_id = 0           # the newest request; older answers are late ones
@@ -841,11 +844,15 @@ class TeleopNode(Node):
             f'links {model.units.names}, built in {took:.2f} s, fingerprint '
             f'{model.fingerprint[:12]}')
         for item in model.excluded:
-            extra = ('' if item.reason == 'adjacent' else
-                     f' (clearance {item.low * 1000.0:.1f} to {item.high * 1000.0:.1f} mm over '
-                     'the sampled postures)')
-            self.get_logger().warning(
-                f'link keep-out: {item.moving} - {item.other} left out: {item.reason}{extra}')
+            self.get_logger().warning(f'link keep-out: {ko.excluded_text(item, model.margin)}')
+        keepable = [item for item in model.excluded if ko.kept_by_smaller_margin(item)]
+        if keepable and self.hardware_limits:
+            # A pair the margin silently drops is not kept clear at all; on hardware the
+            # margin is chosen again instead (docs/HARDWARE_PROCEDURE.md, "Values you supply").
+            raise StartupRefused(
+                f'link keep-out: link_keepout_margin_m {model.margin:g} m leaves out '
+                + '; '.join(ko.excluded_text(item, model.margin) for item in keepable)
+                + '; choose a smaller margin (docs/HARDWARE_PROCEDURE.md, "Values you supply")')
         if model.not_covered:
             self.get_logger().warning(
                 'link keep-out: not covered (behind joints that are neither fixed nor arm '
@@ -994,6 +1001,7 @@ class TeleopNode(Node):
         self.owner = msg.owner
         self.owner_gripper = bool(msg.gripper)
         self.owner_arrival = self.mono()
+        self.owner_stamp_ns = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
 
     def _on_gripper_held(self, msg: JointState) -> None:
         try:
@@ -2132,7 +2140,8 @@ class TeleopNode(Node):
         # Teleop's request window: opened when it asks for the arm, closed when it gives it back
         # (a later owner switch it did not ask for has no request: no held report counts). A
         # request asked again opens it anew: the switch, if any, follows the new request.
-        self.owner_request_ros_ns = (self.get_clock().now().nanoseconds
+        self.owner_request_sent_ns = self.get_clock().now().nanoseconds
+        self.owner_request_ros_ns = (self.owner_request_sent_ns
                                      if wanted == ArmOwner.OWNER_TELEOP else None)
         future = self.owner_client.call_async(SetArmOwner.Request(owner=wanted))
         future.add_done_callback(lambda f: self._owner_answered(f, wanted, request_id))
@@ -2141,8 +2150,10 @@ class TeleopNode(Node):
         """
         Settle an ownership request that had no answer in time; return (settled, ask again).
 
-        The outcome is unknown, so the mux's own report is read back. Without a fresh report
-        (the mux silent, or busy with the request: it reports from the thread that serves it),
+        The outcome is unknown, so the mux's own report is read back. A report is fresh for the
+        request when it arrived lately and its stamp is later than the request was sent.
+        Without a fresh report (the mux silent, or busy with the request: it reports from the
+        thread that serves it; or only reports made before the request, queued in a stall),
         or while it reports a switch in progress, nothing is asked again (never blindly); an
         arm request still unknown after OWNER_UNKNOWN_LIMIT_S, or with the mux's service gone,
         disarms. A fresh report settles it: the owner asked for (the switch was made, its
@@ -2152,12 +2163,16 @@ class TeleopNode(Node):
         wanted = OWNER_NAMES[self.owner_request_wanted]
         waited = (f'no answer from the command mux within {OWNER_REQUEST_TIMEOUT_S:g} s to the '
                   f'request for {wanted}')
-        if not reported or self.owner == ArmOwner.OWNER_SWITCHING:
+        # Fresh for this request: arrived lately and made after the request was sent (its stamp),
+        # so reports queued from before it (a stall of this process) are not read back.
+        after = self.owner_stamp_ns >= self.owner_request_sent_ns
+        if not reported or not after or self.owner == ArmOwner.OWNER_SWITCHING:
             if not self.owner_unknown_logged:
                 age = (now - self.owner_arrival if self.owner_arrival is not None
                        else math.inf)
                 why = (f'its newest owner report is {age:.1f} s old' if not reported
-                       else 'it reports a switch in progress')
+                       else 'its newest owner report is stamped before the request'
+                       if not after else 'it reports a switch in progress')
                 self.get_logger().warning(
                     f'{waited}, and {why}: the outcome is unknown; nothing is asked again '
                     'until the mux reports an owner')
