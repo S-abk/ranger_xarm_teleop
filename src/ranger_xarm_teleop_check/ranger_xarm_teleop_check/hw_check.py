@@ -32,6 +32,7 @@ from typing import List, Optional
 from ranger_xarm_teleop_check import report as rep
 from ranger_xarm_teleop_check import rules, stats, sysinfo
 from ranger_xarm_teleop_check.rules import Options
+from ranger_xarm_teleop_servo.joint_accel import ACCELERATION_NAME
 
 NODE_NAME = 'hw_check'
 VERSION_PACKAGES = ('controller_manager', 'joint_trajectory_controller', 'moveit_servo')
@@ -42,6 +43,8 @@ DISCOVERY_MAX_S = 4.0
 JOINT_STATES_DEPTH = 50
 TELEOP_STATE_DEPTH = 50
 ROSOUT_DEPTH = 1000
+# MoveIt Servo's output topic, about 50 Hz: no message lost over a stall of one second.
+COMMAND_DEPTH = 50
 CAMERA_DEFAULT_QOS = {'reliability': 'best_effort', 'depth': 10}
 
 
@@ -52,11 +55,19 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument('stage', choices=rules.STAGES)
     ap.add_argument('--seconds', type=float, default=None,
                     help='measuring time (default: idle 30, motion 20, teleop 20, cameras 30)')
-    ap.add_argument('--limits', help='limits YAML (tool_pose_timeout_s, max_lead_translation_m)')
+    ap.add_argument('--limits',
+                    help='limits YAML (tool_pose_timeout_s, max_lead_translation_m, and for '
+                    'the teleop stage joint_acceleration_limit_rad_s2, the limit the Servo '
+                    'output is judged against)')
     ap.add_argument('--profile', help='deployment profile (nominal rates, camera streams)')
     ap.add_argument('--data-dir', default=rep.DEFAULT_DATA_DIR,
                     help='data directory; reports go to <dir>/hardware_checks')
-    ap.add_argument('--joint-limits', help='MoveIt joint_limits.yaml (max_acceleration)')
+    ap.add_argument('--joint-limits',
+                    help='MoveIt joint_limits.yaml (max_acceleration): the limit of the motion '
+                    "stage's peak joint acceleration; shown for reference in the teleop stage")
+    ap.add_argument('--command-topic', default=rules.DEFAULT_COMMAND_TOPIC,
+                    help='teleop stage: the controller trajectory topic MoveIt Servo publishes '
+                    'on, read for the acceleration and stop-time rules (default: %(default)s)')
     ap.add_argument('--expect-fingerprint', help='sha256 the robot description must have')
     ap.add_argument('--workspace', default=os.environ.get('RANGER_XARM_WS'),
                     help='workspace holding src/xarm_ros2 (default: $RANGER_XARM_WS)')
@@ -76,7 +87,8 @@ def resolve_options(args) -> tuple:
     opts = Options(controllers=_names(args.controllers),
                    expect_active=_names(args.expect_active),
                    expect_inactive=_names(args.expect_inactive),
-                   expect_fingerprint=args.expect_fingerprint)
+                   expect_fingerprint=args.expect_fingerprint,
+                   command_topic=args.command_topic)
     if args.limits:
         data, problem = sysinfo.load_yaml_file(args.limits)
         if problem:
@@ -84,6 +96,7 @@ def resolve_options(args) -> tuple:
         opts.limits_given = True
         opts.tool_pose_timeout_s = sysinfo.limit_parameter(data, 'tool_pose_timeout_s')
         opts.max_lead_translation_m = sysinfo.limit_parameter(data, 'max_lead_translation_m')
+        opts.joint_acceleration_limit = sysinfo.limit_parameter(data, ACCELERATION_NAME)
     if args.joint_limits:
         data, problem = sysinfo.load_yaml_file(args.joint_limits)
         if problem:
@@ -161,7 +174,8 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
     executor.add_node(node)
     data = {'arm': [], 'gripper': [], 'js_publishers': [], 'clock_publishers': [],
             'activity': None, 'controller_state': {}, 'description': None, 'states': [],
-            'targets': [], 'warnings': [],
+            'targets': [], 'command': [], 'command_capture': None, 'clutch': [],
+            'warnings': [],
             'rosout': {'overruns': 0, 'read_failures': 0, 'overrun_examples': [],
                        'read_examples': []},
             'cameras': {}, 'qos': {}}
@@ -195,6 +209,7 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
                                     or now - began >= rules.ACTIVITY_WAIT_S):
                 break
             executor.spin_once(timeout_sec=0.02)
+        data['command_capture'] = {'began': began, 'ended': time.monotonic()}
         data['clock_publishers'] = sorted(clock_pubs | set(_publisher_names(node, '/clock')))
         data['js_publishers'] = _publisher_names(node, '/joint_states')
     finally:
@@ -208,6 +223,10 @@ def _stamp(header) -> float:
     return header.stamp.sec + header.stamp.nanosec * 1e-9
 
 
+def _stamp_ns(header) -> int:
+    return header.stamp.sec * 1_000_000_000 + header.stamp.nanosec
+
+
 def _subscribe_stack(stage, opts, data, subscribe, system_clock):
     from control_msgs.msg import JointTrajectoryControllerState
     from controller_manager_msgs.msg import ControllerManagerActivity
@@ -216,6 +235,7 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
     from ranger_xarm_teleop_interfaces.msg import TeleopState
     from sensor_msgs.msg import JointState
     from std_msgs.msg import String
+    from trajectory_msgs.msg import JointTrajectory
 
     def on_joint_states(msg):
         mono = time.monotonic()
@@ -260,6 +280,7 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
         p = msg.measured_tool_pose.position
         data['states'].append((time.monotonic(), _stamp(msg.header), bool(msg.armed),
                                bool(msg.measured_tool_pose_valid), (p.x, p.y, p.z)))
+        data['clutch'].append((_stamp_ns(msg.header), bool(msg.clutch_engaged)))
 
     subscribe(TeleopState, '/teleop/state', on_teleop_state, TELEOP_STATE_DEPTH,
               'reliable', 'volatile')
@@ -270,6 +291,17 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
             data['targets'].append((_stamp(msg.header), (p.x, p.y, p.z)))
 
         subscribe(PoseStamped, '/teleop/target_pose', on_target, 50, 'reliable', 'volatile')
+
+        def on_command(msg):
+            # Positions and times only: the acceleration is the difference of the segment
+            # velocities between the points (stats.command_points).
+            points = [(pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9,
+                       tuple(pt.positions)) for pt in msg.points]
+            data['command'].append((time.monotonic(), _stamp_ns(msg.header),
+                                    tuple(msg.joint_names), points))
+
+        subscribe(JointTrajectory, opts.command_topic, on_command, COMMAND_DEPTH, 'reliable',
+                  'volatile')
 
     overrun = re.compile('overrun', re.IGNORECASE)
 
