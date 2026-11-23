@@ -355,7 +355,10 @@ def test_stage_composition():
                                                 else idle_data(), opts)[1]}
              for s in ('idle', 'motion', 'teleop')}
     assert 'joint_states rate' in names['idle'] and 'wrist oscillation' not in names['idle']
-    assert names['idle'] < names['motion'] < names['teleop']
+    # The teleop stage judges the Servo output instead of the joint-state acceleration.
+    assert names['idle'] < names['motion']
+    assert names['motion'] - {'peak joint acceleration'} < names['teleop']
+    assert 'peak joint acceleration' not in names['teleop']
     assert 'target lag' in names['teleop'] and 'stale repeats while moving' in names['motion']
 
 
