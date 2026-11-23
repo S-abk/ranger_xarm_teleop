@@ -586,6 +586,83 @@ def rules_lead(tm: dict, opts: Options) -> List[Result]:
     return out
 
 
+# ---- teleop: is the arm held back from following the hand? ----------------------------------
+
+KEEPOUT_HOLD_INFO = 'link keep-out shaping the command (INFO)'
+ROTATION_LEAD_INFO = 'target lead (rotation, INFO)'
+
+
+def tracking_measures(data: dict) -> dict:
+    """
+    Return how often the link keep-out shaped the joint command, and the rotation lead.
+
+    Over the engaged cycles of /teleop/state: those where the keep-out shaped the joint
+    command (``keepout_bound``), with the clearance at the solver's reference against the
+    margin and the nearest pair at the measured joints. In strokes through open space it
+    should not act: on the first hardware stage 4 run (a pair at a 40 mm margin at the working
+    posture) it removed every motion of joints 1 and 2 for the whole run, and the lead rules
+    passed, because the gate absorbs the lead the keep-out blocks (G-14). Also the target's
+    rotation lead (target vs measured, rad): the solver traded orientation for the translation
+    the keep-out removed, and the tool pivoted about the wrist.
+    """
+    rows = [r for r in data.get('tracking', []) if r[0]]
+    bound = [r for r in rows if r[2]]
+    room = sorted(r[3] - r[4] for r in bound if math.isfinite(r[3]) and math.isfinite(r[4]))
+    pairs: Dict[str, int] = {}
+    for r in bound:
+        if r[5]:
+            key = f'{r[5]} - {r[6]}'
+            pairs[key] = pairs.get(key, 0) + 1
+    rotation = sorted(r[8] for r in rows if math.isfinite(r[8]))
+    return {'engaged': len(rows), 'bound': len(bound), 'pairs': pairs,
+            'room_p50_m': _quantile(room, 0.5), 'room_min_m': room[0] if room else None,
+            'rotation_p50': _quantile(rotation, 0.5), 'rotation_p99': _quantile(rotation, 0.99),
+            'rotation_max': rotation[-1] if rotation else None}
+
+
+def _quantile(values: List[float], q: float) -> Optional[float]:
+    if not values:
+        return None
+    return values[min(len(values) - 1, int(q * len(values)))]
+
+
+def info_keepout_hold(km: dict) -> Result:
+    """
+    INFO: the share of engaged cycles in which the link keep-out shaped the joint command.
+
+    Not judged yet: how often it acts in normal strokes at a working margin is not measured on
+    the arm; the threshold comes from that data.
+    """
+    threshold = ('informational: in strokes through open space the keep-out should not act; '
+                 'often, with the clearance at the margin, means the posture holds the arm '
+                 'back; the threshold waits for stage 4 data')
+    if km['engaged'] == 0:
+        return Result(KEEPOUT_HOLD_INFO, INFO, 'no engaged cycle', threshold)
+    share = km['bound'] / km['engaged']
+    shown = f"{share * 100.0:.0f} % of {km['engaged']} engaged cycles ({km['bound']})"
+    if km['bound']:
+        if km['room_p50_m'] is not None:
+            shown += (f"; clearance at the command's reference minus the margin: median "
+                      f"{km['room_p50_m'] * 1000.0:.1f} mm, least "
+                      f"{km['room_min_m'] * 1000.0:.1f} mm")
+        ranked = sorted(km['pairs'].items(), key=lambda kv: -kv[1])
+        names = ', '.join(f'{k} ({v})' for k, v in ranked)
+        shown += f"; nearest pair at the measured joints: {names or 'not reported'}"
+    return Result(KEEPOUT_HOLD_INFO, INFO, shown, threshold)
+
+
+def info_rotation_lead(km: dict) -> Result:
+    """INFO: the target's rotation lead over the measured tool pose while engaged."""
+    threshold = ('informational: the G-14 clamp bounds it; often near its limit while the hand '
+                 'turns slowly means the tool is not following the orientation')
+    if km['rotation_max'] is None:
+        return Result(ROTATION_LEAD_INFO, INFO, 'no engaged cycle', threshold)
+    shown = ' '.join(f'{name} {math.degrees(km[key]):.1f}' for name, key in
+                     (('p50', 'rotation_p50'), ('p99', 'rotation_p99'),
+                      ('max', 'rotation_max'))) + f" deg over {km['engaged']} engaged cycles"
+    return Result(ROTATION_LEAD_INFO, INFO, shown, threshold)
+
+
 # ---- teleop: the command MoveIt Servo sends to the controller ----------------------------
 
 def _command_limit(opts: Options) -> Tuple[Optional[float], str]:
@@ -903,7 +980,8 @@ def arm_state_measures(data: dict) -> dict:
 
     ``data['robot_states']`` is None or {'topics': {topic: [publisher names]}, 'topic': the
     topic read or None, 'unavailable': reason or None, 'messages': [(arrival s, err, warn,
-    state, mode, mt_brake, mt_able)]}. ``topics`` holds every topic of that type with a
+    state, mode, mt_brake, mt_able)], 'searched_s': how long the type was looked for, or
+    None}. ``topics`` holds every topic of that type with a
     publisher; more than one publisher in all is ambiguous, and nothing is read then.
     """
     raw = data.get('robot_states') or {}
@@ -912,7 +990,8 @@ def arm_state_measures(data: dict) -> dict:
     out = {'topics': topics, 'topic': raw.get('topic'),
            'publishers': [f'{name} on {topic}' for topic, names in topics.items()
                           for name in names],
-           'unavailable': raw.get('unavailable'), 'messages': len(messages),
+           'unavailable': raw.get('unavailable'), 'searched_s': raw.get('searched_s'),
+           'messages': len(messages),
            'rate_hz': stats.period_distribution([m[0] for m in messages], None)['rate_hz'],
            'bad_err': sum(1 for m in messages if m[1] != 0),
            'bad_mode': sum(1 for m in messages if m[4] != ARM_STATE_MODE),
@@ -942,7 +1021,9 @@ def rule_arm_state(am: dict) -> Result:
     if am['unavailable']:
         return Result(name, INFO, f"not available ({am['unavailable']})", threshold)
     if not am['publishers'] and not am['messages']:
-        return Result(name, INFO, f'not available: no publisher of {ARM_STATE_TYPE}', threshold)
+        after = '' if am['searched_s'] is None else f" after {am['searched_s']:.1f} s"
+        return Result(name, INFO, f'not available: no publisher of {ARM_STATE_TYPE}{after}',
+                      threshold)
     if not am['messages']:
         return Result(name, NOT_JUDGED,
                       f"no message arrived from {', '.join(am['publishers'])}", threshold,
@@ -1055,8 +1136,10 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
     ({'began', 'ended'} on the arrival clock), ``clutch`` ((header stamp ns, clutch_engaged)
     of /teleop/state), ``rosout`` (counts and examples), ``machine``, ``versions``,
     ``gate`` (driver_gate), ``robot_states`` (idle: None or {topics, topic, unavailable,
-    messages of (arrival s, err, warn, state, mode, mt_brake, mt_able)}), ``cameras``
-    ({stream: {mono, stamps, first}}).
+    messages of (arrival s, err, warn, state, mode, mt_brake, mt_able), searched_s}), ``cameras``
+    ({stream: {mono, stamps, first}}), ``tracking`` ((clutch_engaged, active_limit,
+    keepout_bound, keepout_clearance_commanded, keepout_margin, keepout_link,
+    keepout_obstacle, lead_translation, lead_rotation) of /teleop/state).
     """
     measures: Dict[str, Any] = {}
     results: List[Result] = []
@@ -1107,4 +1190,7 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
         measures['teleop_command'] = jm
         results += [rule_jog_acceleration(jm, opts), rule_command_acceleration(cm, opts),
                     info_unexplained_acceleration(cm, opts), rule_stop_time(cm, latency)]
+        km = tracking_measures(data)
+        measures['tracking'] = km
+        results += [info_keepout_hold(km), info_rotation_lead(km)]
     return measures, results

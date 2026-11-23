@@ -17,10 +17,13 @@ import math
 import os
 import sys
 
+import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import ArmOwner
 from ranger_xarm_teleop_interfaces.srv import GetJointPath
+from ranger_xarm_teleop_servo import solver as dls
 from ranger_xarm_teleop_servo import teleop_node
+from ranger_xarm_teleop_servo.rotations import pose_from_matrix
 from ranger_xarm_teleop_servo.teleop_node import StartupRefused, TeleopNode
 import rclpy
 from rclpy.parameter import Parameter
@@ -435,3 +438,75 @@ def test_the_floor_monitor_reports_only_a_real_drop(node):
     assert not errors
     cycle(0.020)                                # below the margin floor
     assert len(errors) == 1 and 'below the floor' in errors[0]
+
+
+# ---- the preview reports what the solver would do (motion disabled) ----
+
+def _held_at_the_screen(n):
+    """Return a posture with link 2 held at the margin by the screen (the arm pulled back)."""
+    q = np.array([0.0, -1.05, -0.55, 0.0, 1.5, 0.0])
+    extra = n.keepout.extra_values({'finger_left_joint': 0.02})
+    target = dls.tool_pose(n.arm, q)
+    target[:3, 3] += (-0.3, 0.0, 0.0)
+    for _ in range(600):
+        q = q + dls.solve(n.arm, q, target, n.solver_params, keepout=n.keepout,
+                          extra=extra).qdot * n.solver_params.period
+    return q
+
+
+def test_with_motion_disabled_the_preview_reports_the_link_keep_out_and_commands_nothing(
+        node, monkeypatch):
+    """
+    Report the link keep-out in the preview, from the measured posture, commanding nothing.
+
+    The link keep-out acts in the solver, not on the target: the preview solves from the
+    measured posture toward the previewed target and reports it (state and log), and the
+    whole cycle commands nothing (no joint command publisher exists: one would raise).
+    """
+    n = node(robot_urdf(), motion_enabled=False)
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    assert n.arm is not None and n.keepout is not None and n.preview_pub is not None
+    q = _held_at_the_screen(n)
+    _joints(n, q)
+    behind = dls.tool_pose(n.arm, q)
+    behind[:3, 3] += (-0.10, 0.0, 0.0)
+    ahead = dls.tool_pose(n.arm, q)
+    ahead[:3, 3] += (0.10, 0.0, 0.0)
+    states, lines = [], []
+    n.state_pub.publish = states.append
+    n.get_logger().info = lambda text, **_: lines.append(text)
+    for target, expected in ((behind, teleop_node.Limit.LINK_KEEPOUT),
+                             (ahead, teleop_node.Limit.NONE)):
+        shown = pose_from_matrix(target)
+        monkeypatch.setattr(teleop_node.preview, 'step',
+                            lambda pv, st, env, p, shown=shown: (pv, shown, ''))
+        n.preview_logged_at = -math.inf
+        _joints(n, q)
+        n._on_timer()
+        assert states[-1].active_limit == int(expected)
+        assert not states[-1].armed and not states[-1].clutch_engaged
+        # The command path's state is untouched: no solution for the gate, nothing sent.
+        assert n.solution is None and n.sent is None and not n.commanding
+    held = [x for x in lines if x.startswith('preview: LINK_KEEPOUT would act')]
+    assert held and '(nearest pair l2 - screen, clearance' in held[0]
+    assert 'nothing is commanded with motion disabled' in held[0]
+    assert any(x == 'preview: no limit would act' for x in lines)
+
+
+def test_a_failing_preview_solve_reports_nothing_and_says_so(node, monkeypatch):
+    """A solve that raises leaves the preview without a solver limit and logs a WARN."""
+    n = node(robot_urdf(), motion_enabled=False)
+    n._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    q = np.array(READY)
+    _joints(n, q)
+    warnings = []
+    n.get_logger().warning = lambda text, **_: warnings.append(text)
+
+    def broken(*args, **kwargs):
+        raise ValueError('reference, target or feedforward is not finite')
+
+    monkeypatch.setattr(teleop_node.dls, 'solve', broken)
+    target = pose_from_matrix(dls.tool_pose(n.arm, q))
+    assert n.preview_limit(q, target) == teleop_node.Limit.NONE
+    assert any(w.startswith('preview: the solver check failed: ') for w in warnings)
+    assert n.solution is None and n.sent is None

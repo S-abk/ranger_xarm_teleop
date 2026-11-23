@@ -36,7 +36,8 @@ from ranger_xarm_teleop_servo.joint_accel import ACCELERATION_NAME, IMMEDIATE_ST
 
 NODE_NAME = 'hw_check'
 VERSION_PACKAGES = ('controller_manager', 'joint_trajectory_controller', 'moveit_servo')
-# Discovery: wait at least this long, and up to the longer one for the joint states publisher (s).
+# Discovery: wait at least this long, and up to the longer one for the joint states publisher
+# and, in the idle stage, a publisher of the arm driver's state type (s).
 DISCOVERY_MIN_S = 2.0
 DISCOVERY_MAX_S = 4.0
 # Queue depths: joint states 50 (no message lost at 150 Hz), teleop state 50, /rosout 1000.
@@ -193,6 +194,7 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
     data = {'arm': [], 'gripper': [], 'js_publishers': [], 'clock_publishers': [],
             'activity': None, 'controller_state': {}, 'description': None, 'states': [],
             'targets': [], 'command': [], 'jog': [], 'command_capture': None, 'clutch': [],
+            'tracking': [],
             'warnings': [], 'robot_states': None,
             'rosout': {'overruns': 0, 'read_failures': 0, 'immediate_stops': 0,
                        'overrun_examples': [],
@@ -202,12 +204,7 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
         # Discovery first: the QoS of a subscription must match what is published.
         probe = '/joint_states' if stage != 'cameras' else opts.streams[0]['topic']
         t0 = time.monotonic()
-        while True:
-            executor.spin_once(timeout_sec=0.05)
-            waited = time.monotonic() - t0
-            have = bool(node.get_publishers_info_by_topic(probe))
-            if waited >= DISCOVERY_MAX_S or (waited >= DISCOVERY_MIN_S and have):
-                break
+        _discover(node, lambda: executor.spin_once(timeout_sec=0.05), probe, stage == 'idle')
         clock_pubs = set(_publisher_names(node, '/clock'))
 
         def subscribe(msg_type, topic, callback, depth, reliability, durability):
@@ -225,7 +222,7 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
             # its typesupport (about 0.1 s idle, several times that under load) and the new
             # subscription would otherwise hold up the joint-state callbacks inside the window,
             # and so the largest-gap figure that tool_pose_timeout_s is chosen from.
-            _RobotStates(node, data, subscribe).poll(time.monotonic())
+            _RobotStates(node, data, subscribe).poll(time.monotonic() - t0)
         began = time.monotonic()
         deadline = began + seconds
         while True:
@@ -306,6 +303,11 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
         data['states'].append((time.monotonic(), _stamp(msg.header), bool(msg.armed),
                                bool(msg.measured_tool_pose_valid), (p.x, p.y, p.z)))
         data['clutch'].append((_stamp_ns(msg.header), bool(msg.clutch_engaged)))
+        data['tracking'].append((bool(msg.clutch_engaged), int(msg.active_limit),
+                                 bool(msg.keepout_bound), float(msg.keepout_clearance_commanded),
+                                 float(msg.keepout_margin), str(msg.keepout_link),
+                                 str(msg.keepout_obstacle), float(msg.lead_translation),
+                                 float(msg.lead_rotation)))
 
     subscribe(TeleopState, '/teleop/state', on_teleop_state, TELEOP_STATE_DEPTH,
               'reliable', 'volatile')
@@ -353,14 +355,47 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
     subscribe(Log, '/rosout', on_rosout, ROSOUT_DEPTH, 'reliable', 'volatile')
 
 
+def _arm_state_topics(node) -> dict:
+    """Return {topic: [publisher names]} for every topic of the arm state type with a publisher."""
+    topics = {}
+    for topic, types in node.get_topic_names_and_types():
+        if rules.ARM_STATE_TYPE in types:
+            # Every publisher counts, two of one name too (not _publisher_names' set).
+            publishers = sorted(i.node_namespace.rstrip('/') + '/' + i.node_name
+                                for i in node.get_publishers_info_by_topic(topic))
+            if publishers:          # a topic with subscribers only is not a source
+                topics[topic] = publishers
+    return topics
+
+
+def _discover(node, spin, probe: str, arm_state: bool, clock=time.monotonic) -> float:
+    """
+    Wait for the publishers the subscriptions are matched to; return the seconds waited.
+
+    At least DISCOVERY_MIN_S, then until ``probe`` has a publisher and, with ``arm_state``,
+    a publisher of the arm driver's state type has appeared too (it is looked up only once,
+    after this); at most DISCOVERY_MAX_S.
+    """
+    t0 = clock()
+    while True:
+        spin()
+        waited = clock() - t0
+        have = bool(node.get_publishers_info_by_topic(probe)) and (
+            not arm_state or bool(_arm_state_topics(node)))
+        if waited >= DISCOVERY_MAX_S or (waited >= DISCOVERY_MIN_S and have):
+            return waited
+
+
 class _RobotStates:
     """
     The arm driver's state topic (xarm_msgs/msg/RobotMsg), read-only, idle stage.
 
     Found by its message type, not by a name: the driver publishes it in its hardware namespace
-    (on the real driver /xarm_xarm/robot_states). Looked up once, after discovery and before the
+    (on the real driver /xarm_xarm/robot_states). Looked up once, after discovery (which in the
+    idle stage also waits for a publisher of that type, up to DISCOVERY_MAX_S) and before the
     capture window opens, and subscribed if exactly one publisher of that type is on the graph
     then (the driver starts before the check); with several, they are named and none is read.
+    With none, the record keeps how long it was looked for.
     Nothing about it runs inside the window, so it cannot delay the joint-state callbacks the
     gap rules time. Never a service client: the topic is the only thing asked of the driver.
     ``xarm_msgs`` is imported only then, so a machine without it says so instead of failing.
@@ -371,20 +406,19 @@ class _RobotStates:
         self._subscribe = subscribe
         self._done = False
         self._record = data['robot_states'] = {'topics': {}, 'topic': None, 'unavailable': None,
-                                               'messages': []}
+                                               'messages': [], 'searched_s': None}
 
-    def poll(self, now: float):
-        """Subscribe when one publisher of the type has appeared; record every one seen."""
+    def poll(self, searched_s: float):
+        """
+        Subscribe when one publisher of the type has appeared; record every one seen.
+
+        ``searched_s`` (the seconds since discovery began) is recorded on every call, found or
+        not.
+        """
         if self._done:
             return
-        topics = {}
-        for topic, types in self._node.get_topic_names_and_types():
-            if rules.ARM_STATE_TYPE in types:
-                # Every publisher counts, two of one name too (not _publisher_names' set).
-                publishers = sorted(i.node_namespace.rstrip('/') + '/' + i.node_name
-                                    for i in self._node.get_publishers_info_by_topic(topic))
-                if publishers:          # a topic with subscribers only is not a source
-                    topics[topic] = publishers
+        self._record['searched_s'] = searched_s
+        topics = _arm_state_topics(self._node)
         if not topics:
             return
         self._record['topics'] = topics

@@ -25,7 +25,7 @@ from helpers import frame, HAND, moved, params, TOOL_START
 from ranger_xarm_teleop_servo import preview
 from ranger_xarm_teleop_servo.calibration import Calibration
 from ranger_xarm_teleop_servo.gate import (_plane_depth, ARM_REFUSED_MOTION_DISABLED, Env,
-                                           GateState, Hold, on_frame, tick)
+                                           GateState, Hold, Limit, on_frame, tick)
 from ranger_xarm_teleop_servo.params import Plane
 from ranger_xarm_teleop_servo.rotations import v_norm, v_sub
 
@@ -186,3 +186,76 @@ def test_a_jump_ends_the_preview_until_the_grip_is_released():
     assert before and all(target is not None for target in before)
     assert after and all(target is None for target, _ in after)
     assert after[-1][1] == preview.STEP
+
+
+# --- which limit acts on the preview (TeleopState.active_limit with motion disabled) ----------
+
+def preview_limits(frames, gate_params, state):
+    """Return (time, preview target, PreviewState.limit) per tick, as ``drive`` feeds them."""
+    pv = preview.PreviewState()
+    out, i, t = [], 0, 0.0
+    while t <= frames[-1].arrival + 1e-9:
+        while i < len(frames) and frames[i].arrival <= t + 1e-12:
+            state = on_frame(state, frames[i], gate_params)
+            i += 1
+        env = Env(now=t, owner_is_teleop=True, tool_pose=TOOL_START, tool_pose_age=0.0,
+                  servo_active=True)
+        state, _ = tick(state, env, gate_params)
+        pv, target, _ = preview.step(pv, state, env, gate_params)
+        out.append((t, target, pv.limit))
+        t += 0.02
+    return out
+
+
+def test_a_keep_out_plane_holding_the_preview_is_reported():
+    """It read 0 on the robot while a plane held the preview: now KEEP_OUT, and only then."""
+    p = params(motion_enabled=False)
+    wall = Plane((-1.0, 0.0, 0.0), -(TOOL_START.p[0] + 0.05))
+    bounded = replace(p, keep_out_planes=(wall,))
+    rows = preview_limits(stroke(n=270, dx=0.30), bounded, GateState(calibration=CAL))
+    shown = [(target, limit) for _, target, limit in rows if target is not None]
+    assert shown
+    on_plane = [limit for target, limit in shown
+                if abs(_plane_depth(target, wall, bounded)) < 1e-9]
+    short = [limit for target, limit in shown if _plane_depth(target, wall, bounded) < -1e-6]
+    assert on_plane and short
+    assert all(limit == Limit.KEEP_OUT for limit in on_plane)
+    assert all(limit == Limit.NONE for limit in short)
+
+
+def test_the_offset_limit_holding_the_preview_is_reported():
+    p = replace(params(motion_enabled=False), max_offset_translation=0.10)
+    rows = preview_limits(stroke(n=270, dx=1.0), p, GateState(calibration=CAL))
+    limits = [limit for _, target, limit in rows if target is not None]
+    assert limits[0] == Limit.NONE and limits[-1] == Limit.OFFSET_TRANSLATION
+
+
+def test_without_a_preview_no_limit_is_reported():
+    p = params(motion_enabled=False)
+    wall = Plane((-1.0, 0.0, 0.0), -(TOOL_START.p[0] + 0.05))
+    bounded = replace(p, keep_out_planes=(wall,))
+    # Held on the plane, then the grip is released.
+    rows = preview_limits(stroke(n=320, dx=0.30, grip=lambda k: k < 270), bounded,
+                          GateState(calibration=CAL))
+    assert any(limit == Limit.KEEP_OUT for _, _, limit in rows)
+    assert rows[-1][1] is None and rows[-1][2] == Limit.NONE
+    # A rejected step holds the preview until the grip is released: no limit while it does.
+    frames = stroke(n=90, dx=0.0)
+    jumped = [replace(f, controller=moved(HAND, dx=0.5)) if f.arrival > 0.5 else f
+              for f in frames]
+    after = [(target, limit) for t, target, limit in
+             preview_limits(jumped, p, GateState(calibration=CAL)) if t > 0.55]
+    assert after and all(target is None and limit == Limit.NONE for target, limit in after)
+
+
+def test_the_target_side_bound_is_shown_before_the_solvers_limit():
+    """The precedence of an engagement: the bound on the target, else the solver's."""
+    assert preview.shown_limit(Limit.KEEP_OUT, Limit.LINK_KEEPOUT) == Limit.KEEP_OUT
+    assert preview.shown_limit(Limit.NONE, Limit.LINK_KEEPOUT) == Limit.LINK_KEEPOUT
+    assert preview.shown_limit(Limit.NONE, Limit.NONE) == Limit.NONE
+
+
+def test_only_position_type_solver_limits_are_reported():
+    assert preview.solver_limit(('xarm_joint3',), True) == Limit.JOINT_POSITION
+    assert preview.solver_limit((), True) == Limit.LINK_KEEPOUT
+    assert preview.solver_limit((), False) == Limit.NONE

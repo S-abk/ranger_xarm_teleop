@@ -73,7 +73,7 @@ suggestions, not defaults, and appear nowhere the hardware path reads them.
 | `step_translation_limit_m` | target step per 20 ms cycle (larger releases the clutch) | 0.020 to 0.025 (1.0 to 1.25 m/s of hand speed; see below) |
 | `step_rotation_limit_deg` | the same in rotation | a third of the simulation value: 3 |
 | `view_cone_half_angle_deg` | controller angle off the headset's forward axis | 50 (simulation 65; narrower is stricter) |
-| `link_keepout_margin_m` | arm links from the robot's fixed structure | 0.04 (simulation 0.025); see below |
+| `link_keepout_margin_m` | arm links from the robot's fixed structure | 0.025 (simulation 0.025); see below |
 | `tool_pose_timeout_s` | age of the measured tool pose | from stage 2's `joint_states largest gap`: at least 3 x that gap and at most 0.1 s. If the gap needs more than 0.1 s, stop |
 
 The speed cap and the lead limit bound each other: the arm cannot go faster than lead / lag.
@@ -94,6 +94,16 @@ keeps it. Choose a margin below the largest clearance the refusal names. If that
 below the smallest margin you can accept (MoveIt Servo's self-collision threshold and
 move_group's planning padding, plus the overshoot measured on this arm), stop: the robot
 description's geometry needs a look first.
+
+**A kept pair can still hold the arm back.** The model covers both links with spheres, so it
+reads `xarm_link2` against the arm base at 31 to 48 mm where the true surfaces are about 70 mm
+apart; at the stage 4 posture it reads about 35 mm. At a margin of 0.04 that pair is at or
+inside the margin there, the keep-out removes every motion of joints 1 and 2, and the tool only
+pivots about the wrist: the first stage 4 run on the arm did exactly this, with every judged
+check rule passing. 0.025 is the value that has worked on the arm: about 7 mm of room for that
+pair on 10 cm strokes from the stage 4 posture. The sphere model reads this pair 20 to 40 mm
+closer than the true geometry, so the model's room is not the real room. Whatever margin you
+choose, check it in the preview at the stage 4 posture (3b') before arming.
 
 **The joint speed cap and the joint acceleration limit (G-18).** The arm's streamed servo mode
 (the firmware's mode 1, which the ros2_control driver uses) executes each point it receives at
@@ -241,6 +251,19 @@ for it); write it next to the check report.
   when you release [`test_hwmock_check_stage`: the preview follows a stroke to a keep-out
   plane and is never a command]. The preview is shown only while motion is disabled; why it is
   not shown is in `ros2 topic echo --field preview_reason /teleop/state`.
+- **What would act on the preview.** The panel's limit line ends in "(preview)" and says what
+  would hold the arm back if it were armed: "keep-out zone" or "reach range" while a plane or
+  the offset limit holds the preview; "near robot body" or "joint at its end" when, from the
+  posture the arm is in, the solver would remove the motion toward that target (the link
+  keep-out, a joint position limit). Nothing is commanded. Terminal 2 logs each change; for the
+  link keep-out it names the nearest pair and its clearance:
+  `preview: LINK_KEEPOUT would act (nearest pair ..., clearance ... mm, margin ... mm)`
+  [`test_hwmock_preview_limits`: at a margin of 0.04 the preview at the stage 4 posture reports
+  the link keep-out and names the pair; at 0.025 nothing]. The solver is checked from the
+  posture the arm is in now, not along the way to the target. "near robot body (preview)" or
+  "joint at its end (preview)" while your hand moves through open space means the arm would
+  not follow from this posture: note the pair terminal 2 names. This is not yet the stage 4
+  posture; the check that counts for stage 4 is 3b'.
 - **Each keep-out plane, in the preview** (stage 4 needs it). The preview never goes farther
   from the tool than `max_offset_translation_m` (0.10 m at the first-session values), and the
   arm does not move in this stage, so for this trial only: stop terminal 2 and start it again
@@ -328,6 +351,31 @@ posture with the wrist bent (joint 5 well away from zero; the tests use 0, -0.6,
   3a.
 - **Stop if:** as in 3a.
 
+**3b'. The preview at the stage 4 posture.** Stop terminal 2 and start it again without
+`motion_enabled:=true` (motion disabled: the preview exists only then, and nothing can be
+armed):
+
+```bash
+ros2 launch ranger_xarm_teleop_hardware teleop_hardware.launch.py stage:=execution limits_file:=<limits> teleop_params_file:=<planes>   # terminal 2, motion disabled
+```
+
+Calibrate (A), hold the grip and move your hand slowly about 10 cm forward and back, left and
+right, up and down, releasing between strokes, as in stage 2.
+
+- You should see: the preview follows each stroke; the panel shows no limit line, or only
+  "keep-out zone (preview)" or "reach range (preview)" where a plane or the offset limit holds
+  the preview [`test_hwmock_preview_limits`].
+- **Stop if:** "near robot body (preview)" or "joint at its end (preview)" shows while your hand
+  moves through open space. The arm would not follow there: at a margin of 0.04 this is what
+  held joints 1 and 2 still in the first stage 4 run. Do not arm. Note the pair terminal 2
+  names and its clearance; choose another posture (plan it as in 3b) or a smaller margin
+  (Values you supply), and repeat this step. **Stop also if** terminal 2 logs `preview: the
+  solver check failed` or keeps logging `not ready`: the check did not run, and no limit line
+  then proves nothing.
+
+Then stop terminal 2 and start it again with `motion_enabled:=true`, as at the start of this
+stage, before 3c.
+
 **3c. The switch to teleop and back.**
 
 ```bash
@@ -398,6 +446,8 @@ terminal 5, 2, 4, then 1.
   preview"), with the same planes file.
 - **The stage 4 posture inside every plane**, tool point and flange on the allowed side;
   otherwise the first grip pushes the target back onto the plane.
+- **3b' passed at this posture with the `link_keepout_margin_m` you arm with:** no "near robot
+  body" or "joint at its end" in the preview through open space.
 
 **Commands:** before arming, start the check (everything joins before arming):
 
@@ -426,12 +476,24 @@ one cycle), reports `joint-state acceleration (20 ms, INFO)` (information only: 
 encoder data, with MoveIt's value for reference), `Servo output above 1.1 x limit without a
 skip (INFO)` (the share of points above 1.1 times your limit that no detected Servo skip
 explains, and how many skips there were; keep these numbers: they decide whether the rule is
-tightened) and `target lag`
-[`test_hwmock_execution`: one short armed stroke with the teleop check].
+tightened), `target lag`, `link keep-out shaping the command (INFO)` (the share of engaged
+cycles in which the link keep-out removed motion, how close to the margin, and the pair) and
+`target lead (rotation, INFO)`. Keep these two as well: their values in strokes that track set
+the threshold of a rule on them. In a stroke through open space the first should read 0 %, and
+the second stay near 0 when your hand does not turn
+[`test_hwmock_execution`: one short armed stroke with the teleop check;
+`test_hwmock_preview_limits`: at a margin of 0.04 the keep-out line reads most engaged cycles,
+names the pair, and the rotation lead rises although the stroke asks for no rotation, while
+`target lead (largest, translation)` passes; at 0.025 the keep-out line reads 0 % and the
+rotation lead stays near 0].
 
 **Stop if** (release the grip; press the emergency stop if it does not stop):
 
 - the arm moves without the grip held, or in a direction other than your hand's;
+- the tool does not follow your hand: it turns although your hand does not, or joints stay
+  still that the stroke needs. The judged rules can all pass while this happens. Release,
+  disarm, keep the report (`link keep-out shaping the command` and `target lead (rotation)` show
+  it), and go back to 3b';
 - it keeps moving more than about 2 cm after you release;
 - the wrist oscillates (the solver's limit cycle near the wrist singularity: release, then
   disarm, and plan the arm away from the singular posture through MoveIt);

@@ -40,6 +40,10 @@ uint8 HOLD_STOPPING = 21           # G-18: the stop ramp of the last release sti
 uint8 hold_reason
 
 # Bound that shaped the target or the joint command of this cycle (G-6, G-8, G-14).
+# With motion disabled (preview): what would act, nothing being commanded. The bound that held
+# the previewed target (offset limit, keep-out planes), else the position-type limit the solver
+# would apply from the measured posture toward it (joint position, link keep-out); never a
+# speed-type limit, which an arm that stands still says nothing about. NONE without a preview.
 uint8 LIMIT_NONE = 0
 uint8 LIMIT_OFFSET_TRANSLATION = 1
 uint8 LIMIT_OFFSET_ROTATION = 2

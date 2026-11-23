@@ -71,7 +71,9 @@
     # structure, by the keep-out model. Unit: metres. How to choose: above MoveIt Servo's
     # self-collision threshold and move_group's planning padding, plus the overshoot you measured on
     # this arm's controller, and below the largest clearance of every link pair (a pair closer than
-    # the margin in every posture is left out, and the hardware path refuses to start); see
+    # the margin in every posture is left out, and the hardware path refuses to start). A kept
+    # pair at or inside the margin at the working posture holds the arm back: check the margin
+    # in the preview at that posture (procedure step 3b') before arming; see
     # docs/HARDWARE_PROCEDURE.md, "Values you supply".
     link_keepout_margin_m: PENDING
     # What it bounds: how old the measured tool pose may be before the gate stops motion.
