@@ -73,7 +73,7 @@ suggestions, not defaults, and appear nowhere the hardware path reads them.
 | `step_translation_limit_m` | target step per 20 ms cycle (larger releases the clutch) | 0.020 to 0.025 (1.0 to 1.25 m/s of hand speed; see below) |
 | `step_rotation_limit_deg` | the same in rotation | a third of the simulation value: 3 |
 | `view_cone_half_angle_deg` | controller angle off the headset's forward axis | 50 (simulation 65; narrower is stricter) |
-| `link_keepout_margin_m` | arm links from the robot's fixed structure | 0.04 (simulation 0.025); see below |
+| `link_keepout_margin_m` | arm links from the robot's fixed structure | 0.025 (simulation 0.025); see below |
 | `tool_pose_timeout_s` | age of the measured tool pose | from stage 2's `joint_states largest gap`: at least 3 x that gap and at most 0.1 s. If the gap needs more than 0.1 s, stop |
 
 The speed cap and the lead limit bound each other: the arm cannot go faster than lead / lag.
@@ -101,8 +101,9 @@ apart; at the stage 4 posture it reads about 35 mm. At a margin of 0.04 that pai
 inside the margin there, the keep-out removes every motion of joints 1 and 2, and the tool only
 pivots about the wrist: the first stage 4 run on the arm did exactly this, with every judged
 check rule passing. 0.025 is the value that has worked on the arm: about 7 mm of room for that
-pair on 10 cm strokes from the stage 4 posture. Whatever margin you choose, check it in the
-preview at the stage 4 posture (3b') before arming.
+pair on 10 cm strokes from the stage 4 posture. The sphere model reads this pair 20 to 40 mm
+closer than the true geometry, so the model's room is not the real room. Whatever margin you
+choose, check it in the preview at the stage 4 posture (3b') before arming.
 
 **The joint speed cap and the joint acceleration limit (G-18).** The arm's streamed servo mode
 (the firmware's mode 1, which the ros2_control driver uses) executes each point it receives at
