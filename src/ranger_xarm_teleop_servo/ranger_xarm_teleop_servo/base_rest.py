@@ -117,6 +117,39 @@ class RestWatch:
         return self.yaw if self.fresh(now) else None
 
 
+class CommandWatch:
+    """
+    Whether the base is being commanded, from the base command as the arm's node hears it.
+
+    Commanded while the newest command is nonzero and no older than ``fresh_s``: the base node
+    publishes every cycle while it drives and one zero when it stops. A base node that falls
+    silent mid-drive stops counting after ``fresh_s``; odometry then shows whether the base
+    still moves.
+    """
+
+    def __init__(self, fresh_s: float = 0.1) -> None:
+        """Count a nonzero command as in force for ``fresh_s`` after it arrived."""
+        self.fresh_s = fresh_s
+        self.nonzero_at: Optional[float] = None     # arrival of the newest command, if nonzero
+
+    def on_command(self, arrival: float, vx: float, vy: float, wz: float) -> None:
+        """Take one base command (arrival on the monotonic clock)."""
+        zero = vx == 0.0 and vy == 0.0 and wz == 0.0
+        self.nonzero_at = None if zero else arrival
+
+    def commanded(self, now: float) -> bool:
+        """Return True while the newest command is nonzero and fresh."""
+        return self.nonzero_at is not None and now - self.nonzero_at <= self.fresh_s
+
+
+def motion(rest: 'RestWatch', commands: 'CommandWatch', now: float) -> int:
+    """Return the base's motion for the arm: commanded counts as moving; unknown stays."""
+    state = rest.state(now)
+    if state == AT_REST and commands.commanded(now):
+        return MOVING
+    return state
+
+
 def yaw_difference(a: float, b: float) -> float:
     """Return the absolute angle between two yaws, wrapped to [0, pi]."""
     d = (a - b + math.pi) % (2.0 * math.pi) - math.pi
@@ -139,7 +172,7 @@ class HeadingWatch:
     def on_calibration(self, yaw: Optional[float]) -> None:
         """Take a new calibration, made while odometry said ``yaw`` (None: no fresh odometry)."""
         self.calibrated = True
-        self.yaw0 = yaw
+        self.yaw0 = yaw if yaw is not None and math.isfinite(yaw) else None
         self.unmeasured_turn = False
         self.turned = 0.0
 
@@ -151,7 +184,7 @@ class HeadingWatch:
         reference, unless a turn was commanded in between (the base turns only when commanded;
         a turn without odometry has already made the calibration invalid).
         """
-        if not self.calibrated or yaw is None:
+        if not self.calibrated or yaw is None or not math.isfinite(yaw):
             return
         if self.yaw0 is None:
             if not self.unmeasured_turn:

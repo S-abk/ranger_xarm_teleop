@@ -472,6 +472,7 @@ class TeleopNode(Node):
             except ValueError as err:
                 raise StartupRefused(str(err)) from err
             self.base_rest = base_rest.RestWatch(base_rest.RestParams())
+            self.base_commands = base_rest.CommandWatch()
             self.params = replace(self.params, base_driving=True)
         self.calibration_seen = None
         self.base_turn_logged = False
@@ -802,11 +803,14 @@ class TeleopNode(Node):
     def _on_base_odom(self, msg: Odometry) -> None:
         t, q = msg.twist.twist, msg.pose.pose.orientation
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        yaw = yaw if math.isfinite(yaw) else None       # a broken pose measures no turn
         self.base_rest.add(self.mono(), t.linear.x, t.linear.y, t.angular.z, yaw)
         self.heading.on_odometry(yaw)
 
     def _on_base_cmd(self, msg: TwistStamped) -> None:
-        self.heading.on_turn_command(float(msg.twist.angular.z), self.base_rest.fresh(self.mono()))
+        now, t = self.mono(), msg.twist
+        self.base_commands.on_command(now, t.linear.x, t.linear.y, t.angular.z)
+        self.heading.on_turn_command(float(t.angular.z), self.base_rest.fresh(now))
 
     def _note_calibration(self) -> None:
         """Give the heading watch each new calibration, with the odometry yaw at that moment."""
@@ -1382,8 +1386,8 @@ class TeleopNode(Node):
                   arming_conditioning=(self.arming_conditioning(joints)
                                        if self.state.arm_pending else math.inf),
                   blocked=blocked, stopping=self.stopping,
-                  base_motion=(self.base_rest.state(now) if self.base_rest is not None
-                               else base_rest.AT_REST),
+                  base_motion=(base_rest.motion(self.base_rest, self.base_commands, now)
+                               if self.base_rest is not None else base_rest.AT_REST),
                   base_turned=self._base_turned())
         marks.append(('tool pose', self.mono()))
         engaged_before = self.state.engaged

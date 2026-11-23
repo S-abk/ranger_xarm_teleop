@@ -396,11 +396,16 @@ def main(args=None) -> None:
     try:
         while not leave.is_set() and rclpy.ok():
             executor.spin_once(timeout_sec=0.05)
-        if node.stop_now(bs.SHUTDOWN):
-            node.get_logger().info('base: stopping, zero sent')
-        time.sleep(0.1)                     # let the zero leave before the publisher goes
     finally:
+        # However the loop ended (a signal, an exception out of a callback), a drive in
+        # progress gets its zero before the publisher goes.
         signal.signal(signal.SIGINT, signal.SIG_IGN)    # a second one must not cut this short
+        try:
+            if node.stop_now(bs.SHUTDOWN):
+                node.get_logger().info('base: stopping, zero sent')
+                time.sleep(0.1)             # let the zero leave before the publisher goes
+        except Exception as err:            # noqa: B902 - leave anyway, and say why
+            node.get_logger().error(f'base: the stop on leaving failed: {err!r}')
         executor.remove_node(node)
         node.destroy_node()
         rclpy.try_shutdown()

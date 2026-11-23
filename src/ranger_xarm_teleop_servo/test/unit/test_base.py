@@ -478,3 +478,21 @@ def test_tool_speed_cap_needs_the_posture():
     r.step(grip=True, tool_xy=(0.3, 0.0))
     assert r.b.driving
     stopped_by(r, bs.TOOL_POSE_UNKNOWN, grip=True)
+
+
+def test_a_release_and_a_new_press_between_two_cycles_still_stop_the_drive():
+    """The release is latched until the next cycle, as the clutch's is."""
+    r = Rig()
+    r.drive(rest=MOVING)
+    r.now += 0.01
+    r.seq += 1
+    r.b.on_sample(bs.sample_of(status(r.seq, r.session), joy(grip=False), r.now))
+    r.now += 0.01
+    r.seq += 1
+    r.b.on_sample(bs.sample_of(status(r.seq, r.session), joy(grip=True, left=(0.0, -1.0)),
+                               r.now))
+    out = r.b.tick(r.now, world(now=r.now, rest=MOVING), wall=r.now)
+    assert out.publish == (0.0, 0.0, 0.0) and out.reason == bs.RELEASED
+    assert not r.b.driving
+    out = r.step(grip=True, left=(0.0, -1.0), rest=MOVING)
+    assert r.b.driving, 'the grip seen released and then held is a new press'

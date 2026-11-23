@@ -187,3 +187,20 @@ def test_a_turn_commanded_while_odometry_was_missing_refuses_the_clutch(base):
     h.tick = gap
     h.play('clutch_line')
     assert TeleopState.HOLD_BASE_TURNED in holds(h)
+
+
+def test_a_fresh_nonzero_base_command_holds_the_clutch(base):
+    """The arm side does not rest on the left grip alone: the base command counts too."""
+    h = base()
+    original = h.tick
+
+    def commanding(now):
+        msg = TwistStamped()
+        msg.twist.linear.x = 0.1
+        h.now = now
+        h.node._on_base_cmd(msg)
+        original(now)
+    h.tick = commanding
+    h.play('clutch_line')
+    assert not h.targets
+    assert TeleopState.HOLD_BASE_MOVING in holds(h)

@@ -17,8 +17,9 @@ import math
 
 import pytest
 
-from ranger_xarm_teleop_servo.base_rest import (AT_REST, HeadingWatch, MOVING, RestParams,
-                                                RestWatch, UNKNOWN, yaw_difference)
+from ranger_xarm_teleop_servo.base_rest import (AT_REST, CommandWatch, HeadingWatch, motion,
+                                                MOVING, RestParams, RestWatch, UNKNOWN,
+                                                yaw_difference)
 
 DT = 0.007                                  # about the simulated odometry's period
 
@@ -154,3 +155,25 @@ def test_translation_keeps_the_calibration():
     for _ in range(100):
         h.on_odometry(1.0 + math.radians(0.05))     # a crab's heading drift
     assert not h.invalid()
+
+
+def test_a_non_finite_yaw_measures_nothing_and_is_never_the_reference():
+    h = HeadingWatch(math.radians(5.0))
+    h.on_calibration(math.nan)
+    h.on_odometry(math.nan)
+    assert h.yaw0 is None
+    h.on_turn_command(0.2, odometry_fresh=True)
+    assert h.invalid()
+
+
+def test_a_fresh_nonzero_command_counts_as_moving_for_the_arm():
+    w = RestWatch()
+    t = feed(w, 0.0, 1.0)
+    c = CommandWatch()
+    assert motion(w, c, t) == AT_REST
+    c.on_command(t, 0.1, 0.0, 0.0)
+    assert motion(w, c, t + 0.05) == MOVING
+    assert motion(w, c, t + 0.15) == AT_REST            # the command went silent: odometry
+    c.on_command(t + 0.2, 0.0, 0.0, 0.0)
+    assert not c.commanded(t + 0.2)
+    assert motion(RestWatch(), c, t) == UNKNOWN          # no odometry stays unknown

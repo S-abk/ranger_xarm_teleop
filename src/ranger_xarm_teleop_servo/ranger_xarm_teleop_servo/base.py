@@ -377,6 +377,7 @@ class Base:
         self.need_release = True            # a start needs the grip seen released first
         self.last: Optional[Sample] = None
         self.fault = NONE                   # a session or sequence fault since the last cycle
+        self.released = False               # the grip seen released since the last cycle
         self.last_tick: Optional[float] = None
         self.await_rest = False             # a drive ended; the at-rest event is due
         self.other_text = ''
@@ -394,6 +395,10 @@ class Base:
             if fault != Hold.NONE and self.fault == NONE:
                 self.fault = (SESSION_CHANGED if fault == Hold.SESSION_CHANGED
                               else SEQ_BACKWARDS)
+        if not sample.left_grip:
+            # Latched until the next cycle: a release and a new press between two cycles
+            # still end the drive (and need another press), as the clutch's release does.
+            self.released = True
         self.last = sample
 
     def _input(self, now: float) -> Tuple[int, Optional[Sample]]:
@@ -415,10 +420,13 @@ class Base:
         self.last_tick = now
         problem, sample = self._input(now)
         self.fault = NONE                   # consumed: it breaks this cycle's hold only
+        released, self.released = self.released, False
         grip = sample is not None and sample.left_grip
-        if sample is not None and not sample.left_grip:
+        if sample is not None and (released or not sample.left_grip):
             self.need_release = False
         if self.driving:
+            if problem == NONE and released:
+                return self.stop(RELEASED, wall, world)
             return self._driving(now, world, problem, sample, dt, wall)
         if not (world.enabled and world.simulator):
             self.state, self.reason = OFF, (R_OFF if not world.enabled else NOT_SIMULATION)
