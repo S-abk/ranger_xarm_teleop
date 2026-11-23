@@ -162,7 +162,7 @@ class BaseWatcher:
         return [(w, m.linear.x, m.linear.y, m.angular.z) for w, m in self.since('cmds', t)]
 
     def speed(self):
-        """Return the newest odometry speed (m/s) and turning rate (rad/s)."""
+        """Return the newest odometry: linear speed in m/s, turning rate in rad/s."""
         with self.lock:
             if not self.odom:
                 return None
