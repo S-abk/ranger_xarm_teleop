@@ -21,6 +21,10 @@ uint8 STATUS_REFUSED_GOAL_ACTIVE = 2    # a trajectory goal was accepted or exec
 uint8 STATUS_REFUSED_TELEOP_ACTIVE = 3  # the teleop node reported an engaged clutch
 uint8 STATUS_STALE_JOINT_STATE = 4      # no fresh joint state to judge "stopped" from
 uint8 STATUS_SWITCH_FAILED = 5          # the controller manager refused or did not confirm the switch
+# Set by the teleop node only (TeleopState.mux_status), never by the mux: its last request had
+# no answer within its timeout, so the outcome is unknown; the node reads the owner back and
+# asks again while it still wants the arm and does not have it.
+uint8 STATUS_NO_ANSWER = 6
 uint8 status
 
 # Human-readable detail of the last request (empty when OK).

@@ -163,6 +163,13 @@ PARAMETER_CLIENT_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                                   history=HistoryPolicy.KEEP_LAST,
                                   depth=calls.PARAMETER_REPLY_DEPTH)
 REQUEST_RETRY_S = 1.0       # pause between ownership requests after a refusal
+# An ownership request with no answer by then is "unknown" (contract, "Service and action
+# calls"): the owner is read back from the mux's report and the request is asked again only if
+# teleop still wants an owner it does not have. Longer than the mux takes to decide (its wait
+# for stillness, 1 s, and its controller-manager calls, well under a second each when answered).
+OWNER_REQUEST_TIMEOUT_S = 5.0
+OWNER_NAMES = {ArmOwner.OWNER_NONE: 'nobody', ArmOwner.OWNER_MOVEIT: 'MoveIt',
+               ArmOwner.OWNER_TELEOP: 'teleop', ArmOwner.OWNER_SWITCHING: 'a switch in progress'}
 
 # MoveIt Servo interface states.
 SERVO_UNKNOWN, SERVO_PAUSED, SERVO_STARTING, SERVO_ACTIVE, SERVO_STOPPING = range(5)
@@ -572,6 +579,9 @@ class TeleopNode(Node):
         self.mux_status = ArmOwner.STATUS_OK
         self.owner_arrival: Optional[float] = None
         self.owner_request_since: Optional[float] = None
+        self.owner_request_wanted: Optional[int] = None
+        self.owner_request_id = 0           # the newest request; older answers are late ones
+        self.owner_unknown_logged = False   # the unknown outcome of this request was logged
         self.owner_retry_after = 0.0
         self.published_calibration = None
         self._cycle_started: Optional[float] = None
@@ -2074,9 +2084,10 @@ class TeleopNode(Node):
             self._ownership_lost(owner)
             return
         if self.owner_request_since is not None:
-            if now - self.owner_request_since < 5.0:
+            if now - self.owner_request_since < OWNER_REQUEST_TIMEOUT_S:
                 return
-            self.owner_request_since = None
+            if not self._owner_read_back(now, reported):
+                return
         wanted = None
         if self.state.want_armed and self.params.motion_enabled:
             if owner != ArmOwner.OWNER_TELEOP:
@@ -2096,15 +2107,76 @@ class TeleopNode(Node):
             if wanted == ArmOwner.OWNER_TELEOP:
                 self._disarm('the command mux is not available')
             return
+        if self.mux_status == ArmOwner.STATUS_NO_ANSWER:
+            self.get_logger().warning(f'asking the command mux again for {OWNER_NAMES[wanted]}')
         self.owner_request_since = now
+        self.owner_request_wanted = wanted
+        self.owner_request_id += 1
+        self.owner_unknown_logged = False
+        request_id = self.owner_request_id
         # Teleop's request window: opened when it asks for the arm, closed when it gives it back
-        # (a later owner switch it did not ask for has no request: no held report counts).
+        # (a later owner switch it did not ask for has no request: no held report counts). A
+        # request asked again opens it anew: the switch, if any, follows the new request.
         self.owner_request_ros_ns = (self.get_clock().now().nanoseconds
                                      if wanted == ArmOwner.OWNER_TELEOP else None)
         future = self.owner_client.call_async(SetArmOwner.Request(owner=wanted))
-        future.add_done_callback(lambda f: self._owner_answered(f, wanted))
+        future.add_done_callback(lambda f: self._owner_answered(f, wanted, request_id))
 
-    def _owner_answered(self, future, wanted: int) -> None:
+    def _owner_read_back(self, now: float, reported: bool) -> bool:
+        """
+        Settle an ownership request that had no answer in time; return whether it is settled.
+
+        The outcome is unknown, so the mux's own report is read back. Without a fresh report
+        (the mux silent, or busy with the request: it reports from the thread that serves it),
+        or while it reports a switch in progress, nothing is asked again (never blindly). A
+        fresh report settles it: the owner asked for (the switch was made, its answer lost), or
+        another, after which the caller asks again if teleop still wants an owner it does not
+        have. One line in the log either way.
+        """
+        wanted = OWNER_NAMES[self.owner_request_wanted]
+        waited = (f'no answer from the command mux within {OWNER_REQUEST_TIMEOUT_S:g} s to the '
+                  f'request for {wanted}')
+        if not reported or self.owner == ArmOwner.OWNER_SWITCHING:
+            if not self.owner_unknown_logged:
+                age = (now - self.owner_arrival if self.owner_arrival is not None
+                       else math.inf)
+                why = (f'its newest owner report is {age:.1f} s old' if not reported
+                       else 'it reports a switch in progress')
+                self.get_logger().warning(
+                    f'{waited}, and {why}: the outcome is unknown; nothing is asked again '
+                    'until the mux reports an owner')
+                self.owner_unknown_logged = True
+            self.mux_status = ArmOwner.STATUS_NO_ANSWER
+            return False
+        self.owner_request_since = None
+        if self.owner == self.owner_request_wanted:
+            self.get_logger().warning(f'{waited}; it reports {wanted} as the owner: the switch '
+                                      'was made and its answer lost')
+            self.mux_status = ArmOwner.STATUS_OK
+        else:
+            self.get_logger().warning(
+                f'{waited}; it reports {OWNER_NAMES.get(self.owner, self.owner)} as the owner: '
+                'the request is asked again if still wanted')
+            self.mux_status = ArmOwner.STATUS_NO_ANSWER
+        return True
+
+    def _owner_answered(self, future, wanted: int, request_id: int) -> None:
+        if request_id != self.owner_request_id or self.owner_request_since is None:
+            # An answer to a request already settled by a read-back, or followed by a newer
+            # one: still an answer (a refusal of the arm disarms), but it neither closes the
+            # newer request nor sets the owner (the mux's report is newer).
+            try:
+                result = future.result()
+            except Exception as err:  # noqa: B902 - reported, nothing else changes
+                self.get_logger().warning(f'a late ownership answer failed: {err}')
+                return
+            self.get_logger().warning(
+                f'late answer from the command mux to an earlier request for '
+                f'{OWNER_NAMES[wanted]}: '
+                + ('granted' if result.success else f'refused: {result.detail}'))
+            if not result.success and wanted == ArmOwner.OWNER_TELEOP:
+                self._disarm('ownership was refused')
+            return
         self.owner_request_since = None
         self.owner_retry_after = self.mono() + REQUEST_RETRY_S
         try:

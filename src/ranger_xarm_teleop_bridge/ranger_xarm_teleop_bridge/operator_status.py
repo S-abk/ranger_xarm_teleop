@@ -69,6 +69,10 @@ HOLD_TEXT = {
     'SOLVER': 'Arm state disagrees with command: release, check arm',
     'STOPPING': 'Arm stopping: wait',
 }
+# ArmOwner.STATUS_NO_ANSWER in TeleopState.mux_status (checked against the message by the unit
+# tests): teleop's last request for the arm had no answer in time; it is being asked again.
+MUX_NO_ANSWER = 6
+NOT_OWNER_NO_ANSWER_TEXT = 'No answer from the command mux: asking for the arm again'
 # Holds that are the system's state, not a fault; every other hold is a fault and is latched.
 STATE_HOLDS = frozenset({'NONE', 'MOTION_DISABLED', 'NOT_ARMED', 'NOT_OWNER',
                          'NOT_CALIBRATED', 'CLUTCH_RELEASED', 'STOPPING'})
@@ -184,8 +188,10 @@ def code_name(names: Dict[int, str], code: int) -> str:
     return names.get(int(code), f'UNKNOWN_{int(code)}')
 
 
-def hold_text(code: int) -> str:
+def hold_text(code: int, mux_status: int = 0) -> str:
     name = code_name(HOLD_NAMES, code)
+    if name == 'NOT_OWNER' and int(mux_status) == MUX_NO_ANSWER:
+        return NOT_OWNER_NO_ANSWER_TEXT
     return HOLD_TEXT.get(name, f'Hold {name}')
 
 
@@ -211,6 +217,7 @@ class TeleopSample:
     gripper_request: int
     gripper_measured_valid: bool
     gripper_measured: float
+    mux_status: int = 0         # ArmOwner.STATUS_*: the result of teleop's last request
 
 
 @dataclass(frozen=True)
@@ -383,7 +390,7 @@ class StatusTracker:
             out.calibrated = bool(s.calibrated)
             out.translation_scale = float(s.translation_scale)
             out.hold_reason = int(s.hold_reason)
-            out.hold_text = hold_text(s.hold_reason)
+            out.hold_text = hold_text(s.hold_reason, s.mux_status)
             out.gripper_enabled = bool(s.gripper_enabled)
             out.gripper_active = bool(s.gripper_active)
             out.gripper_hold = int(s.gripper_hold)
