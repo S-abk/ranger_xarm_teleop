@@ -61,6 +61,8 @@ The stack role needs ROS sourced, as for the manual sequence.
 **Options.**
 - Recording, operator feedback and the reset are on for the simulation profiles; switch them
   off with `--no-record`, `--no-feedback` and `--no-reset`.
+- `--base` (off by default) drives the simulated base from the headset; simulator profiles
+  only, refused for hardware and for a profile with no simulator.
 - For the simulator: `--headless`, `--no-cameras`, and `--gpu auto|nvidia|default` (`auto`
   renders on the NVIDIA card when the machine has one and says when it has not).
 - `--no-rviz` (mock) and `--data-dir`.

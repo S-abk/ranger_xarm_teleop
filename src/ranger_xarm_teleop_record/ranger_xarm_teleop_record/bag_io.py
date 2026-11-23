@@ -53,6 +53,9 @@ KIND_FIELDS = {
     'camera_info': (('width', int), ('height', int)),
     'owner': (('owner', int), ('status', int)),
     'episode_state': (('state', int), ('wall_time', float)),
+    'base_state': (('state', int), ('mode', int), ('reason', int), ('active_limit', int),
+                   ('event_count', int), ('driving', bool), ('at_rest', bool),
+                   ('enabled', bool), ('odom_age', float), ('tool_speed_scale', float)),
 }
 
 
@@ -194,6 +197,10 @@ def _add(rows: _Rows, msg, recv: float) -> None:
         rows.put('twist', _twist(msg.twist.twist))
     elif kind == 'twist':
         rows.put('twist', _twist(msg))
+    elif kind == 'twist_stamped':
+        rows.put('twist', _twist(msg.twist))
+    elif kind == 'base_state':
+        rows.put('command', _twist(msg.command))
 
 
 def _image_array(msg) -> np.ndarray:
