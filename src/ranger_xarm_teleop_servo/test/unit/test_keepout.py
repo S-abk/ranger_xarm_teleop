@@ -163,6 +163,21 @@ def test_fingerprint_follows_the_geometry_and_ignores_the_text_around_it():
     assert fp(robot_urdf(), lambda name: changed[name]) != base
 
 
+def test_fingerprint_is_the_built_models_at_its_cell_and_any_margin():
+    """The node compares a later description at its own cell; the margin is not geometry."""
+    urdf = robot_urdf()
+    for cell in (ko.DEFAULT_CELL, 0.03):
+        built = ko.build(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', MARGIN, cell=cell,
+                         near_samples=0).fingerprint
+        assert ko.fingerprint(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', MARGIN,
+                              cell=cell) == built
+        assert ko.fingerprint(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', 0.04,
+                              cell=cell) == built
+    assert ko.fingerprint(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', MARGIN,
+                          cell=0.03) != ko.fingerprint(urdf, resolve, 'xarm_link_base',
+                                                       'xarm_link_tcp', MARGIN)
+
+
 def test_the_model_follows_a_moved_box_and_an_added_tool(model, extra):
     q = [0.0, -1.0, -0.6, 0.0, 1.2, 0.0]
     before = model.pair_clearances(q, extra)[('l2', 'screen')]

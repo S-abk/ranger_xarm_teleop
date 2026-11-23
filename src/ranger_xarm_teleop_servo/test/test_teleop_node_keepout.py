@@ -195,6 +195,18 @@ def test_servo_checking_another_description_disables_teleop(node):
     assert "MoveIt Servo's robot description does not match" in n.keepout_fault
 
 
+@pytest.mark.parametrize('values', [{'link_keepout_margin_m': 0.04},
+                                    {'link_keepout_cell_m': 0.03},
+                                    {'link_keepout_margin_m': 0.04, 'link_keepout_cell_m': 0.03}])
+def test_another_margin_or_cell_alone_does_not_disable_teleop(node, values):
+    """The comparison is of geometry: the node's own margin and cell are used on both sides."""
+    n = node(robot_urdf(), **values)
+    n._compare_description(robot_urdf(), "MoveIt Servo's robot description")
+    assert not n.keepout_fault
+    n._compare_description(robot_urdf(screen_height=0.30), "MoveIt Servo's robot description")
+    assert "MoveIt Servo's robot description does not match" in n.keepout_fault
+
+
 def test_joint_path_is_timed_decimated_and_bounded(node):
     n = node(robot_urdf())
     n._on_tf_static(teleop_node.TFMessage(transforms=[]))

@@ -921,7 +921,7 @@ class TeleopNode(Node):
         """Disable teleop if ``text`` has other geometry than the keep-out model's."""
         try:
             other = ko.fingerprint(text, self._resolver(), self.base_frame, self.tip_frame,
-                                   self.keepout_margin)
+                                   self.keepout_margin, cell=self.keepout_cell)
         except (ko.ModelError, ChainError, ValueError) as err:
             other = f'unusable: {err}'
         if other == self.keepout.fingerprint:

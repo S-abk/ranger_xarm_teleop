@@ -1114,6 +1114,10 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
 
 
 def fingerprint(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str,
-                margin: float) -> str:
-    """Return the fingerprint of the model ``urdf`` gives (no pair sampling)."""
-    return build(urdf, resolve, base, tip, margin, near_samples=0).fingerprint
+                margin: float, cell: float = DEFAULT_CELL) -> str:
+    """
+    Return the fingerprint of the model ``urdf`` gives (no pair sampling).
+
+    ``cell`` must be the one the compared model was built with: the fingerprint covers it.
+    """
+    return build(urdf, resolve, base, tip, margin, cell=cell, near_samples=0).fingerprint
