@@ -23,6 +23,9 @@ what matters for stability and for the lead limit:
 * The measured joint state is the commanded state ``delay`` seconds earlier (transport,
   Servo's window, the controller), and the measured tool pose is its forward kinematics.
 * The gate sees that measured tool pose: at engagement, and for the lead limit (G-14).
+* With ``acceleration`` (G-18) the joint command passes the node's limiter: the change the
+  solver asks for is scaled to the limit, and with no target the last command is ramped to
+  zero at the limit (``joint_accel``).
 """
 
 from dataclasses import dataclass
@@ -31,6 +34,7 @@ from typing import Callable, Iterable, List, Optional, Sequence
 
 import numpy as np
 
+from . import joint_accel
 from .gate import Env, Frame, GateState, on_frame, Output, tick
 from .params import GateParams
 from .rotations import Pose, pose_from_matrix, pose_to_matrix
@@ -48,18 +52,20 @@ class ModelStep:
     commanded: np.ndarray               # Servo's commanded state after this cycle
     measured: np.ndarray                # measured joint state used this cycle
     tool: Pose                          # measured tool pose (forward kinematics)
+    limited: bool = False               # the acceleration limit acted on this cycle's command
 
 
 def run(frames: Iterable[Frame], gate_params: GateParams, arm: Arm, solver_params: SolverParams,
         q0: Sequence[float], delay: float = 0.15, stale_ticks: int = 1,
         state: Optional[GateState] = None, tail: float = 1.0,
         edit: Optional[Callable[[Frame], Frame]] = None, keepout=None,
-        extra: Optional[dict] = None) -> List[ModelStep]:
+        extra: Optional[dict] = None, acceleration: Optional[float] = None) -> List[ModelStep]:
     """
     Run the gate and the solver over ``frames`` against the delayed model arm.
 
     ``keepout`` and ``extra``: the link keep-out model and its non-arm joint values, passed
     to the solver; the blocked tool direction of each command goes back to the gate.
+    ``acceleration``: the joint acceleration limit of the command (rad/s^2), or None.
     """
     period = gate_params.target_period
     delay_ticks = max(0, int(round(delay / period)))
@@ -73,6 +79,7 @@ def run(frames: Iterable[Frame], gate_params: GateParams, arm: Arm, solver_param
     end = (frames[-1].arrival if frames else 0.0) + tail
     reference: Optional[np.ndarray] = None
     blocked = (0.0, 0.0, 0.0)
+    sent = np.zeros_like(commanded)
     for k in range(int(math.floor(end / period)) + 1):
         now = k * period
         while index < len(frames) and frames[index].arrival <= now:
@@ -104,8 +111,15 @@ def run(frames: Iterable[Frame], gate_params: GateParams, arm: Arm, solver_param
         else:
             reference = None
             blocked = (0.0, 0.0, 0.0)
+        limited = False
+        if acceleration is not None:
+            step = (joint_accel.limit_step(sent, qdot, acceleration, period)
+                    if output.target is not None
+                    else joint_accel.ramp_step(sent, acceleration, period))
+            qdot, limited = step.velocity, step.limited
+        sent = qdot
         commanded = commanded + qdot * period
         history.append(commanded.copy())
         steps.append(ModelStep(now, output, solution, qdot, commanded.copy(), measured.copy(),
-                               tool))
+                               tool, limited))
     return steps
