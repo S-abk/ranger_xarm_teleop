@@ -43,7 +43,7 @@ TELEOP_COMMAND = '/teleop_arm_controller/joint_trajectory'
 @pytest.fixture(scope='module')
 def stage2(tmp_path_factory):
     logs = tmp_path_factory.mktemp('hwmock_check')
-    env = child_environment(offset=19)
+    env = child_environment(offset=23)
     bringup = start_hwmock(env, 'check', logs)
     probe = Probe(env)
     attach = None

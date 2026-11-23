@@ -35,7 +35,7 @@ pytestmark = pytest.mark.skipif(os.environ.get('TELEOP_TEST_GAZEBO') != '1',
                                 reason='set TELEOP_TEST_GAZEBO=1 to run the Gazebo tests')
 
 PORT = 18452
-OFFSET = 21
+OFFSET = 25
 MOVEIT, MOVEIT_G = 'xarm_xarm6_traj_controller', 'xarm_xarm_gripper_traj_controller'
 STILL = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
     __file__)))), 'ranger_xarm_teleop_bridge', 'test', 'fixtures', 'still_controller.jsonl')
