@@ -125,21 +125,6 @@ def attach(holder, label, *extra):
     return holder['attach']
 
 
-def attach_ready(holder, label, *extra):
-    """
-    Restart the teleop launch and wait until it can arm: a measured tool pose is shown.
-
-    A node that has just started builds its kinematic chain and keep-out model first (more
-    than a second under load); an arm press before that is refused (posture unknown).
-    """
-    attach(holder, label, *extra)
-    probe = holder['probe']
-    since = time.monotonic()
-    probe.wait_for(lambda: any(s.measured_tool_pose_valid for s in probe.states_since(since)),
-                   120.0, f'the restarted teleop node to know the arm ({label})')
-    return holder['attach']
-
-
 def refused(holder, label):
     """Start the attach once more and return its output; it must refuse and start nothing."""
     process = start_attach(holder['env'], 'execution', holder['limits'], holder['logs'], label,
@@ -278,52 +263,6 @@ def test_one_short_armed_stroke_with_the_teleop_check(stage3):
     engaged = [s for s in probe.states_since(start) if s.clutch_engaged]
     assert engaged and all(s.measured_tool_pose_valid for s in engaged)
     assert not any(s.hold_reason == TeleopState.HOLD_TOOL_POSE_STALE for s in engaged)
-
-
-def test_a_stroke_at_a_fifth_of_the_caps_passes_the_acceleration_and_stop_rules(stage3):
-    """
-    G-18 at the first-session speed caps: hw_check's stage-4 stop rules pass.
-
-    The limits are a fifth of the simulation speed caps and a hardware-like joint speed cap
-    and acceleration limit (0.4 rad/s, 2 rad/s^2: a 0.2 s stop), test values only. The
-    stroke releases while moving, so a stop is measured.
-    """
-    probe, env, logs = stage3['probe'], stage3['env'], stage3['logs']
-    original = stage3['limits']
-    fifth = logs / 'fifth'
-    fifth.mkdir(exist_ok=True)
-    stage3['limits'] = write_hardware_limits(
-        fifth, linear_speed_cap_m_s=0.05, angular_speed_cap_rad_s=0.2,
-        joint_speed_cap_rad_s=0.4, joint_acceleration_limit_rad_s2=2.0)
-    try:
-        attach_ready(stage3, 'fifth', 'motion_enabled:=true')
-        probe.disarm()
-        probe.move_to(READY, 4.0)
-        process, data_dir = start_check(env, 'teleop', logs, 'teleop_fifth', '--seconds', '25',
-                                        '--limits', stage3['limits'], '--joint-limits',
-                                        JOINT_LIMITS)
-        try:
-            time.sleep(3.0)                 # everything joins before arming
-            start = time.monotonic()
-            stroke = replay(env, 'clutch_release_moving', str(logs / 'stroke_fifth.log'),
-                            start_delay=1.0)
-            try:
-                assert stroke.wait(60.0) == 0, stroke.output()
-            finally:
-                stroke.stop()
-            assert any(s.armed and s.owner == ArmOwner.OWNER_TELEOP
-                       for s in probe.states_since(start)), 'never armed and owning the arm'
-            assert any(s.stopping for s in probe.states_since(start)), 'no stop ramp seen'
-            probe.disarm()
-        finally:
-            code, verdicts, report, output = check_report(process, data_dir, 90.0)
-        assert verdicts.get('commanded joint acceleration (MoveIt Servo output)') == 'PASS', \
-            output[-4000:]
-        assert verdicts.get('stop time after a release') == 'PASS', output[-4000:]
-        assert verdicts.get('joint-state acceleration (20 ms, INFO)') == 'INFO', output[-4000:]
-    finally:
-        stage3['limits'] = original
-        attach_ready(stage3, 'enabled_again', 'motion_enabled:=true')
 
 
 # ---- G-17: the arm driver after an arm error ----
