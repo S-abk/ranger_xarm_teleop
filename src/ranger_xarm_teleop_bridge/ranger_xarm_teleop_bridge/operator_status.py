@@ -96,6 +96,9 @@ LIMIT_TEXT = {
     'LINK_KEEPOUT': 'near robot body',
     'JOINT_ACCELERATION': 'acceleration limit',
 }
+# Appended to the limit's words while motion is disabled: nothing moves, the limit is what would
+# act on the previewed target (TeleopState.active_limit).
+PREVIEW_SUFFIX = ' (preview)'
 # Higher is more severe; the panel shows the most severe limit of the hold window.
 LIMIT_SEVERITY = {
     'NONE': 0, 'TOOL_SPEED': 1, 'JOINT_VELOCITY': 1, 'JOINT_ACCELERATION': 1, 'LEAD': 2,
@@ -402,7 +405,9 @@ class StatusTracker:
                 out.last_fault_age = max(0.0, now - self._fault_at)
             if self._limit and now - self._limit_at <= self.limit_hold_s:
                 out.limit = self._limit
-                out.limit_text = limit_text(self._limit)
+                # Motion disabled: the limit is what would act on the preview.
+                out.limit_text = limit_text(self._limit) + (
+                    '' if s.motion_enabled else PREVIEW_SUFFIX)
         e = self._episode
         if e is not None:
             out.episode_age = now - self._episode_at

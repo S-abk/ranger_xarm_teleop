@@ -23,8 +23,16 @@ calibration and with fresh joint states, exactly as an armed target needs them.
 
 What it leaves out, because the arm does not move: the lead clamp (G-14; against an arm that
 stands still it would pin the preview to within the lead limit of the measured pose), MoveIt
-Servo, the solver and the speed caps. A step beyond the per-cycle limit (G-5) ends the preview
+Servo and the speed caps. A step beyond the per-cycle limit (G-5) ends the preview
 engagement until the grip is released, as it would release the clutch.
+
+Which limits would act is reported (``TeleopState.active_limit``, the panel's limit line):
+the target-side bound that held the preview (``PreviewState.limit``), else what the solver
+would do from the measured posture toward the previewed target (``solver_limit``). Only the
+position-type limits of the solver are reported (a joint at its position bound, the link
+keep-out): they depend on the posture and stop motion in a direction. The speed-type limits
+would act almost always against an arm that stands still and a target that runs ahead, and
+say nothing about the posture. The node solves for this report only; nothing is commanded.
 
 Nothing here feeds the command path: the result is published on its own topic, only while
 motion is disabled, and the gate's own state is read, never changed.
@@ -34,7 +42,7 @@ from dataclasses import dataclass, replace
 import math
 from typing import Optional, Tuple
 
-from .gate import _pose_reason, bound, Env, GateState, Hold, low_pass
+from .gate import _pose_reason, bound, Env, GateState, Hold, Limit, low_pass
 from .mapping import apply_pivot, clutch_relative
 from .params import GateParams
 from .rotations import Pose, q_between, v_norm, v_sub
@@ -61,6 +69,7 @@ class PreviewState:
     scale: float = 1.0
     filtered: Optional[Pose] = None
     last_target: Optional[Pose] = None
+    limit: Limit = Limit.NONE         # the target-side bound (G-6) that held this cycle's preview
 
 
 def step(preview: PreviewState, gate: GateState, env: Env,
@@ -75,7 +84,7 @@ def step(preview: PreviewState, gate: GateState, env: Env,
     if not grip:
         return PreviewState(), None, GRIP_RELEASED
     if preview.latched:
-        return preview, None, preview.latched
+        return replace(preview, limit=Limit.NONE), None, preview.latched
     reason = _pose_reason(frame, params)
     if reason != Hold.NONE:
         return replace(PreviewState(), latched=f'{reason.name.lower()}: release the grip'), \
@@ -94,11 +103,30 @@ def step(preview: PreviewState, gate: GateState, env: Env,
     raw = clutch_relative(controller, preview.clutch, preview.heading, preview.tool0,
                           preview.scale)
     filtered = low_pass(preview.filtered, raw, params)
-    target, _ = bound(filtered, preview.tool0, preview.last_target, params)
+    target, limit = bound(filtered, preview.tool0, preview.last_target, params)
     jump = v_norm(v_sub(target.p, preview.last_target.p))
     turn = q_between(preview.last_target.q, target.q)
     if jump > params.step_translation_limit or turn > params.step_rotation_limit:
         return replace(PreviewState(), latched=STEP), None, STEP
     if not all(math.isfinite(v) for v in target.p + target.q):
         return PreviewState(), None, NO_JOINT_STATE
-    return replace(preview, filtered=filtered, last_target=target), target, ''
+    return replace(preview, filtered=filtered, last_target=target, limit=limit), target, ''
+
+
+def solver_limit(fixed, keepout_bound: bool) -> Limit:
+    """
+    Return the position-type limit the solver applied (``Solution.fixed``, ``keepout_bound``).
+
+    The precedence is the solver's own (``solver._scaled``): a joint held at its position
+    bound, then the link keep-out. Speed-type limits are never returned (module docstring).
+    """
+    if fixed:
+        return Limit.JOINT_POSITION
+    if keepout_bound:
+        return Limit.LINK_KEEPOUT
+    return Limit.NONE
+
+
+def shown_limit(target: Limit, solver: Limit) -> Limit:
+    """Return the limit the state reports: the target-side bound first, as when engaged."""
+    return target if target != Limit.NONE else solver

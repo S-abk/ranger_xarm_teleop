@@ -203,3 +203,63 @@ def test_only_the_idle_stage_judges_it():
         data = idle_data(robot_states=capture(err=3))
         _, results = rules.evaluate(stage, data, Options())
         assert RULE not in {r.rule for r in results}
+
+
+def test_a_search_with_no_publisher_says_how_long_it_looked():
+    r = judged({'topics': {}, 'topic': None, 'unavailable': None, 'messages': [],
+                'searched_s': 4.04})
+    assert r.verdict == INFO
+    assert r.measured == f'not available: no publisher of {TYPE} after 4.0 s'
+
+
+def test_the_poll_records_how_long_the_type_was_looked_for():
+    record, subscribed = _poll({'/joint_states': ('sensor_msgs/msg/JointState', ['jsb'])})
+    assert record['topics'] == {} and record['searched_s'] == 0.0 and subscribed == []
+
+
+class _LateGraph:
+    """A graph on a fake clock: the arm state publisher appears ``late_s`` after the start."""
+
+    def __init__(self, late_s):
+        self.now = 0.0
+        self.late_s = late_s
+
+    def spin(self):
+        self.now += 0.05
+
+    def _topics(self):
+        topics = {'/joint_states': ('sensor_msgs/msg/JointState', ['jsb'])}
+        if self.late_s is not None and self.now >= self.late_s:
+            topics[TOPIC] = (TYPE, ['driver'])
+        return topics
+
+    def get_topic_names_and_types(self):
+        return [(t, [kind]) for t, (kind, _) in self._topics().items()]
+
+    def get_publishers_info_by_topic(self, topic):
+        names = self._topics().get(topic, (None, []))[1]
+        return [SimpleNamespace(node_namespace='/', node_name=n) for n in names]
+
+
+def _discover(graph, arm_state=True):
+    return hw_check._discover(graph, graph.spin, '/joint_states', arm_state,
+                              clock=lambda: graph.now)
+
+
+def test_discovery_waits_for_an_arm_state_publisher_that_appears_late():
+    graph = _LateGraph(late_s=3.0)
+    waited = _discover(graph)
+    assert 3.0 <= waited < 3.1
+    record, subscribed = {}, []
+    reader = hw_check._RobotStates(graph, record, lambda kind, topic, *r: subscribed.append(topic))
+    reader.poll(waited)
+    assert record['robot_states']['topics'] == {TOPIC: ['/driver']}
+
+
+def test_discovery_gives_up_at_its_limit_and_does_not_wait_outside_the_idle_stage():
+    assert hw_check.DISCOVERY_MAX_S <= _discover(_LateGraph(late_s=None)) \
+        < hw_check.DISCOVERY_MAX_S + 0.1
+    assert hw_check.DISCOVERY_MIN_S <= _discover(_LateGraph(late_s=None), arm_state=False) \
+        < hw_check.DISCOVERY_MIN_S + 0.1
+    early = _discover(_LateGraph(late_s=0.5))
+    assert hw_check.DISCOVERY_MIN_S <= early < hw_check.DISCOVERY_MIN_S + 0.1

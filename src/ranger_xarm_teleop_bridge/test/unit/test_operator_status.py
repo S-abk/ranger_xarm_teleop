@@ -154,6 +154,17 @@ def test_limit_is_held_and_the_most_severe_wins():
     assert t.snapshot(1.2, 0.0).limit == 6
 
 
+def test_with_motion_disabled_the_limit_is_shown_as_the_previews():
+    """Nothing moves then: the limit line says what would act on the previewed target."""
+    t = StatusTracker()
+    t.on_teleop(teleop(motion_enabled=False, armed=False, hold_reason=1, active_limit=9), 0.0)
+    s = t.snapshot(0.1, 0.0)
+    assert s.limit == 9 and s.limit_text == 'near robot body (preview)'
+    t = StatusTracker()
+    t.on_teleop(teleop(active_limit=9), 0.0)
+    assert t.snapshot(0.1, 0.0).limit_text == 'near robot body'
+
+
 def test_stale_sources_report_no_old_values():
     t = StatusTracker(teleop_stale_s=0.5, episode_stale_s=1.0)
     t.on_teleop(teleop(), 0.0)

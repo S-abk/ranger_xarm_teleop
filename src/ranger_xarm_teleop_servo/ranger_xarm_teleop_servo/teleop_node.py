@@ -642,6 +642,13 @@ class TeleopNode(Node):
         self.preview_pub = None
         self.preview_state = preview.PreviewState()
         self.preview_reason = ''
+        # The position-type limit the solver would apply from the measured posture toward the
+        # previewed target (preview.solver_limit); solved for the report only, kept apart from
+        # self.solution, which feeds the gate and the command path.
+        self.preview_solver_limit = Limit.NONE
+        self.preview_shown_limit = Limit.NONE     # the one last logged
+        self.preview_logged_at = -math.inf
+        self._preview_pair = None
         if self.params.motion_enabled:
             self.target_pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 10)
             self.servo_pub = self.create_publisher(JointJog, f'{servo}/delta_joint_cmds', 10)
@@ -1294,7 +1301,7 @@ class TeleopNode(Node):
         engaged_before = self.state.engaged
         self.state, output = tick(self.state, env, self.params)
         if self.preview_pub is not None:
-            self.preview_cycle(env)
+            self.preview_cycle(env, joints)
         marks.append(('gate', self.mono()))
         for event in output.events:
             self.get_logger().info(event)
@@ -1449,13 +1456,22 @@ class TeleopNode(Node):
             msg.reference_source = int(out.source)
             self.gripper_pub.publish(msg)
 
-    def preview_cycle(self, env: Env) -> None:
+    def preview_cycle(self, env: Env, joints) -> None:
         """Publish the target an engagement would command (motion disabled), or say why not."""
         self.preview_state, target, why = preview.step(self.preview_state, self.state, env,
                                                        self.params)
         if why != self.preview_reason:
             self.get_logger().info(f'preview: {why or "publishing the target"}')
             self.preview_reason = why
+        self.preview_solver_limit = (self.preview_limit(joints, target) if target is not None
+                                     else Limit.NONE)
+        shown = preview.shown_limit(self.preview_state.limit, self.preview_solver_limit)
+        # Logged when it changes, at most once a second (a hand at a boundary can make it
+        # alternate from cycle to cycle); the state message has it every cycle.
+        if shown != self.preview_shown_limit and env.now - self.preview_logged_at >= 1.0:
+            self.get_logger().info(f'preview: {self.preview_limit_words(shown)}')
+            self.preview_shown_limit = shown
+            self.preview_logged_at = env.now
         if target is None:
             return
         msg = PoseStamped()
@@ -1463,6 +1479,41 @@ class TeleopNode(Node):
         msg.header.frame_id = self.base_frame
         fill_pose(msg.pose, target)
         self.preview_pub.publish(msg)
+
+    def preview_limit(self, joints, target: Pose) -> Limit:
+        """
+        Return the position-type limit the solver would apply toward the previewed target.
+
+        Solved from the measured joints (the arm stands still), with the keep-out model, as
+        an engagement's first cycle would be. Nothing is commanded: the result is only
+        reported, and kept apart from the command path's solution.
+        """
+        self._preview_pair = None
+        if self.arm is None or joints is None or not np.all(np.isfinite(joints)):
+            return Limit.NONE
+        try:
+            solution = dls.solve(self.arm, joints, pose_to_matrix(target), self.solver_params,
+                                 keepout=self.keepout, extra=self.keepout_extra())
+        except (ko.ModelError, np.linalg.LinAlgError, ValueError) as err:
+            self.get_logger().warning(f'preview: the solver check failed: {err}',
+                                      throttle_duration_sec=5.0)
+            return Limit.NONE
+        if solution.keepout_bound:
+            self._preview_pair = (solution.keepout_pair, solution.keepout_clearance)
+        return preview.solver_limit(solution.fixed, solution.keepout_bound)
+
+    def preview_limit_words(self, limit: Limit) -> str:
+        """Return the log line's words for the limit the preview reports."""
+        if limit == Limit.NONE:
+            return 'no limit would act'
+        words = f'{limit.name} would act'
+        found = self._preview_pair
+        if limit == Limit.LINK_KEEPOUT and found is not None:
+            (link, obstacle), clearance = found
+            words += (f' (nearest pair {link} - {obstacle}, clearance '
+                      f'{clearance * 1000.0:.1f} mm, margin {self.keepout_margin * 1000.0:.1f} '
+                      'mm)')
+        return words + '; nothing is commanded with motion disabled'
 
     def publish_target(self, target: Pose, stamp) -> None:
         """Publish the tool-frame target (the recorded action)."""
@@ -1751,6 +1802,10 @@ class TeleopNode(Node):
         solution = self.solution if output.target is not None else None
         if limit == Limit.NONE and solution is not None:
             limit = SOLVER_LIMITS.get(solution.limit, Limit.NONE)
+        if self.preview_pub is not None:
+            # Motion disabled: what would act on the preview (preview.py). Nothing else is
+            # reported then: no target is ever published and no command is sent.
+            limit = preview.shown_limit(self.preview_state.limit, self.preview_solver_limit)
         # G-18: the acceleration limit shaped the command (or a stop ramp runs). It outranks
         # the speed-type limits it acts after; a position-type bound stays the one shown.
         if self.acceleration_limited and limit in ACCELERATION_OUTRANKS:
