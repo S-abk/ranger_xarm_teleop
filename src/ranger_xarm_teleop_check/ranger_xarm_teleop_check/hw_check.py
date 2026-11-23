@@ -47,7 +47,6 @@ ROSOUT_DEPTH = 1000
 COMMAND_DEPTH = 50
 # The vendor driver's state topic (about 5 Hz): no message lost over a stall of ten seconds.
 ROBOT_STATES_DEPTH = 50
-ROBOT_STATES_RETRY_S = 0.5
 CAMERA_DEFAULT_QOS = {'reliability': 'best_effort', 'depth': 10}
 
 
@@ -217,13 +216,16 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
             _subscribe_cameras(node, opts, data)
         else:
             _subscribe_stack(stage, opts, data, subscribe, system_clock)
+        if stage == 'idle':
+            # Before the capture window: the graph lookup, the first import of xarm_msgs and
+            # its typesupport (about 0.1 s idle, several times that under load) and the new
+            # subscription would otherwise hold up the joint-state callbacks inside the window,
+            # and so the largest-gap figure that tool_pose_timeout_s is chosen from.
+            _RobotStates(node, data, subscribe).poll(time.monotonic())
         began = time.monotonic()
         deadline = began + seconds
-        robot_states = _RobotStates(node, data, subscribe) if stage == 'idle' else None
         while True:
             now = time.monotonic()
-            if robot_states is not None:
-                robot_states.poll(now)
             if now >= deadline and (stage == 'cameras' or data['activity'] is not None
                                     or now - began >= rules.ACTIVITY_WAIT_S):
                 break
@@ -344,25 +346,24 @@ class _RobotStates:
     """
     The vendor driver's /xarm/robot_states, read-only, idle stage.
 
-    Subscribes once a publisher of the topic is on the graph (looked up again twice a second
-    until then, so a driver that is a little late is still read). Never a service client: the
-    topic is the only thing asked of the driver. ``xarm_msgs`` is imported only then, so a
-    machine without it says so instead of failing.
+    Looked up once, after discovery and before the capture window opens, and subscribed if a
+    publisher is on the graph then (the driver starts before the check). Nothing about it runs
+    inside the window, so it cannot delay the joint-state callbacks the gap rules time. Never a
+    service client: the topic is the only thing asked of the driver. ``xarm_msgs`` is imported
+    only then, so a machine without it says so instead of failing.
     """
 
     def __init__(self, node, data, subscribe):
         self._node = node
         self._subscribe = subscribe
-        self._next = 0.0
         self._done = False
         self._record = data['robot_states'] = {'publishers': [], 'unavailable': None,
                                                'messages': []}
 
     def poll(self, now: float):
         """Subscribe when a publisher has appeared; record the publishers seen."""
-        if self._done or now < self._next:
+        if self._done:
             return
-        self._next = now + ROBOT_STATES_RETRY_S
         publishers = _publisher_names(self._node, rules.ARM_STATE_TOPIC)
         if not publishers:
             return
