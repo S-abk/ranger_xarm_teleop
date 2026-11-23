@@ -13,6 +13,7 @@
 # limitations under the License.
 """Teleop node and the link keep-out (G-15): model, description checks, state, joint path."""
 
+import dataclasses
 import math
 import os
 import sys
@@ -173,6 +174,14 @@ def test_the_room_around_the_start_posture_is_logged_once(node):
     assert shown <= clearance + 1e-4
     n._idle_clearance = None
     n.idle_clearance()
+    assert len([line for line in lines if 'start posture' in line]) == 1
+    # Not while the arm is wanted: the lookup would hold the cycle up.
+    m = node(robot_urdf())
+    m._on_tf_static(teleop_node.TFMessage(transforms=[]))
+    m.get_logger().info = lambda text, **_: lines.append(text)
+    _joints(m, READY)
+    m.state = dataclasses.replace(m.state, want_armed=True)
+    m.idle_clearance()
     assert len([line for line in lines if 'start posture' in line]) == 1
 
 

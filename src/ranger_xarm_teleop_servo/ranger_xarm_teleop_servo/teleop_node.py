@@ -860,6 +860,7 @@ class TeleopNode(Node):
     def _build_keepout(self) -> None:
         """Build the link keep-out model from the robot description (refuses the start)."""
         self._keepout_tried = True
+        self._room_logged = False
         started = time.perf_counter()
         try:
             self.keepout = ko.build(self.urdf, self._resolver(), self.base_frame,
@@ -1935,7 +1936,8 @@ class TeleopNode(Node):
         except (KeyError, ko.ModelError, ValueError):
             return self._idle_clearance
         self._idle_clearance = (rows.clearance, rows.nearest)
-        if not self._room_logged and not self.state.engaged:
+        if not self._room_logged and not self.state.engaged and not self.state.want_armed:
+            # Once per model, before any arming: the lookup takes up to a few hundred ms.
             self._room_logged = True
             self.log_room(q, positions)
         return self._idle_clearance

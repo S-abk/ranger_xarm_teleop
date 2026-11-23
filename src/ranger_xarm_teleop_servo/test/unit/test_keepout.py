@@ -347,6 +347,24 @@ def test_finer_cells_never_read_more_than_the_surfaces_either(close_base):
                                          model.extra_values({'finger_left_joint': 0.02}))
 
 
+def test_a_finer_fixed_mesh_cover_still_holds_every_point_of_the_mesh(close_base):
+    """The fixed side of INV-1: the refined base mesh's members contain its triangles."""
+    _, model = close_base
+    units = model.units
+    f = units.names.index('xarm_link_base')
+    clusters = np.nonzero((units.link == f) & (units.mem_count > 0))[0]
+    members = np.concatenate([units.mem_start[u] + np.arange(units.mem_count[u])
+                              for u in clusters])
+    tris = ko.read_stl(MESHES['package://test_robot/meshes/base_150.stl'])
+    tris = tris + np.array([0.0, 0.0, 0.075])                 # its collision origin
+    points = np.concatenate([_random_on_triangles(tris, 5000, np.random.default_rng(2)),
+                             tris.reshape(-1, 3)])
+    gap = (np.linalg.norm(points[:, None] - units.mem_pos[members][None], axis=2)
+           - units.mem_rad[members][None]).min(axis=1)
+    assert np.all(gap <= 1e-12)
+    assert units.mem_rad[members].max() <= model.fine_cell * math.sqrt(3.0) / 2.0 + 0.002
+
+
 def _assert_never_more_than_the_surfaces(model, urdf, extra):
     rng = np.random.default_rng(7)
     lower = np.array([-3.0, -2.0, -3.9, -3.0, -1.6, -3.0])
