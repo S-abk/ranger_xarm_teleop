@@ -378,6 +378,7 @@ class Base:
         self.last: Optional[Sample] = None
         self.fault = NONE                   # a session or sequence fault since the last cycle
         self.released = False               # the grip seen released since the last cycle
+        self.missing_seen = False           # a frame without the left controller since then
         self.last_tick: Optional[float] = None
         self.await_rest = False             # a drive ended; the at-rest event is due
         self.other_text = ''
@@ -395,7 +396,11 @@ class Base:
             if fault != Hold.NONE and self.fault == NONE:
                 self.fault = (SESSION_CHANGED if fault == Hold.SESSION_CHANGED
                               else SEQ_BACKWARDS)
-        if not sample.left_grip:
+        if sample.missing:
+            # Latched until the next cycle, like a fault: a frame without the left controller
+            # ends a drive even when the controller is back by the cycle. Never a release.
+            self.missing_seen = True
+        elif not sample.left_grip:
             # Latched until the next cycle: a release and a new press between two cycles
             # still end the drive (and need another press), as the clutch's release does.
             self.released = True
@@ -421,6 +426,9 @@ class Base:
         problem, sample = self._input(now)
         self.fault = NONE                   # consumed: it breaks this cycle's hold only
         released, self.released = self.released, False
+        missing, self.missing_seen = self.missing_seen, False
+        if problem == NONE and missing:
+            problem, sample = CONTROLLER_MISSING, None
         grip = sample is not None and sample.left_grip
         if sample is not None and (released or not sample.left_grip):
             self.need_release = False

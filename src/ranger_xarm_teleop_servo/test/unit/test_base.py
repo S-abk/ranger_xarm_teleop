@@ -496,3 +496,27 @@ def test_a_release_and_a_new_press_between_two_cycles_still_stop_the_drive():
     assert not r.b.driving
     out = r.step(grip=True, left=(0.0, -1.0), rest=MOVING)
     assert r.b.driving, 'the grip seen released and then held is a new press'
+
+
+def test_the_controller_back_with_the_grip_held_does_not_resume():
+    r = Rig()
+    r.drive(rest=MOVING)
+    stopped_by(r, bs.CONTROLLER_MISSING, left_missing=True, rest=MOVING)
+    outs = r.run(10, grip=True, left=(0.0, -1.0), rest=MOVING)
+    assert all(o.publish is None for o in outs) and not r.b.driving, 'a held grip resumed'
+
+
+def test_one_frame_without_the_left_controller_between_cycles_stops_the_drive():
+    r = Rig()
+    r.drive(rest=MOVING)
+    r.now += 0.01
+    r.seq += 1
+    r.b.on_sample(bs.sample_of(status(r.seq, r.session), joy(left_missing=True), r.now))
+    r.now += 0.01
+    r.seq += 1
+    r.b.on_sample(bs.sample_of(status(r.seq, r.session), joy(grip=True, left=(0.0, -1.0)),
+                               r.now))
+    out = r.b.tick(r.now, world(now=r.now, rest=MOVING), wall=r.now)
+    assert out.publish == (0.0, 0.0, 0.0) and out.reason == bs.CONTROLLER_MISSING
+    outs = r.run(10, grip=True, left=(0.0, -1.0), rest=MOVING)
+    assert all(o.publish is None for o in outs), 'no resume without a new press'
