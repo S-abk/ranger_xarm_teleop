@@ -393,7 +393,9 @@ the cameras running, stop: do not arm.
 4. Start again from stage 2's checks.
 
 Why, from the driver's source (xarm_ros2, `uf_robot_system_hardware.cpp`) and the controller
-manager's (ros2_control 4.48.1):
+manager's (ros2_control 4.48.1; the switch path is unchanged in 4.50.0, and the trajectory
+controller's start from the last commanded position unchanged from 4.42.2 to 4.43.1, both
+read in the source):
 
 - On any arm error, an emergency stop included, the driver deactivates every controller. When
   the arm is ready again it asks, once, for every listed controller to be activated, best
