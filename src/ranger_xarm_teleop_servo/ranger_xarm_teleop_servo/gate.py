@@ -99,6 +99,7 @@ class Hold(IntEnum):
     SERVO_NOT_READY = 18
     SERVO_HALTED = 19
     SOLVER = 20
+    STOPPING = 21           # G-18: the stop ramp of the last release still runs; then engage
 
 
 class Limit(IntEnum):
@@ -114,6 +115,7 @@ class Limit(IntEnum):
     JOINT_VELOCITY = 7
     JOINT_POSITION = 8
     LINK_KEEPOUT = 9
+    JOINT_ACCELERATION = 10     # G-18: the joint command's change was scaled to the limit
 
 
 # Slack for the re-check of a pose that was just clamped onto a bound.
@@ -163,6 +165,9 @@ class Env:
     # Tool velocity (m/s, base frame) that the solver's position-type constraints took out
     # of its last command; zero when none bound. The lead along it is absorbed (G-14).
     blocked: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # G-18: the node is still ramping the joint command of the last release to zero. A new
+    # engagement waits for it (the ramp is never cut short and never restarted from).
+    stopping: bool = False
 
 
 @dataclass(frozen=True)
@@ -633,6 +638,11 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
         return out(_released(state, latched), None, latched, Limit.NONE, False)
 
     if not state.engaged:
+        if env.stopping:
+            # G-18: the stop ramp of the last release ends first (at most 0.2 s); MoveIt
+            # Servo stays active for it. Not a fault: nothing is latched.
+            return out(replace(state, latched=latched, events=()), None, Hold.STOPPING,
+                       Limit.NONE, True)
         if not env.servo_active:
             since = state.waiting_since if state.waiting_since is not None else env.now
             if env.now - since > params.servo_ready_timeout:

@@ -195,6 +195,11 @@ def state_row(msg: Any) -> Dict[str, Any]:
                    keepout_pair=[str(msg.keepout_link), str(msg.keepout_obstacle)],
                    keepout_bound=bool(msg.keepout_bound),
                    keepout_commanded=commanded if math.isfinite(commanded) else None)
+    if hasattr(msg, 'joint_acceleration_limited'):
+        # G-18: what the joint acceleration limit did to this cycle's joint command (the
+        # command recorded is the one sent), and whether a stop ramp ran.
+        row.update(acceleration_limited=bool(msg.joint_acceleration_limited),
+                   stopping=bool(msg.stopping))
     if hasattr(msg, 'gripper_enabled'):
         # Gripper teleop: the command in force (None when teleop holds none) and the measured
         # opening (None when unknown) as separate fields, with the measurement's stamp.

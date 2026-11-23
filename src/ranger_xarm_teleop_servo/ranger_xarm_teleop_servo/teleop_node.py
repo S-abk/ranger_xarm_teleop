@@ -86,6 +86,7 @@ from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, InputSta
 from ranger_xarm_teleop_interfaces.srv import GetJointPath, SetArmOwner
 from ranger_xarm_teleop_servo import calls
 from ranger_xarm_teleop_servo import gripper as grip
+from ranger_xarm_teleop_servo import joint_accel as ja
 from ranger_xarm_teleop_servo import keepout as ko
 from ranger_xarm_teleop_servo import params as gate_params
 from ranger_xarm_teleop_servo import preview
@@ -197,6 +198,9 @@ SOLVER_LIMITS = {dls.LIMIT_JOINT_POSITION: Limit.JOINT_POSITION,
                  dls.LIMIT_JOINT_VELOCITY: Limit.JOINT_VELOCITY,
                  dls.LIMIT_TOOL_SPEED: Limit.TOOL_SPEED,
                  dls.LIMIT_LINK_KEEPOUT: Limit.LINK_KEEPOUT}
+# The limits the acceleration limit (G-18) is shown instead of when it acted: speed-type limits
+# it acts after. Position-type bounds (offset, keep-out, joint position) stay the ones shown.
+ACCELERATION_OUTRANKS = (Limit.NONE, Limit.TOOL_SPEED, Limit.JOINT_VELOCITY, Limit.LEAD)
 # Solver tuning parameters (not safety limits) and their SolverParams fields.
 SOLVER_TUNING = {'solver_gain': 'gain', 'damping_threshold': 'damping_threshold',
                  'max_damping': 'max_damping',
@@ -363,6 +367,9 @@ class TeleopNode(Node):
         self.declare_parameter('robot_description_timeout_s', 15.0)
         # G-15: PENDING for hardware, so no default; the cell is a model resolution.
         self.declare_parameter('link_keepout_margin_m', Parameter.Type.DOUBLE)
+        # G-18: PENDING for hardware, simulation values in the simulation-only file; no default.
+        for name in ja.NAMES:
+            self.declare_parameter(name, Parameter.Type.DOUBLE)
         self.declare_parameter('link_keepout_cell_m', ko.DEFAULT_CELL)
         for name in SOLVER_TUNING:
             self.declare_parameter(name, Parameter.Type.DOUBLE)
@@ -416,6 +423,22 @@ class TeleopNode(Node):
                                                             self.params.target_period)
         except ValueError as err:           # MissingGripperValue included
             raise StartupRefused(str(err)) from err
+        # G-18: the joint acceleration limit and joint speed cap of the joint command, both
+        # required; a stop from the cap must take at most ja.STOP_TIME_LIMIT_S.
+        motion = {name: self._value_or_none(name) for name in ja.NAMES}
+        missing = [name for name, value in motion.items() if value is None]
+        if missing:
+            raise StartupRefused('required safety values without a default are not set: '
+                                 + ', '.join(missing))
+        try:
+            ja.check_values(motion[ja.ACCELERATION_NAME], motion[ja.SPEED_CAP_NAME])
+        except ValueError as err:
+            raise StartupRefused(str(err)) from err
+        refusal = ja.stop_time_refusal(motion[ja.ACCELERATION_NAME], motion[ja.SPEED_CAP_NAME])
+        if refusal:
+            raise StartupRefused(refusal)
+        self.acceleration_limit = float(motion[ja.ACCELERATION_NAME])
+        self.joint_speed_cap = float(motion[ja.SPEED_CAP_NAME])
         tuning = {}
         for name, field in SOLVER_TUNING.items():
             value = self._value_or_none(name)
@@ -425,7 +448,8 @@ class TeleopNode(Node):
             self.solver_params = dls.SolverParams(
                 linear_speed_cap=self.params.linear_speed_cap,
                 angular_speed_cap=self.params.angular_speed_cap,
-                period=self.params.target_period, **tuning)
+                period=self.params.target_period, joint_speed_cap=self.joint_speed_cap,
+                joint_acceleration_limit=self.acceleration_limit, **tuning)
         except ValueError as err:
             raise StartupRefused(f'solver: {err}') from err
         names = self._value_or_none('joint_velocity_limit_names', strings=True) or []
@@ -521,6 +545,12 @@ class TeleopNode(Node):
         self.solution: Optional[dls.Solution] = None
         self.lead = (0.0, 0.0)
         self.solver_fault = ''                # why the last command could not be made
+        # G-18: the joint command last sent (rad/s; None before the first), whether a stop
+        # ramp runs, and what the limit did this cycle.
+        self.sent: Optional[np.ndarray] = None
+        self.stopping = False
+        self.acceleration_limited = False
+        self.acceleration_scale = 1.0
 
         # Ownership.
         self.owner = ArmOwner.OWNER_NONE
@@ -1188,7 +1218,7 @@ class TeleopNode(Node):
                   servo_halted=self.servo_halted() or stuck, solver_ready=solver_ready,
                   arming_conditioning=(self.arming_conditioning(joints)
                                        if self.state.arm_pending else math.inf),
-                  blocked=blocked)
+                  blocked=blocked, stopping=self.stopping)
         marks.append(('tool pose', self.mono()))
         engaged_before = self.state.engaged
         self.state, output = tick(self.state, env, self.params)
@@ -1216,7 +1246,7 @@ class TeleopNode(Node):
                 self.publish_target(output.target, stamp)
                 self._command_steps.append(('publish target', self.mono() - published))
         else:
-            self.stop_command(stamp)
+            self.stop_cycle(stamp, owner)
             self.solver_fault = ''
         marks.append(('target and joint command', self.mono()))
         if self.gripper_params.enabled:
@@ -1224,7 +1254,8 @@ class TeleopNode(Node):
             marks.append(('gripper', self.mono()))
         self.publish_calibration(stamp)
         self.watch_servo_reads(now)
-        self.manage_servo(now, output.want_servo_active)
+        # MoveIt Servo stays active while a stop ramp runs (G-18).
+        self.manage_servo(now, output.want_servo_active or self.stopping)
         marks.append(('servo calls', self.mono()))
         self.manage_ownership(now, owner)
         marks.append(('mux calls', self.mono()))
@@ -1422,16 +1453,25 @@ class TeleopNode(Node):
         if not why:
             self.keepout_watch(solution, engaged_before)
         if why:
-            # Never send a guess: stop now, and the gate releases the clutch next cycle.
-            self.get_logger().error(f'{why}; sending a stop, clutch released')
-            self.stop_command(stamp, force=True)
+            # Never send a guess: no new command; the last one is ramped to zero at the limit
+            # (G-18), and the gate releases the clutch next cycle.
+            self.get_logger().error(f'{why}; stopping, clutch released')
+            self.solution = None
+            self.stop_cycle(stamp, ArmOwner.OWNER_TELEOP if self.owner_reported_teleop()
+                            else ArmOwner.OWNER_NONE)
             self.solver_fault = why
             return False
+        # G-18: the change from the command last sent is limited, all joints together.
+        previous = self.sent if self.sent is not None else np.zeros_like(solution.qdot)
+        step = ja.limit_step(previous, solution.qdot, self.acceleration_limit,
+                             self.params.target_period)
+        self.acceleration_limited, self.acceleration_scale = step.limited, step.scale
         self.solution = solution
-        self.own_reference = reference + solution.qdot * self.params.target_period
+        self.own_reference = reference + step.velocity * self.params.target_period
         self.lead = (v_norm(v_sub(output.target.p, tool.p)), q_between(output.target.q, tool.q))
         publishing = self.mono()
-        self.publish_joint_command(solution.qdot, stamp)
+        self.publish_joint_command(step.velocity, stamp)
+        self.sent = step.velocity
         self._command_steps.append(('publish joint command', self.mono() - publishing))
         self.commanding = True
         return True
@@ -1514,16 +1554,70 @@ class TeleopNode(Node):
         response.message = '\n'.join(lines)
         return response
 
+    def stop_cycle(self, stamp, owner: int) -> None:
+        """
+        Bring the joint command to rest in a cycle without a target (G-18).
+
+        A release, every gate fault and a disarm ramp the last command to zero at the
+        acceleration limit, all joints scaled together; MoveIt Servo stays active until the
+        zero has been sent. Immediate (one zero now) only where this node cannot command the
+        arm through Servo: teleop no longer owns the arm, Servo has halted, or Servo is not
+        running. The rest are not this node's to shape: Servo's and the controller's command
+        timeouts, an emergency stop.
+        """
+        moving = (self.commanding and self.sent is not None and self.arm is not None
+                  and bool(np.any(self.sent != 0.0)))
+        if not moving:
+            self.stop_command(stamp)
+            return
+        immediate = self.immediate_stop_reason(owner)
+        if immediate:
+            self.get_logger().warning(f'joint command stopped at once: {immediate}',
+                                      throttle_duration_sec=1.0)
+            self.stop_command(stamp, force=True)
+            return
+        if not self.stopping:
+            self._end_engagement()
+        step = ja.ramp_step(self.sent, self.acceleration_limit, self.params.target_period)
+        self.publish_joint_command(step.velocity, stamp)
+        self.sent = step.velocity
+        self.acceleration_limited, self.acceleration_scale = step.limited, step.scale
+        self.stopping = step.limited
+        if not step.limited:                # the zero went out this cycle
+            self.commanding = False
+
+    def immediate_stop_reason(self, owner: int) -> str:
+        """Return why the joint command cannot be ramped through MoveIt Servo, or ''."""
+        if owner != ArmOwner.OWNER_TELEOP:
+            return 'teleop no longer owns the arm'
+        if self.servo_halted():
+            return 'MoveIt Servo halted'
+        if self.servo_state != SERVO_ACTIVE:
+            return 'MoveIt Servo is not running'
+        return ''
+
+    def owner_reported_teleop(self) -> bool:
+        """Return whether the newest owner report says teleop owns the arm."""
+        return self.current_owner(self.mono()) == ArmOwner.OWNER_TELEOP
+
     def stop_command(self, stamp, force: bool = False) -> None:
         """
-        Send one zero command in the cycle the clutch releases (INV-8).
+        Send one zero command at once, and end the engagement's command state.
 
-        Joint-jog commands are velocities: without it MoveIt Servo would keep the last
-        one until its command timeout.
+        Used when nothing is moving (no zero is needed unless a command was sent), and for
+        the immediate stops of ``stop_cycle``. Joint-jog commands are velocities: without
+        the zero MoveIt Servo would keep the last one until its command timeout.
         """
         if (self.commanding or force) and self.arm is not None:
             self.publish_joint_command([0.0] * len(self.arm.joint_names), stamp)
         self.commanding = False
+        self.stopping = False
+        self.sent = None
+        self.acceleration_limited, self.acceleration_scale = False, 1.0
+        self._end_engagement()
+
+    def _end_engagement(self) -> None:
+        """Forget the engagement's solver state (G-10); the command sent is kept apart."""
         self.first_command_at = None
         self.output_confirmed = False
         self.confirmed_at = math.inf
@@ -1564,12 +1658,19 @@ class TeleopNode(Node):
         solution = self.solution if output.target is not None else None
         if limit == Limit.NONE and solution is not None:
             limit = SOLVER_LIMITS.get(solution.limit, Limit.NONE)
+        # G-18: the acceleration limit shaped the command (or a stop ramp runs). It outranks
+        # the speed-type limits it acts after; a position-type bound stays the one shown.
+        if self.acceleration_limited and limit in ACCELERATION_OUTRANKS:
+            limit = Limit.JOINT_ACCELERATION
         # MoveIt Servo slowing or halting the arm outranks this node's own solver limits:
         # it is the collision backstop, and the operator has to know it is acting.
-        if (output.engaged and (limit == Limit.NONE or limit in SOLVER_LIMITS.values())
+        if (output.engaged and (limit == Limit.NONE or limit in SOLVER_LIMITS.values()
+                                or limit == Limit.JOINT_ACCELERATION)
                 and self.servo_status_current() and self.servo_status > 0):
             limit = Limit.SERVO
         msg.active_limit = int(limit)
+        msg.joint_acceleration_limited = bool(self.acceleration_limited)
+        msg.stopping = bool(self.stopping)
         if solution is not None:
             msg.conditioning = float(solution.conditioning)
             msg.damped = bool(solution.damped)
