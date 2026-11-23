@@ -57,7 +57,7 @@ HOLD_REASON = {
     9: 'OUT_OF_VIEW', 10: 'HEAD_ABSENT', 11: 'HEAD_EMULATED', 12: 'RESET_CHANGED',
     13: 'SESSION_CHANGED', 14: 'SEQ_BACKWARDS', 15: 'INPUT_JUMP', 16: 'STEP_REJECTED',
     17: 'TOOL_POSE_STALE', 18: 'SERVO_NOT_READY', 19: 'SERVO_HALTED', 20: 'SOLVER',
-    21: 'STOPPING'}
+    21: 'STOPPING', 22: 'BASE_DRIVE', 23: 'BASE_MOVING', 24: 'BASE_ODOM', 25: 'BASE_TURNED'}
 HOLD_SERVO_HALTED = 19
 MERGE_S = 0.5               # a status halt and the hold it causes are one event
 TREND_S = 1.0               # how far back the trend of the measure is reported

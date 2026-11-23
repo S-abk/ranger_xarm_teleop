@@ -31,7 +31,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Deque, Dict, Optional, Tuple
 
-from .frames import ARM_BUTTON, CALIBRATE_BUTTON, CLUTCH_BUTTON, SCALE_BUTTON, TRIGGER_AXIS
+from .frames import (ARM_BUTTON, CALIBRATE_BUTTON, CLUTCH_BUTTON, LEFT_GRIP_BUTTON, SCALE_BUTTON,
+                     TRIGGER_AXIS)
 from .gate import Frame
 
 PAIR_WAIT_S = 0.02          # how long a status waits for the pose and joy of its frame
@@ -155,4 +156,5 @@ def gate_frame(status, joy, controller, head, arrival: float) -> Frame:
         arm=have_buttons and bool(buttons[ARM_BUTTON]),
         scale_toggle=have_buttons and bool(buttons[SCALE_BUTTON]),
         trigger=trigger,
+        left_grip=len(buttons) > LEFT_GRIP_BUTTON and bool(buttons[LEFT_GRIP_BUTTON]),
     )

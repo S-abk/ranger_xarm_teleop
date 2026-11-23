@@ -125,6 +125,11 @@ class GateParams:
     min_arming_conditioning: float = DEFAULTS['min_arming_conditioning']
     translation_scale_fine: float = DEFAULTS['translation_scale_fine']
     translation_scale_coarse: float = DEFAULTS['translation_scale_coarse']
+    # G-19: base driving is on in this stack. Only then does the gate read the left grip and
+    # the base's motion; off, the gate's outputs are those of a stack without a base.
+    base_driving: bool = False
+    # After a drive, the clutch waits this long for the base to come to rest, then refuses.
+    base_rest_wait_s: float = 2.0
 
     def translation_scale(self, coarse: bool) -> float:
         """Return the coarse or the fine translation scale."""

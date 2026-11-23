@@ -144,9 +144,20 @@ class HeadingWatch:
         self.turned = 0.0
 
     def on_odometry(self, yaw: Optional[float]) -> None:
-        """Take a fresh odometry yaw."""
-        if self.calibrated and self.yaw0 is not None and yaw is not None:
-            self.turned = max(self.turned, yaw_difference(yaw, self.yaw0))
+        """
+        Take a fresh odometry yaw.
+
+        A calibration made before any odometry takes the first yaw that follows as its
+        reference, unless a turn was commanded in between (the base turns only when commanded;
+        a turn without odometry has already made the calibration invalid).
+        """
+        if not self.calibrated or yaw is None:
+            return
+        if self.yaw0 is None:
+            if not self.unmeasured_turn:
+                self.yaw0 = yaw
+            return
+        self.turned = max(self.turned, yaw_difference(yaw, self.yaw0))
 
     def on_turn_command(self, wz: float, odometry_fresh: bool) -> None:
         """Take a commanded turning rate seen on the base command."""

@@ -138,6 +138,16 @@ def test_a_calibration_made_without_odometry_is_invalid_after_any_commanded_turn
     assert h.invalid()
 
 
+def test_a_calibration_before_any_odometry_takes_the_first_yaw_after_it():
+    h = HeadingWatch(math.radians(5.0))
+    h.on_calibration(None)
+    h.on_odometry(1.0)
+    h.on_odometry(1.0 + math.radians(4.0))
+    assert not h.invalid()
+    h.on_odometry(1.0 + math.radians(6.0))
+    assert h.invalid()
+
+
 def test_translation_keeps_the_calibration():
     h = HeadingWatch(math.radians(5.0))
     h.on_calibration(1.0)

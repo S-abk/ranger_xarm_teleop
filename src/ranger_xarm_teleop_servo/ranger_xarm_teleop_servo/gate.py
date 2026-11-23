@@ -100,6 +100,11 @@ class Hold(IntEnum):
     SERVO_HALTED = 19
     SOLVER = 20
     STOPPING = 21           # G-18: the stop ramp of the last release still runs; then engage
+    # G-19, only with base driving on (GateParams.base_driving):
+    BASE_DRIVE = 22         # the left grip (hold to drive the base) is held: refused, latched
+    BASE_MOVING = 23        # the base still moves by odometry; engage at rest (wait, bounded)
+    BASE_ODOM = 24          # no fresh odometry: whether the base is at rest is unknown
+    BASE_TURNED = 25        # the base turned past the set angle since the calibration
 
 
 class Limit(IntEnum):
@@ -144,6 +149,8 @@ class Frame:
     # Right trigger, analog 0..1; None when the frame's Joy has no such value. Read only by
     # the gripper logic (gripper.py); the arm's mapping never uses it.
     trigger: Optional[float] = None
+    # Left grip (hold to drive the base, G-19). Read only with base driving on.
+    left_grip: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,6 +175,11 @@ class Env:
     # G-18: the node is still ramping the joint command of the last release to zero. A new
     # engagement waits for it (the ramp is never cut short and never restarted from).
     stopping: bool = False
+    # G-19, read only with base driving on: the base's motion by the node's own odometry
+    # (base_rest.AT_REST, MOVING, UNKNOWN), and whether it turned past the set angle since
+    # the calibration in force (or was commanded to turn with no odometry to measure it).
+    base_motion: int = 0
+    base_turned: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,6 +197,7 @@ class GateState:
     latched: Hold = Hold.NONE         # cleared when the grip is seen released
     engaged: bool = False
     waiting_since: Optional[float] = None
+    base_wait_since: Optional[float] = None     # G-19: waiting for the base to come to rest
     clutch: Optional[Pose] = None     # controller pose (pivot applied) at engagement
     tool0: Optional[Pose] = None      # measured tool pose at engagement (G-6 offset limit)
     anchor: Optional[Pose] = None     # origin of the mapping: tool0 plus the absorbed lead
@@ -396,12 +409,18 @@ def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Ho
         return Hold.INPUT_STALE
     if state.trip != Hold.NONE:
         return state.trip
+    if params.base_driving:
+        base = _base_reason(state, env, frame)
+        if base != Hold.NONE:
+            return base
     reason = _pose_reason(frame, params)
     if reason != Hold.NONE:
         return reason
     if state.calibration is None or not state.calibration.valid_for(frame.session_id,
                                                                     frame.reset_count):
         return Hold.NOT_CALIBRATED
+    if params.base_driving and env.base_turned:
+        return Hold.BASE_TURNED
     if env.tool_pose is None or not env.tool_pose_age <= params.tool_pose_timeout:
         return Hold.TOOL_POSE_STALE
     if not env.solver_ready:
@@ -410,6 +429,28 @@ def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Ho
         return Hold.SERVO_NOT_READY         # MoveIt Servo stopped running under the clutch
     if state.engaged and env.servo_halted:
         return Hold.SERVO_HALTED            # the arm stands still; the target must not run on
+    return Hold.NONE
+
+
+# base_rest.MOVING, UNKNOWN (kept as numbers: the gate does not import the base's modules).
+BASE_MOVING_STATE, BASE_UNKNOWN_STATE = 1, 2
+
+
+def _base_reason(state: GateState, env: Env, frame: Frame) -> Hold:
+    """
+    Return the G-19 condition of the base, or NONE (only called with base driving on).
+
+    The first to be held wins: the left grip refuses an engagement, but does not release an
+    engaged clutch (the base node refuses the drive instead). Motion of the base while the
+    clutch is engaged releases it (the target is relative to the base). A base still moving
+    before an engagement is waited for in ``tick``, not refused here.
+    """
+    if not state.engaged and frame.left_grip:
+        return Hold.BASE_DRIVE
+    if env.base_motion == BASE_UNKNOWN_STATE:
+        return Hold.BASE_ODOM
+    if state.engaged and env.base_motion == BASE_MOVING_STATE:
+        return Hold.BASE_MOVING
     return Hold.NONE
 
 
@@ -561,9 +602,9 @@ def bound(pose: Pose, tool0: Pose, fallback: Pose,
 
 def _released(state: GateState, latched: Hold) -> GateState:
     """Return the state with the clutch disengaged and its per-engagement data cleared."""
-    return replace(state, engaged=False, waiting_since=None, clutch=None, tool0=None,
-                   anchor=None, filtered=None, last_target=None, trip=Hold.NONE, latched=latched,
-                   events=())
+    return replace(state, engaged=False, waiting_since=None, base_wait_since=None, clutch=None,
+                   tool0=None, anchor=None, filtered=None, last_target=None, trip=Hold.NONE,
+                   latched=latched, events=())
 
 
 ARM_REFUSED_MOTION_DISABLED = (
@@ -638,6 +679,16 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
         return out(_released(state, latched), None, latched, Limit.NONE, False)
 
     if not state.engaged:
+        if params.base_driving and env.base_motion == BASE_MOVING_STATE:
+            # G-19: the base still moves after a drive; engage once it rests, as long as the
+            # grip is held, within base_rest_wait_s; after that the clutch is refused.
+            since = state.base_wait_since if state.base_wait_since is not None else env.now
+            if env.now - since > params.base_rest_wait_s:
+                events.append('clutch not engaged: the base did not come to rest')
+                return out(_released(state, Hold.BASE_MOVING), None, Hold.BASE_MOVING,
+                           Limit.NONE, False)
+            return out(replace(state, base_wait_since=since, latched=latched, events=()), None,
+                       Hold.BASE_MOVING, Limit.NONE, False)
         if env.stopping:
             # G-18: the stop ramp of the last release ends first (at most 0.2 s); MoveIt
             # Servo stays active for it. Not a fault: nothing is latched.
@@ -652,7 +703,7 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
             waiting = replace(state, waiting_since=since, latched=latched, events=())
             return out(waiting, None, Hold.SERVO_NOT_READY, Limit.NONE, True)
         # Engagement: every per-engagement quantity restarts here (G-10).
-        state = replace(state, engaged=True, waiting_since=None,
+        state = replace(state, engaged=True, waiting_since=None, base_wait_since=None,
                         clutch=apply_pivot(frame.controller, params.pivot_offset),
                         tool0=env.tool_pose, anchor=env.tool_pose,
                         heading=state.calibration.heading,

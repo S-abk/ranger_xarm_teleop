@@ -76,14 +76,16 @@ from typing import Dict, Optional, Tuple
 
 from ament_index_python.packages import get_package_share_directory
 from control_msgs.msg import JointJog
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped, TwistStamped
 from moveit_msgs.msg import ServoStatus
 from moveit_msgs.srv import ServoCommandType
+from nav_msgs.msg import Odometry
 import numpy as np
 from ranger_xarm_teleop_bridge.topics import (HEAD_POSE_TOPIC, JOY_TOPIC, POSE_TOPICS,
                                               STATUS_QOS, STATUS_TOPIC)
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, InputStatus, TeleopState
 from ranger_xarm_teleop_interfaces.srv import GetJointPath, SetArmOwner
+from ranger_xarm_teleop_servo import base_rest
 from ranger_xarm_teleop_servo import calls
 from ranger_xarm_teleop_servo import gripper as grip
 from ranger_xarm_teleop_servo import joint_accel as ja
@@ -119,6 +121,7 @@ TARGET_TOPIC = '/teleop/target_pose'
 PREVIEW_TOPIC = '/teleop/preview/target_pose'   # only while motion is disabled
 STATE_TOPIC = '/teleop/state'
 OWNER_TOPIC = '/teleop/mux/owner'
+BASE_CMD_TOPIC = '/teleop/base/cmd_vel'     # G-19: read only, for the calibration's turn
 SET_OWNER_SERVICE = '/teleop/mux/set_owner'
 DISARM_SERVICE = '/teleop/disarm'
 JOINT_PATH_SERVICE = '/teleop/joint_path'
@@ -406,6 +409,12 @@ class TeleopNode(Node):
         self.declare_parameter('joint_velocity_limit_names', Parameter.Type.STRING_ARRAY)
         self.declare_parameter('joint_velocity_limits', Parameter.Type.DOUBLE_ARRAY)
         # Gripper teleop: off by default (G-1); its range and speed have no default.
+        # G-19: base driving in this stack (off by default). Only then does the gate read the
+        # left grip and the base's odometry; the turn that invalidates the calibration has no
+        # default (PENDING for hardware; simulation value in the simulation-only file).
+        self.declare_parameter('base_driving', False)
+        self.declare_parameter('base_turn_recalibrate_deg', Parameter.Type.DOUBLE)
+        self.declare_parameter('base_odom_topic', '/odom')
         self.declare_parameter('gripper_enabled', False)
         self.declare_parameter('gripper_joint', grip.DEFAULTS['gripper_joint'])
         for name in grip.REQUIRED_WHEN_ENABLED + ('gripper_close_threshold',
@@ -446,6 +455,26 @@ class TeleopNode(Node):
         except ValueError as err:
             raise StartupRefused(str(err)) from err
         self._check_plane_points()
+        self.base_driving = bool(self.get_parameter('base_driving').value)
+        self.base_rest: Optional[base_rest.RestWatch] = None
+        self.heading: Optional[base_rest.HeadingWatch] = None
+        if self.base_driving:
+            if self.hardware_limits:
+                raise StartupRefused('base driving is simulation only (G-19): base_driving must '
+                                     'be false on the hardware path')
+            turn = self._value_or_none('base_turn_recalibrate_deg')
+            if turn is None:
+                raise StartupRefused('base_turn_recalibrate_deg is required with base driving on '
+                                     '(G-19) and has no default; the simulation value is in the '
+                                     'simulation-only limits file')
+            try:
+                self.heading = base_rest.HeadingWatch(math.radians(float(turn)))
+            except ValueError as err:
+                raise StartupRefused(str(err)) from err
+            self.base_rest = base_rest.RestWatch(base_rest.RestParams())
+            self.params = replace(self.params, base_driving=True)
+        self.calibration_seen = None
+        self.base_turn_logged = False
         gripper_values = {'gripper_enabled': bool(self.get_parameter('gripper_enabled').value),
                           'gripper_joint': str(self.get_parameter('gripper_joint').value)}
         for name in grip.REQUIRED_WHEN_ENABLED + ('gripper_close_threshold',
@@ -669,6 +698,12 @@ class TeleopNode(Node):
         self.create_subscription(String, '/robot_description', self._on_robot_description,
                                  LATCHED_QOS)
         self.create_subscription(ArmOwner, OWNER_TOPIC, self._on_owner, 10)
+        if self.base_driving:
+            # G-19: read only. The base's motion from odometry, and the base's turn commands
+            # for a calibration made or kept without odometry; no publisher toward the base.
+            self.create_subscription(Odometry, str(self.get_parameter('base_odom_topic').value),
+                                     self._on_base_odom, 50)
+            self.create_subscription(TwistStamped, BASE_CMD_TOPIC, self._on_base_cmd, 10)
         self.create_subscription(ServoStatus, f'{servo}/status', self._on_servo_status, 10)
 
         self.pause_client = self.create_client(SetBool, f'{servo}/pause_servo')
@@ -759,7 +794,38 @@ class TeleopNode(Node):
                 # between two cycles freezes the gripper in the next one.
                 self.gripper_tripped = True
             self.state = on_frame(self.state, frame, self.params)
+            self._note_calibration()
             self.frames.done(key)
+
+    # ---- G-19: the base (read only; only with base driving on) ----
+
+    def _on_base_odom(self, msg: Odometry) -> None:
+        t, q = msg.twist.twist, msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self.base_rest.add(self.mono(), t.linear.x, t.linear.y, t.angular.z, yaw)
+        self.heading.on_odometry(yaw)
+
+    def _on_base_cmd(self, msg: TwistStamped) -> None:
+        self.heading.on_turn_command(float(msg.twist.angular.z), self.base_rest.fresh(self.mono()))
+
+    def _note_calibration(self) -> None:
+        """Give the heading watch each new calibration, with the odometry yaw at that moment."""
+        calibration = self.state.calibration
+        if calibration is None or calibration is self.calibration_seen:
+            return
+        self.calibration_seen = calibration
+        if self.heading is not None:
+            self.heading.on_calibration(self.base_rest.fresh_yaw(self.mono()))
+            self.base_turn_logged = False
+
+    def _base_turned(self) -> bool:
+        if self.heading is None or not self.heading.invalid():
+            return False
+        if not self.base_turn_logged:
+            self.base_turn_logged = True
+            self.get_logger().warning('calibration no longer holds: ' + self.heading.describe()
+                                      + '; calibrate again (A)')
+        return True
 
     def _diagnose_frame(self, status: InputStatus, key: int, waited: float) -> None:
         """
@@ -1315,7 +1381,10 @@ class TeleopNode(Node):
                   servo_halted=self.servo_halted() or stuck, solver_ready=solver_ready,
                   arming_conditioning=(self.arming_conditioning(joints)
                                        if self.state.arm_pending else math.inf),
-                  blocked=blocked, stopping=self.stopping)
+                  blocked=blocked, stopping=self.stopping,
+                  base_motion=(self.base_rest.state(now) if self.base_rest is not None
+                               else base_rest.AT_REST),
+                  base_turned=self._base_turned())
         marks.append(('tool pose', self.mono()))
         engaged_before = self.state.engaged
         self.state, output = tick(self.state, env, self.params)

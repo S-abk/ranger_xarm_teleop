@@ -138,7 +138,8 @@ class ResetNode(Node):
             press_threshold=float(p('reset_press_threshold', defaults.press_threshold).value),
             hold_threshold=float(p('reset_hold_threshold', defaults.hold_threshold).value),
             dwell_s=float(p('reset_dwell_s', defaults.dwell_s).value),
-            watchdog_timeout_s=WATCHDOG_TIMEOUT_S)
+            watchdog_timeout_s=WATCHDOG_TIMEOUT_S,
+            base_driving=bool(p('base_driving', False).value))     # G-19
         try:
             self.reset = rs.Reset(params, self.posture, postures[self.posture],
                                   self.joint_names, lambda: uuid.uuid4().bytes)

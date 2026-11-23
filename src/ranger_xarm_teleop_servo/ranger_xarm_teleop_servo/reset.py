@@ -51,7 +51,7 @@ from dataclasses import dataclass
 import math
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from ranger_xarm_teleop_bridge.joy_layout import AXIS_NAMES
+from ranger_xarm_teleop_bridge.joy_layout import AXIS_NAMES, BUTTON_NAMES
 
 from .calls import JointWatch, STILL_RAD
 from .gate import frame_fault, Hold
@@ -60,6 +60,8 @@ from .params import INPUT_TIMEOUT_S
 from .session import may_recover, NO_TELEOP_AFTER_S, OWNER_MOVEIT, STATE_FRESH_S
 
 STICK_AXIS = AXIS_NAMES.index('right_thumbstick_y')      # positive when pulled back
+STICK_X_AXIS = AXIS_NAMES.index('right_thumbstick_x')    # G-19: the base's turn
+LEFT_GRIP_BUTTON = BUTTON_NAMES.index('left_grip')        # G-19: hold to drive the base
 TRIGGER_AXIS = AXIS_NAMES.index('right_trigger')          # NaN when there is no controller
 
 # ResetState.STATE_* (checked against the message file by the unit tests).
@@ -153,13 +155,22 @@ class Sample:
     seq: int
     xr_time: float
     stick: Optional[float]
+    # G-19, read only with base driving on: the left grip (driving the base) and the right
+    # stick's x axis (the base's turn).
+    left_grip: bool = False
+    stick_x: float = 0.0
 
 
 def sample_of(status, joy, arrival: float) -> Sample:
     """Return the reset's sample of one paired frame (status and its joy, or None)."""
     stick = None if controller_missing(joy) else float(joy.axes[STICK_AXIS])
+    left_grip, stick_x = False, 0.0
+    if joy is not None:
+        left_grip = len(joy.buttons) > LEFT_GRIP_BUTTON and bool(joy.buttons[LEFT_GRIP_BUTTON])
+        if len(joy.axes) > STICK_X_AXIS and math.isfinite(joy.axes[STICK_X_AXIS]):
+            stick_x = float(joy.axes[STICK_X_AXIS])
     return Sample(arrival, int(status.session_id), int(status.seq),
-                  float(status.xr_time_ms) / 1000.0, stick)
+                  float(status.xr_time_ms) / 1000.0, stick, left_grip, stick_x)
 
 
 @dataclass(frozen=True)
@@ -177,6 +188,10 @@ class Params:
     at_posture_rad: float = 0.01        # every joint this close: at the posture
     goal_answer_s: float = 2.0          # move_group answers a goal (and a result) within this
     cancel_answer_s: float = 0.5        # a cancel request without an answer is asked again
+    # G-19: base driving is on in this stack. Then a reset is refused while the left grip is
+    # held, and the stick counts as pulled only while its pull dominates its x axis (the
+    # base's turn). Off, the reset is as it was.
+    base_driving: bool = False
 
     def check(self) -> None:
         """Raise ValueError for settings that cannot work."""
@@ -359,7 +374,15 @@ class Reset:
             return self.fault, None
         if self.last.stick is None:
             return CONTROLLER_MISSING, None
+        if self.params.base_driving and not abs(self.last.stick) > abs(self.last.stick_x):
+            return NONE, 0.0                # a turn of the base, not a pull (G-19)
         return NONE, self.last.stick
+
+    def _refusal(self, world: World) -> int:
+        """Return why a reset may not start now: the left grip (G-19), then the world."""
+        if self.params.base_driving and self.last is not None and self.last.left_grip:
+            return BASE_DRIVE
+        return refusal(world, self.params.absent_after_s)
 
     def on_joints(self, when: float, positions) -> None:
         """Take one joint state (a mapping of joint name to position)."""
@@ -545,7 +568,7 @@ class Reset:
         if broken == NONE and not self.need_release and stick >= self.params.press_threshold:
             self.state, self.reason, self.detail = WAITING, NONE, ''
             self.dwell_since = now
-            self.dwell_refusal = refusal(world, self.params.absent_after_s)
+            self.dwell_refusal = self._refusal(world)
             return self._dwell(now, world, True)
         return None
 
@@ -555,7 +578,7 @@ class Reset:
             self.need_release = True
             return None
         if self.dwell_refusal == NONE:
-            self.dwell_refusal = refusal(world, self.params.absent_after_s)
+            self.dwell_refusal = self._refusal(world)
         if now - self.dwell_since < self.params.dwell_s:
             return None
         self.need_release = True                        # whatever happens, a new press next
