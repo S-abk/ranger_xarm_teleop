@@ -47,7 +47,9 @@ LIMIT_TOOL_SPEED = 3
 EVENTS = ('START', 'REFUSED', 'STOPPED', 'AT_REST')
 
 RECENT_S = 30.0          # a refusal or stop stays on the panel this long
-MAX_PUBLISHERS_CHARS = 40
+# 'base command: ' and the names fill one 40-character line of the page, so the refusal with its
+# age stays within the page's three lines.
+MAX_PUBLISHERS_CHARS = 26
 
 DEFAULT_PATTERNS: Dict[str, Pattern] = {
     'START': Pattern(((0.6, 100, 0),), 2),                          # one short pulse

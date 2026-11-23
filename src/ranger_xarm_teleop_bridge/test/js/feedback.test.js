@@ -699,7 +699,8 @@ test('base: the longest texts are wrapped whole, never cut', () => {
   const longest = [
     'Base: driving, release left grip to stop (stick up = robot front) (slowed: tool speed)',
     'Base: driving; turn ignored, centre the left stick to turn (slowed: tool speed)',
-    'Base refused: another node publishes the base command: /a_long_publisher_name_x… (29 s ago)',
+    'Base refused: another node publishes the base command: /xxxxxxxxxxxxxxxxxxxxxxxx… (29 s ago)',
+    'Base refused: another node publishes the base command: /a_node, /b_node, /c_node… (29 s ago)',
     'Base refused: release the right grip (arm clutch) first (29 s ago)',
   ];
   for (const text of longest) {

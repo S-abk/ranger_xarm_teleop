@@ -251,8 +251,10 @@ def test_lines_age_for_30_seconds_then_go():
 def test_another_publisher_is_named_and_clipped():
     assert text(S_REFUSED, CODE['OTHER_PUBLISHER'], other='/joy_teleop') == \
         'Base refused: another node publishes the base command: /joy_teleop (2 s ago)'
-    long = text(S_REFUSED, CODE['OTHER_PUBLISHER'], other='/' + 'x' * 100)
-    assert len(long) < 110 and '…' in long
+    long = text(S_REFUSED, CODE['OTHER_PUBLISHER'], age=29.0, other='/' + 'x' * 100)
+    assert long == ('Base refused: another node publishes the base command: /' + 'x' * 24
+                    + '… (29 s ago)')
+    assert len(long) <= 3 * 40           # the page's three lines of 40 characters
     assert text(S_REFUSED, CODE['INPUT_STALE'], other='/ignored') == \
         'Base refused: headset input late or lost (2 s ago)'
 
