@@ -167,14 +167,15 @@ REQUEST_RETRY_S = 1.0       # pause between ownership requests after a refusal
 # calls"): the owner is read back from the mux's report and the request is asked again only if
 # teleop still wants an owner it does not have. Longer than the mux usually takes (its wait for
 # stillness, 1 s, and controller-manager calls answered in well under a second each). The mux
-# can take longer (up to three calls of 1 s + 3 s each when the controller manager is slow,
-# about 13 s), but it publishes no owner report while it serves a request (one executor), so
-# a report is fresh only when it is not serving one, and a repeat is never sent meanwhile.
+# can take longer (a request queued behind its timer's own controller read, then up to three
+# calls, each of 1 s + 3 s when the controller manager is slow: about 17 s), but it publishes
+# no owner report while it serves a request or reads (one executor), so a report is fresh only
+# when it is doing neither, and a repeat is never sent meanwhile.
 OWNER_REQUEST_TIMEOUT_S = 5.0
 # An arm request whose outcome is still unknown this long after it was sent (no fresh report
 # from the mux) disarms: the arm press does not wait on a silent mux, and teleop never takes
-# the arm by itself long after it. Longer than the mux's worst case for one request (13 s).
-OWNER_UNKNOWN_LIMIT_S = 15.0
+# the arm by itself long after it. Longer than the mux's worst case for one request (17 s).
+OWNER_UNKNOWN_LIMIT_S = 20.0
 OWNER_NAMES = {ArmOwner.OWNER_NONE: 'nobody', ArmOwner.OWNER_MOVEIT: 'MoveIt',
                ArmOwner.OWNER_TELEOP: 'teleop', ArmOwner.OWNER_SWITCHING: 'a switch in progress'}
 
