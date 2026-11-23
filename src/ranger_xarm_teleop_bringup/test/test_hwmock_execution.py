@@ -255,6 +255,9 @@ def test_one_short_armed_stroke_with_the_teleop_check(stage3):
     assert verdicts.get('target lead (largest, translation)') == 'PASS', output[-4000:]
     # G-18: the stage-4 stop rules are on MoveIt Servo's output against the limits file; the
     # joint-state acceleration is information only (a 20 ms window, MoveIt's value shown).
+    # G-18 judged where it is enforced: the teleop node's own command steps.
+    assert verdicts.get('commanded joint acceleration (teleop joint command)') == 'PASS', \
+        output[-4000:]
     assert verdicts.get('commanded joint acceleration (MoveIt Servo output)') == 'PASS', \
         output[-4000:]
     assert verdicts.get('stop time after a release') in ('PASS', 'NOT JUDGED'), output[-4000:]

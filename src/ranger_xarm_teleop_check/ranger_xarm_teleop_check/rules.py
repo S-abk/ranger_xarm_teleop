@@ -26,7 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ranger_xarm_teleop_servo.joint_accel import ACCELERATION_NAME, STOP_TIME_LIMIT_S
+from ranger_xarm_teleop_servo.joint_accel import ACCELERATION_NAME, IMMEDIATE_STOP_LOG
+from ranger_xarm_teleop_servo.joint_accel import STOP_TIME_LIMIT_S
 
 from . import stats
 from .sysinfo import is_number
@@ -671,6 +672,71 @@ def _ms(seconds) -> Optional[float]:
     return None if seconds is None else float(seconds) * 1e3
 
 
+JOG_RULE = 'commanded joint acceleration (teleop joint command)'
+
+
+def jog_measures(data: dict, limit: Optional[float]) -> dict:
+    """
+    Return the step of the teleop node's own joint command, cycle to cycle (G-18).
+
+    The node limits each change of its command to ``limit`` x the command period on every
+    joint (ranger_xarm_teleop_servo.joint_accel). A step is ``max |v_k - v_k-1| / period`` over
+    the arm joints, between consecutive JointJog commands. A step to all zeros above the limit
+    is the node's immediate stop (teleop lost the arm, or Servo halted), which it announces on
+    /rosout; the announcements are counted from ``data['rosout']['immediate_stops']``.
+    """
+    jog = stats.jog_commands(data.get('jog', []))
+    steps, to_zero = [], []
+    for before, after in zip(jog, jog[1:]):
+        steps.append(float(np.max(np.abs(after - before))) / COMMAND_PERIOD_S)
+        to_zero.append(not np.any(after))
+    out = {'messages': len(data.get('jog', [])), 'commands': len(jog), 'steps': len(steps),
+           'moved': any(bool(np.any(v)) for v in jog),
+           'peak': max(steps) if steps else None, 'above': None, 'above_to_zero': None,
+           'announced': int((data.get('rosout') or {}).get('immediate_stops', 0))}
+    if limit is not None:
+        bound = limit * (1.0 + COMMAND_ROUNDING)
+        out['above'] = sum(1 for s, z in zip(steps, to_zero) if s > bound and not z)
+        out['above_to_zero'] = sum(1 for s, z in zip(steps, to_zero) if s > bound and z)
+    return out
+
+
+def rule_jog_acceleration(jm: dict, opts: Options) -> Result:
+    """Judge the teleop node's own command: every step within the limit, where G-18 acts."""
+    name = JOG_RULE
+    limit, todo = _command_limit(opts)
+    threshold = (f'every step of the teleop command <= {ACCELERATION_NAME}'
+                 + (f' = {limit:g} rad/s^2' if limit is not None else ' (limit not known)')
+                 + f', as max over the arm joints of |change| / {COMMAND_PERIOD_S:g} s between '
+                 'consecutive commands; a step to zero above it only as an immediate stop the '
+                 f"node announced ('{IMMEDIATE_STOP_LOG}' on /rosout: teleop lost the arm, or "
+                 'MoveIt Servo halted)')
+    measured = (f"peak {_fmt(jm['peak'], '.3f')} rad/s^2 over {jm['steps']} steps of "
+                f"{jm['commands']} commands on {opts.jog_topic}")
+    if jm['messages'] != jm['commands']:
+        measured += f"; {jm['messages'] - jm['commands']} messages without all six arm joints"
+    if limit is None:
+        return Result(name, NOT_JUDGED, measured, threshold, todo)
+    measured += (f"; {jm['above']} steps above the limit, {jm['above_to_zero']} steps to zero "
+                 f"above it, {jm['announced']} immediate stops announced")
+    if not jm['moved']:
+        return Result(name, NOT_JUDGED, measured, threshold,
+                      f'no teleop joint command with motion on {opts.jog_topic}: engage the '
+                      'clutch and move during the run (is --jog-topic the topic MoveIt Servo '
+                      'reads?)')
+    if jm['above']:
+        return Result(name, FAIL, measured, threshold,
+                      'a stop: (procedure stage 4): the teleop node changed its joint command '
+                      'faster than the limit it enforces; release the grip, keep the report '
+                      'and report it')
+    if jm['above_to_zero'] > jm['announced']:
+        return Result(name, FAIL, measured, threshold,
+                      'a stop: (procedure stage 4): the joint command went to zero at once '
+                      'more often than the node announced an immediate stop; keep the report '
+                      'and report it')
+    return Result(name, PASS, measured, threshold)
+
+
 def rule_command_acceleration(cm: dict, opts: Options) -> Result:
     """Servo's output: every point's acceleration within 2 x 1.05 x the limit (a stop above)."""
     name = 'commanded joint acceleration (MoveIt Servo output)'
@@ -1037,6 +1103,8 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
         cm = command_measures(data, _command_limit(opts)[0],
                               latency if isinstance(latency, (int, float)) else 0.0)
         measures['servo_command'] = cm
-        results += [rule_command_acceleration(cm, opts), info_unexplained_acceleration(cm, opts),
-                    rule_stop_time(cm, latency)]
+        jm = jog_measures(data, _command_limit(opts)[0])
+        measures['teleop_command'] = jm
+        results += [rule_jog_acceleration(jm, opts), rule_command_acceleration(cm, opts),
+                    info_unexplained_acceleration(cm, opts), rule_stop_time(cm, latency)]
     return measures, results

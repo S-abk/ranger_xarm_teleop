@@ -45,6 +45,10 @@ ACCELERATION_NAME = 'joint_acceleration_limit_rad_s2'
 SPEED_CAP_NAME = 'joint_speed_cap_rad_s'
 NAMES = (ACCELERATION_NAME, SPEED_CAP_NAME)
 
+# The teleop node's log line when it sends one zero at once instead of a ramp (teleop lost the
+# arm, or MoveIt Servo halted); the check tool counts these lines on /rosout.
+IMMEDIATE_STOP_LOG = 'joint command stopped at once'
+
 # Relative slack for floating-point rounding when deciding whether a step was limited.
 _ROUNDING = 1e-9
 

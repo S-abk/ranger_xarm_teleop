@@ -1658,8 +1658,9 @@ class TeleopNode(Node):
             self.stop_command(stamp)
             return
         if immediate:
-            self.get_logger().warning(f'joint command stopped at once: {immediate}',
-                                      throttle_duration_sec=1.0)
+            # Not throttled: the check tool counts these lines against the steps to zero.
+            # At most one per engagement (the zero ends it; a new grip starts the next).
+            self.get_logger().warning(f'{ja.IMMEDIATE_STOP_LOG}: {immediate}')
             self.stop_command(stamp, force=True)
             return
         if not self.stopping:

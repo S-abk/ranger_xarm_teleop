@@ -282,6 +282,45 @@ def test_simulation_keeps_planes_without_a_wrist_frame_and_says_what_they_bound(
         node.close()
 
 
+class _Warnings:
+    """A logger that keeps its warnings, with their keyword arguments."""
+
+    def __init__(self):
+        self.lines = []
+
+    def warning(self, text, **kwargs):
+        self.lines.append((text, kwargs))
+
+    def info(self, text, **kwargs):
+        pass
+
+
+def test_every_immediate_stop_is_logged_unthrottled(ros):
+    """The check tool counts these lines against the steps to zero: two within 1 s are two."""
+    from types import SimpleNamespace
+
+    import numpy as np
+    from ranger_xarm_teleop_servo import joint_accel as ja
+    from ranger_xarm_teleop_servo.gate import Hold
+    node = TeleopNode(node_name='teleop_immediate_stops', parameter_overrides=overrides(LIMITS))
+    try:
+        log, sent = _Warnings(), []
+        node.get_logger = lambda: log
+        node.publish_joint_command = lambda velocities, stamp: sent.append(list(velocities))
+        node.arm = SimpleNamespace(joint_names=[f'xarm_joint{i}' for i in range(1, 7)])
+        stamp = node.get_clock().now().to_msg()
+        for _ in range(2):                  # two engagements, each ended by a Servo halt
+            node.commanding, node.sent = True, np.full(6, 0.3)
+            node.stop_cycle(stamp, ArmOwner.OWNER_TELEOP, Hold.SERVO_HALTED)
+        assert sent == [[0.0] * 6, [0.0] * 6]
+        assert [text for text, _ in log.lines] == [
+            f'{ja.IMMEDIATE_STOP_LOG}: MoveIt Servo halted'] * 2
+        assert all(not kwargs for _, kwargs in log.lines)
+    finally:
+        node.arm = None
+        node.close()
+
+
 def test_hardware_limits_refuse_simulation_only_values(ros):
     values = {**HARDWARE, 'limits_are_simulation_only': True}
     with pytest.raises(StartupRefused, match='never loads simulation-only'):
