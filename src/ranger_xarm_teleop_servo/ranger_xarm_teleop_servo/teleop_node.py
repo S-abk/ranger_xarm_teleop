@@ -417,7 +417,8 @@ class TeleopNode(Node):
         self.quest_frame = str(self.get_parameter('quest_frame').value)
         servo = str(self.get_parameter('servo_node').value).rstrip('/')
         self.simulation_only = bool(self.get_parameter('limits_are_simulation_only').value)
-        if bool(self.get_parameter('hardware_limits').value):
+        self.hardware_limits = bool(self.get_parameter('hardware_limits').value)
+        if self.hardware_limits:
             if self.simulation_only:
                 raise StartupRefused(
                     'the hardware path never loads simulation-only limit values: pass your own '
@@ -843,11 +844,15 @@ class TeleopNode(Node):
             f'links {model.units.names}, built in {took:.2f} s, fingerprint '
             f'{model.fingerprint[:12]}')
         for item in model.excluded:
-            extra = ('' if item.reason == 'adjacent' else
-                     f' (clearance {item.low * 1000.0:.1f} to {item.high * 1000.0:.1f} mm over '
-                     'the sampled postures)')
-            self.get_logger().warning(
-                f'link keep-out: {item.moving} - {item.other} left out: {item.reason}{extra}')
+            self.get_logger().warning(f'link keep-out: {ko.excluded_text(item, model.margin)}')
+        keepable = [item for item in model.excluded if ko.kept_by_smaller_margin(item)]
+        if keepable and self.hardware_limits:
+            # A pair the margin silently drops is not kept clear at all; on hardware the
+            # margin is chosen again instead (docs/HARDWARE_PROCEDURE.md, "Values you supply").
+            raise StartupRefused(
+                f'link keep-out: link_keepout_margin_m {model.margin:g} m leaves out '
+                + '; '.join(ko.excluded_text(item, model.margin) for item in keepable)
+                + '; choose a smaller margin (docs/HARDWARE_PROCEDURE.md, "Values you supply")')
         if model.not_covered:
             self.get_logger().warning(
                 'link keep-out: not covered (behind joints that are neither fixed nor arm '

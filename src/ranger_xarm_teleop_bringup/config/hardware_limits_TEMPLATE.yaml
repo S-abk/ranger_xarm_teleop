@@ -28,8 +28,9 @@
     view_cone_half_angle_deg: PENDING
     # What it bounds: the largest translation of the target in one target cycle (20 ms); a larger
     # step releases the clutch. Divided by the cycle it is also the raw controller speed above which
-    # input is held as a jump. Unit: metres per cycle. How to choose: a fraction of the simulation
-    # value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    # input is held as a jump. Unit: metres per cycle. How to choose: a glitch detector, above
+    # ordinary hand speed (the arm's speed is bounded by the caps, the lead limit and the joint
+    # acceleration limit); see docs/HARDWARE_PROCEDURE.md, "Values you supply".
     step_translation_limit_m: PENDING
     # What it bounds: the largest rotation of the target in one target cycle (20 ms); a larger step
     # releases the clutch. Divided by the cycle it is also the raw controller rate above which input
@@ -69,7 +70,9 @@
     # What it bounds: the clearance the arm's links and the tool keep from the robot's fixed
     # structure, by the keep-out model. Unit: metres. How to choose: above MoveIt Servo's
     # self-collision threshold and move_group's planning padding, plus the overshoot you measured on
-    # this arm's controller; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    # this arm's controller, and below the largest clearance of every link pair (a pair closer than
+    # the margin in every posture is left out, and the hardware path refuses to start); see
+    # docs/HARDWARE_PROCEDURE.md, "Values you supply".
     link_keepout_margin_m: PENDING
     # What it bounds: how old the measured tool pose may be before the gate stops motion.
     # Unit: seconds. How to choose: from the stage 2 joint-state check: at least 3 times the
