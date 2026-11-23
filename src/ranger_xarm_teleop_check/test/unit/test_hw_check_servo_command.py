@@ -18,7 +18,7 @@ import json
 
 import numpy as np
 
-from ranger_xarm_teleop_check import report as rep, rules, stats
+from ranger_xarm_teleop_check import report as rep, rules, stats, sysinfo
 from ranger_xarm_teleop_check.rules import FAIL, INFO, NOT_JUDGED, Options, PASS
 from test_hw_check_rules import _teleop_data, motion_data
 
@@ -86,12 +86,13 @@ def servo_data(cmds, release_at=None, capture=(0.0, 100.0), engage_at=None, **kw
 
 
 def options(limit=LIMIT, given=True):
-    return Options(limits_given=given, joint_acceleration_limit=limit)
+    return Options(limits_given=given, joint_acceleration_limit=limit, servo_latency_s=0.0)
 
 
-def judge(data, opts=None):
-    cm = rules.command_measures(data, rules._command_limit(opts or options())[0])
-    return cm, rules.rule_command_acceleration(cm, opts or options()), rules.rule_stop_time(cm)
+def judge(data, opts=None, latency=0.0):
+    cm = rules.command_measures(data, rules._command_limit(opts or options())[0], latency)
+    return (cm, rules.rule_command_acceleration(cm, opts or options()),
+            rules.rule_stop_time(cm, latency))
 
 
 # ---- stats: the position path ----------------------------------------------------------
@@ -268,23 +269,25 @@ def test_a_release_with_a_ramp_of_0_18_s_passes():
     cm, accel, stop = judge(release_run(9))
     assert stop.rule == STOP and stop.verdict == PASS, stop.line()
     assert accel.verdict == PASS
-    assert len(cm['stops']) == 1 and abs(cm['stops'][0]['duration_s'] - 0.16) < 1e-6
+    # Measured from the release (5 ms before the ramp's first point) to the end of motion.
+    assert len(cm['stops']) == 1 and abs(cm['stops'][0]['duration_s'] - 0.165) < 1e-6
     assert '1 releases with motion of 1 seen' in stop.measured
-    assert 'longest 0.160 s' in stop.measured
+    assert 'longest 0.165 s' in stop.measured
     assert '0.2 s + 0.02 s command period = 0.22 s' in stop.threshold
-    assert 'one cycle late' in stop.threshold
+    assert 'up to one cycle after the release' in stop.threshold
 
 
 def test_a_release_with_a_ramp_of_0_30_s_fails_as_a_stop():
     cm, accel, stop = judge(release_run(15))
     assert accel.verdict == PASS                     # slower than the limit, but too long
     assert stop.verdict == FAIL and 'a stop: (procedure stage 4)' in stop.line()
-    assert abs(cm['stops'][0]['duration_s'] - 0.28) < 1e-6
+    assert abs(cm['stops'][0]['duration_s'] - 0.285) < 1e-6     # from the release, 5 ms early
 
 
 def test_the_stop_time_limit_is_the_limit_plus_one_cycle():
-    assert judge(release_run(12))[2].verdict == PASS      # 0.22 s
-    assert judge(release_run(13))[2].verdict == FAIL      # 0.24 s
+    # Measured from the release, 5 ms before the ramp's first point.
+    assert judge(release_run(11))[2].verdict == PASS      # 0.205 s
+    assert judge(release_run(12))[2].verdict == FAIL      # 0.225 s, above 0.22 s
 
 
 def test_each_release_is_listed_and_the_window_ends_at_the_next_engage():
@@ -299,7 +302,7 @@ def test_each_release_is_listed_and_the_window_ends_at_the_next_engage():
                        (EPOCH_NS + k2 * STEP_NS - 5_000_000, False)]
     cm, _, stop = judge(data)
     assert stop.verdict == PASS and len(cm['stops']) == 2 and cm['releases_seen'] == 2
-    assert all(abs(s['duration_s'] - 0.16) < 1e-6 for s in cm['stops'])
+    assert all(abs(s['duration_s'] - 0.165) < 1e-6 for s in cm['stops'])
     assert '2 releases with motion of 2 seen' in stop.measured
 
 
@@ -337,7 +340,7 @@ def test_a_stall_of_the_output_inside_a_stop_counts_into_it():
                        for k, (a, s, n, p) in enumerate(data['command'])]
     cm, accel, stop = judge(data)
     assert cm['runs'] == 2
-    assert abs(cm['stops'][0]['duration_s'] - 0.31) < 1e-6
+    assert abs(cm['stops'][0]['duration_s'] - 0.315) < 1e-6
     assert stop.verdict == FAIL and not cm['stops'][0]['unfinished']
 
 
@@ -412,7 +415,7 @@ def test_the_teleop_stage_judges_the_servo_output_end_to_end(tmp_path):
     data = _teleop_data()
     data.update(release_run(9))
     opts = Options(limits_given=True, tool_pose_timeout_s=1.0, max_lead_translation_m=0.05,
-                   joint_acceleration_limit=LIMIT)
+                   joint_acceleration_limit=LIMIT, servo_latency_s=0.0)
     measures, results = rules.evaluate('teleop', data, opts)
     by = {r.rule: r for r in results}
     assert by[NAME].verdict == PASS and by[STOP].verdict == PASS
@@ -428,3 +431,37 @@ def test_the_teleop_stage_judges_the_servo_output_end_to_end(tmp_path):
 
 def _reject(constant):
     raise ValueError('not JSON: ' + constant)
+
+
+# ---- the release on Servo's point times (max_expected_latency) -----------------------------
+
+def _shifted(data, seconds):
+    """Return ``data`` with every Servo point stamped ``seconds`` later, as Servo does."""
+    shift = int(round(seconds * 1e9))
+    rows = [(r[0], r[1] + shift) + tuple(r[2:]) for r in data['command']]
+    return dict(data, command=rows)
+
+
+def test_servos_latency_moves_the_release_onto_its_point_times():
+    """Points stamped 0.06 s ahead read the same stop once the release is moved by 0.06 s."""
+    plain = judge(release_run(9))[0]['stops'][0]['duration_s']
+    data = _shifted(release_run(9), 0.06)
+    late = judge(data, latency=0.06)
+    assert abs(late[0]['stops'][0]['duration_s'] - plain) < 1e-6 and late[2].verdict == PASS
+    # Not moved, the same points would read the lead as part of the stop.
+    unmoved = judge(data, latency=0.0)[0]['stops'][0]['duration_s']
+    assert abs(unmoved - (plain + 0.06)) < 1e-6
+
+
+def test_without_servos_latency_the_stop_is_not_judged():
+    cm = rules.command_measures(release_run(9), LIMIT)
+    stop = rules.rule_stop_time(cm, None)
+    assert stop.verdict == NOT_JUDGED and 'max_expected_latency' in stop.measured
+
+
+def test_the_latency_is_read_from_the_teleop_servo_yaml():
+    import os
+    path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'ranger_xarm_teleop_bringup',
+                        'config', 'servo.yaml')
+    assert sysinfo.servo_latency(path) == 0.06
+    assert sysinfo.servo_latency(os.path.join(os.path.dirname(__file__), 'missing.yaml')) is None

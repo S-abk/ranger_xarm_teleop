@@ -280,3 +280,15 @@ def choose_qos(publisher_profiles, default_reliability: str, default_durability:
     durability = ('volatile' if any(d == 'volatile' for _, d in publisher_profiles)
                   else default_durability)
     return reliability, durability
+
+
+def servo_latency(path: str) -> Optional[float]:
+    """Return ``max_expected_latency`` (s) of a MoveIt Servo yaml file, or None."""
+    data, problem = load_yaml_file(path)
+    if problem or not isinstance(data, dict):
+        return None
+    value = data.get('max_expected_latency')
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and value >= 0.0 else None

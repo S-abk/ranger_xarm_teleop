@@ -135,6 +135,9 @@ class Options:
     joint_limits_given: bool = False
     joint_acceleration_limits: Dict[str, Optional[float]] = field(default_factory=dict)
     joint_acceleration_limit: Any = None
+    # MoveIt Servo's max_expected_latency (s): how far ahead of its cycle it stamps each point,
+    # from the servo.yaml the teleop launch loads; None when it could not be read.
+    servo_latency_s: Any = None
     command_topic: str = DEFAULT_COMMAND_TOPIC
     expect_fingerprint: Optional[str] = None
     expect_active: Tuple[str, ...] = ()
@@ -587,7 +590,7 @@ def _command_limit(opts: Options) -> Tuple[Optional[float], str]:
     return float(value), ''
 
 
-def command_measures(data: dict, limit: Optional[float]) -> dict:
+def command_measures(data: dict, limit: Optional[float], latency: float = 0.0) -> dict:
     """
     Return the peaks, skips, spacing and stops of Servo's output (``data['command']``).
 
@@ -620,7 +623,7 @@ def command_measures(data: dict, limit: Optional[float]) -> dict:
     if origin is not None:
         rel = [(r - origin) * 1e-9 for r in releases]
         eng = [(e - origin) * 1e-9 for e in engages]
-        stops = stats.stop_durations(t, an, rel, eng, open_end)
+        stops = stats.stop_durations(t, an, rel, eng, open_end, latency)
     out = {'topic_messages': len(messages), 'skipped_messages': path['skipped'],
            'points': int(len(t)), 'runs': len(an['runs']), 'moved': moved,
            'open_start': open_start, 'open_end': open_end,
@@ -690,12 +693,19 @@ def rule_command_acceleration(cm: dict, opts: Options) -> Result:
     return Result(name, PASS, measured, threshold)
 
 
-def rule_stop_time(cm: dict) -> Result:
+def rule_stop_time(cm: dict, latency=None) -> Result:
     """After each release, Servo's output comes to rest within the stop time (plus a cycle)."""
     name = 'stop time after a release'
     bound = STOP_TIME_LIMIT_S + COMMAND_PERIOD_S
     threshold = (f'each stop <= {STOP_TIME_LIMIT_S:g} s + {COMMAND_PERIOD_S:g} s command period '
-                 f'= {bound:g} s (the extra period: a release is seen one cycle late)')
+                 f'= {bound:g} s (the extra period: MoveIt Servo takes up the first ramp command '
+                 'up to one cycle after the release); measured from the release to the end of '
+                 "motion in Servo's output, the release moved onto Servo's point times by its "
+                 f'max_expected_latency ({_fmt(latency, ".3f", " s")})')
+    if not isinstance(latency, (int, float)):
+        return Result(name, NOT_JUDGED, 'MoveIt Servo max_expected_latency not known',
+                      threshold, "the stop cannot be placed on Servo's point times: check that "
+                      'the bringup package and its config/servo.yaml are installed')
     stops = cm['stops']
     unfinished = [s for s in stops if s['unfinished']]
     durations = [s['duration_s'] for s in stops]
@@ -867,7 +877,9 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
         tm = teleop_measures(data)
         measures['teleop'] = tm
         results += rules_lead(tm, opts)
-        cm = command_measures(data, _command_limit(opts)[0])
+        latency = opts.servo_latency_s
+        cm = command_measures(data, _command_limit(opts)[0],
+                              latency if isinstance(latency, (int, float)) else 0.0)
         measures['servo_command'] = cm
-        results += [rule_command_acceleration(cm, opts), rule_stop_time(cm)]
+        results += [rule_command_acceleration(cm, opts), rule_stop_time(cm, latency)]
     return measures, results

@@ -48,6 +48,18 @@ COMMAND_DEPTH = 50
 CAMERA_DEFAULT_QOS = {'reliability': 'best_effort', 'depth': 10}
 
 
+def _servo_latency():
+    """Return MoveIt Servo's max_expected_latency (s) from the installed servo.yaml, or None."""
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        import os
+        path = os.path.join(get_package_share_directory('ranger_xarm_teleop_bringup'),
+                            'config', 'servo.yaml')
+    except Exception:  # noqa: B902 - not installed: the stop rule says it is not judged
+        return None
+    return sysinfo.servo_latency(path)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Return the argument parser."""
     ap = argparse.ArgumentParser(
@@ -97,6 +109,7 @@ def resolve_options(args) -> tuple:
         opts.tool_pose_timeout_s = sysinfo.limit_parameter(data, 'tool_pose_timeout_s')
         opts.max_lead_translation_m = sysinfo.limit_parameter(data, 'max_lead_translation_m')
         opts.joint_acceleration_limit = sysinfo.limit_parameter(data, ACCELERATION_NAME)
+    opts.servo_latency_s = _servo_latency()
     if args.joint_limits:
         data, problem = sysinfo.load_yaml_file(args.joint_limits)
         if problem:

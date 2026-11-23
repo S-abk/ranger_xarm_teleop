@@ -536,15 +536,17 @@ def clutch_events(samples: Sequence[Tuple[int, bool]]) -> Tuple[List[int], List[
 
 def stop_durations(t: Sequence[float], analysis: dict,
                    releases: Sequence[float], engages: Sequence[float],
-                   open_end: bool = False) -> List[dict]:
+                   open_end: bool = False, latency: float = 0.0) -> List[dict]:
     """
     Return, per release with motion, how long Servo's output took to stop.
 
-    ``releases`` and ``engages`` are times (s, the clock of ``t``). A release's window ends at
-    the next engage. The stop lasts from the first point at or after the release to the last
-    point whose segment speed (any joint) is above ``SERVO_REST_SPEED``, plus that segment (all
-    runs are scanned: a stall of Servo's output inside a stop counts into it);
-    0 when only the segment before the first point was moving. A release has motion when the
+    ``releases`` and ``engages`` are times (s, the clock of ``t``). MoveIt Servo stamps each
+    point ``latency`` (its ``max_expected_latency``) after the cycle that made it, so a release
+    at ``r`` falls at ``r + latency`` on the points' timeline; every release and engage is
+    shifted by it. A release's window ends at the next engage. The stop lasts from the
+    (shifted) release to the end of the last segment whose speed (any joint) is above
+    ``SERVO_REST_SPEED`` (all runs are scanned: a stall of Servo's output inside a stop counts
+    into it); 0 when nothing moved after the release. A release has motion when the
     segment into that point or any later segment in the window moves; the others are left out.
     ``unfinished`` is True when the stream ended (``open_end``) while the last segment still
     moved: the duration is then the time seen so far.
@@ -556,7 +558,8 @@ def stop_durations(t: Sequence[float], analysis: dict,
     runs = analysis['runs']
     out = []
     for release in releases:
-        end = min([e for e in engages if e > release], default=math.inf)
+        end = min([e for e in engages if e > release], default=math.inf) + latency
+        release = release + latency
         first = int(np.searchsorted(t, release, side='left'))
         if first >= len(t) or t[first] >= end:
             continue
@@ -570,7 +573,7 @@ def stop_durations(t: Sequence[float], analysis: dict,
                 last = j
         if not into and last is None:
             continue
-        duration = float(t[last + 1] - t[first]) if last is not None else 0.0
+        duration = max(float(t[last + 1] - release), 0.0) if last is not None else 0.0
         # The stream ended while the arm still moved: the capture cut it at a moving segment,
         # either the last one in the window or the one into the final point.
         if last is not None:
