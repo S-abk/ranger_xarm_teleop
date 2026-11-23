@@ -380,12 +380,13 @@ def test_without_a_fresh_owner_report_an_unanswered_request_is_not_asked_again(r
         assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP]
         lines = no_answer_lines(node)
         assert len(lines) == 1 and 'nothing is asked again' in lines[0]
-        assert node.mux_status == ArmOwner.STATUS_NO_ANSWER
-        assert node.state.want_armed                             # held, not disarmed
+        assert node.mux_status == ArmOwner.STATUS_OK             # nothing is being repeated
+        assert node.state.want_armed                             # held while the mux may serve
         at(node, 20.5, ArmOwner.OWNER_SWITCHING)                 # a switch in progress: wait
         assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP]
         at(node, 21.0, ArmOwner.OWNER_MOVEIT)                    # it reports: asked again
         assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP, ArmOwner.OWNER_TELEOP]
+        assert node.mux_status == ArmOwner.STATUS_NO_ANSWER     # now it is being repeated
     finally:
         node.close()
 
@@ -420,5 +421,67 @@ def test_a_late_answer_never_closes_the_newer_request(ros, granted):
         assert node.owner == ArmOwner.OWNER_MOVEIT               # the report is newer
         assert any(text.startswith('late answer') for _, text in node.log.lines)
         assert node.state.want_armed == granted
+    finally:
+        node.close()
+
+
+def test_an_arm_request_unknown_too_long_disarms(ros):
+    """The arm press does not wait on a silent mux, nor take the arm by itself much later."""
+    node = asking_node(ros)
+    try:
+        at(node, 10.0, ArmOwner.OWNER_MOVEIT)
+        at(node, 10.0 + teleop_node.OWNER_UNKNOWN_LIMIT_S - 0.1)
+        assert node.state.want_armed
+        at(node, 10.0 + teleop_node.OWNER_UNKNOWN_LIMIT_S + 0.1)
+        assert not node.state.want_armed and node.owner_request_since is None
+        at(node, 30.0, ArmOwner.OWNER_MOVEIT)                    # the mux is back: nothing asked
+        assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP]
+    finally:
+        node.close()
+
+
+def test_an_unknown_arm_request_disarms_when_the_mux_service_is_gone(ros):
+    node = asking_node(ros)
+    try:
+        at(node, 10.0, ArmOwner.OWNER_MOVEIT)
+        node.owner_client.service_is_ready = lambda: False
+        at(node, 15.5)
+        assert not node.state.want_armed and node.owner_request_since is None
+    finally:
+        node.close()
+
+
+def test_a_new_arm_request_after_an_unrepeated_one_is_not_called_a_repeat(ros):
+    """Status 6 only while a request is really being asked again; a new press starts clean."""
+    node = asking_node(ros)
+    try:
+        at(node, 10.0, ArmOwner.OWNER_MOVEIT)
+        at(node, 15.1, ArmOwner.OWNER_MOVEIT)                    # asked again: status 6
+        assert node.mux_status == ArmOwner.STATUS_NO_ANSWER
+        node._disarm('test')                                     # the operator gives up
+        at(node, 20.2, ArmOwner.OWNER_MOVEIT)                    # settled, nothing asked
+        assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP] * 2
+        node.state = replace(node.state, want_armed=True)       # a fresh press
+        at(node, 21.0, ArmOwner.OWNER_MOVEIT)
+        assert node.owner_client.requests == [ArmOwner.OWNER_TELEOP] * 3
+        assert node.mux_status == ArmOwner.STATUS_OK
+        assert sum(text.startswith('asking the command mux again')
+                   for _, text in node.log.lines) == 1                # only the real repeat
+    finally:
+        node.close()
+
+
+def test_a_late_answer_after_g17_changes_nothing(ros):
+    """G-17 forgets the open request; its late grant sets no owner and does not re-arm."""
+    node = asking_node(ros)
+    try:
+        at(node, 10.0, ArmOwner.OWNER_MOVEIT)                    # the request goes out
+        at(node, 10.2, ArmOwner.OWNER_TELEOP)                    # switched; no answer yet
+        at(node, 12.0, ArmOwner.OWNER_NONE)                      # G-17: teleop disarms
+        assert not node.state.want_armed and node.owner_request_since is None
+        node.owner_client.pending[0].answer(ArmOwner.OWNER_TELEOP)   # the answer, late
+        assert not node.state.want_armed and node.owner == ArmOwner.OWNER_NONE
+        assert node.owner_request_since is None
+        assert any(text.startswith('late answer') for _, text in node.log.lines)
     finally:
         node.close()
