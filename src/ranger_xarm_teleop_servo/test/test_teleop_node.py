@@ -287,9 +287,11 @@ def test_target_state_and_joint_command_match_the_contract(harness):
     h.play('clutch_line')
     assert len(h.targets) > 100
     commands = {stamp_key(c.header.stamp): c for c in h.commands}
-    # One command per target, plus one zero command when the clutch releases.
-    assert len(h.commands) == len(h.targets) + 1
-    assert not any(h.commands[-1].velocities)
+    # One command per target; at the release (the hand has stopped, so the ramp is one step)
+    # one zero, then FLUSH_CYCLES zeros that bring MoveIt Servo's window to rest (G-18).
+    flush = teleop_node.FLUSH_CYCLES
+    assert len(h.commands) == len(h.targets) + 1 + flush
+    assert all(not any(c.velocities) for c in h.commands[-1 - flush:])
     state_stamps = {stamp_key(s.header.stamp): s for s in h.states}
     for target in h.targets:
         assert target.header.frame_id == 'xarm_link_base'
@@ -752,14 +754,19 @@ def test_release_ramps_the_command_to_zero_starting_in_the_same_cycle(harness):
     i, state = releases[0]
     ramp = _ramp_from(h, state)
     assert len(ramp) >= 3                           # it was moving: a real ramp
-    # The states of the ramp say so; the cycle that sends the zero ends it.
+    # The states of the ramp say so. After its zero, FLUSH_CYCLES more zeros bring MoveIt
+    # Servo's window to rest (still stopping); then the ramp is over and nothing more is sent.
     assert all(s.stopping and s.joint_acceleration_limited
                for s in h.states[i:i + len(ramp) - 1])
-    assert not h.states[i + len(ramp) - 1].stopping
-    # Nothing is sent while the clutch stays released after the ramp.
-    end = stamp_key(h.states[i + len(ramp) - 1].header.stamp)
-    held = [s for s in h.states[i + len(ramp):] if not s.clutch_engaged]
-    assert not any(stamp_key(s.header.stamp) in {stamp_key(c.header.stamp) for c in h.commands}
+    flush = teleop_node.FLUSH_CYCLES
+    assert all(s.stopping for s in h.states[i + len(ramp) - 1:i + len(ramp) - 1 + flush])
+    assert not h.states[i + len(ramp) - 1 + flush].stopping
+    stamps = [stamp_key(c.header.stamp) for c in h.commands]
+    k = stamps.index(stamp_key(state.header.stamp)) + len(ramp)
+    assert [list(c.velocities) for c in h.commands[k:k + flush]] == [[0.0] * 6] * flush
+    end = stamp_key(h.states[i + len(ramp) - 1 + flush].header.stamp)
+    held = [s for s in h.states[i + len(ramp) + flush:] if not s.clutch_engaged]
+    assert not any(stamp_key(s.header.stamp) in set(stamps)
                    for s in held if stamp_key(s.header.stamp) > end)
 
 

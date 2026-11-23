@@ -198,6 +198,11 @@ SOLVER_LIMITS = {dls.LIMIT_JOINT_POSITION: Limit.JOINT_POSITION,
                  dls.LIMIT_JOINT_VELOCITY: Limit.JOINT_VELOCITY,
                  dls.LIMIT_TOOL_SPEED: Limit.TOOL_SPEED,
                  dls.LIMIT_LINK_KEEPOUT: Limit.LINK_KEEPOUT}
+# G-18: zero commands sent after a stop ramp's zero, before MoveIt Servo is paused. Servo
+# publishes every point of its window but the newest and keeps max_expected_latency of them
+# (0.06 s in servo.yaml, 3 cycles); paused at once, the ramp's last points never reach the
+# controller, which then holds from the last speed it got: a step at the end of every ramp.
+FLUSH_CYCLES = 3
 # The limits the acceleration limit (G-18) is shown instead of when it acted: the speed-type
 # limits it acts after (the panel ranks them alike). The lead clamp and the position-type bounds
 # (offset, keep-out, joint position) rank higher and stay the ones shown;
@@ -555,6 +560,7 @@ class TeleopNode(Node):
         # ramp runs, and what the limit did this cycle.
         self.sent: Optional[np.ndarray] = None
         self.stopping = False
+        self.flush_left = 0                 # zero commands still to send after a ramp's zero
         self.acceleration_limited = False
         self.acceleration_scale = 1.0
 
@@ -1567,19 +1573,32 @@ class TeleopNode(Node):
 
         A release, every gate fault and a disarm ramp the last command to zero at the
         acceleration limit, all joints scaled together; MoveIt Servo stays active until the
-        zero has been sent. Immediate (one zero now) only where this node cannot command the
-        arm through Servo: teleop no longer owns the arm, or Servo has halted (its halt status,
+        zero and FLUSH_CYCLES more zeros have been sent (its window reaches rest).
+        Immediate (one zero now) only where this node cannot command the arm through Servo:
+        teleop no longer owns the arm, or Servo has halted (its halt status,
         or its collision slow-down holding the arm still: HOLD_SERVO_HALTED). A Servo whose
         state is unknown or paused still gets the ramp: if it runs, it executes it; if not,
         nothing moves either way. The rest are not this node's to shape: Servo's and the
         controller's command timeouts, an emergency stop.
         """
+        immediate = self.immediate_stop_reason(owner, hold)
+        if self.flush_left > 0 and self.arm is not None:
+            if immediate:
+                self.stop_command(stamp, force=True)
+                return
+            # The ramp is at zero; Servo's window is flushed with zeros before the pause.
+            self.publish_joint_command([0.0] * len(self.arm.joint_names), stamp)
+            self.flush_left -= 1
+            self.acceleration_limited, self.acceleration_scale = False, 1.0
+            if self.flush_left == 0:
+                self.stopping = False
+                self.commanding = False
+            return
         moving = (self.commanding and self.sent is not None and self.arm is not None
                   and bool(np.any(self.sent != 0.0)))
         if not moving:
             self.stop_command(stamp)
             return
-        immediate = self.immediate_stop_reason(owner, hold)
         if immediate:
             self.get_logger().warning(f'joint command stopped at once: {immediate}',
                                       throttle_duration_sec=1.0)
@@ -1591,9 +1610,9 @@ class TeleopNode(Node):
         self.publish_joint_command(step.velocity, stamp)
         self.sent = step.velocity
         self.acceleration_limited, self.acceleration_scale = step.limited, step.scale
-        self.stopping = step.limited
-        if not step.limited:                # the zero went out this cycle
-            self.commanding = False
+        self.stopping = True
+        if not step.limited:                # the zero went out this cycle: flush, then pause
+            self.flush_left = FLUSH_CYCLES
 
     def immediate_stop_reason(self, owner: int, hold: Optional[Hold] = None) -> str:
         """Return why the joint command cannot be ramped through MoveIt Servo, or ''."""
@@ -1626,6 +1645,7 @@ class TeleopNode(Node):
             self.publish_joint_command([0.0] * len(self.arm.joint_names), stamp)
         self.commanding = False
         self.stopping = False
+        self.flush_left = 0
         self.sent = None
         self.acceleration_limited, self.acceleration_scale = False, 1.0
         self._end_engagement()
