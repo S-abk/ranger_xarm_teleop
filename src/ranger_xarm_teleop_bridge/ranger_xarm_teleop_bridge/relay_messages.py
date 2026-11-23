@@ -30,6 +30,7 @@ import json
 import math
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from . import base_feedback
 from .episode_feedback import EVENT_NAMES
 from .operator_status import EPISODE_STATE_NAMES
 from .reset_feedback import REASON_NAMES, STATE_NAMES
@@ -134,6 +135,20 @@ def status_payload(msg, run: int, seq: int, panel: Dict[str, Any], stale_ms: flo
             if valid else None,
             'text': str(msg.reset_text) if valid else '',
             'event_age_s': _num(msg.reset_event_age) if valid else None,
+        }
+    # Likewise the base section: only once a base state has been seen.
+    if math.isfinite(float(getattr(msg, 'base_age', math.nan))):
+        valid = bool(msg.base_valid)
+        body['base'] = {
+            'valid': valid,
+            'state': base_feedback.STATE_NAMES.get(int(msg.base_state),
+                                                   f'UNKNOWN_{int(msg.base_state)}')
+            if valid else None,
+            'reason': base_feedback.REASON_NAMES.get(int(msg.base_reason),
+                                                     f'UNKNOWN_{int(msg.base_reason)}')
+            if valid else None,
+            'text': str(msg.base_text) if valid else '',
+            'event_age_s': _num(msg.base_event_age) if valid else None,
         }
     return body
 

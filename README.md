@@ -102,7 +102,7 @@ as ok. The items:
 - the recorder, the operator feedback node, and the reset node with its watchdog;
 - the headset connected and sending input;
 - the page version, which is ok only when this launcher started the relay; otherwise the panel
-  footer must say `client feedback-6`.
+  footer must say `client feedback-7`.
 
 Once the headset is on, the panel shows the session's live state as before.
 
@@ -112,7 +112,7 @@ A correct start ends with (each line begins with the time):
 STACK READY: the probe has left; nothing joins the ROS graph from here.
 Put on the headset now.
 [     ok] Headset connected and sending input: 72 frames/s reach the bridge
-[     ok] Headset page version: client feedback-6: the page sending frames was loaded from this relay after it started
+[     ok] Headset page version: client feedback-7: the page sending frames was loaded from this relay after it started
 SESSION READY
 ```
 

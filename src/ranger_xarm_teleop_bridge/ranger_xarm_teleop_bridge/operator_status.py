@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 import math
 from typing import Dict, Optional
 
+from .base_feedback import base_text
 from .episode_feedback import EVENT_NAMES
 from .reset_feedback import reset_text
 
@@ -257,6 +258,20 @@ class ResetView:
     event_wall_time: float      # host wall clock of the newest event; NaN when none
 
 
+@dataclass(frozen=True)
+class BaseView:
+    """The fields of one BaseState message the panel shows."""
+
+    state: int
+    reason: int
+    mode: int
+    turn_ignored: bool
+    active_limit: int
+    reason_text: str            # names what else publishes the base command (OTHER_PUBLISHER)
+    last_event: int
+    event_wall_time: float      # host wall clock of the newest event; NaN when none
+
+
 @dataclass
 class Snapshot:
     """The fields of one OperatorStatus message (same names)."""
@@ -318,6 +333,7 @@ class StatusTracker:
     fault_latch_s: float = 10.0
     limit_hold_s: float = 1.0
     reset_stale_s: float = 0.5
+    base_stale_s: float = 0.5
     gripper_open: float = NAN
     gripper_closed: float = NAN
     _teleop: Optional[TeleopSample] = None
@@ -333,6 +349,8 @@ class StatusTracker:
     _refusal_count: int = -1
     _reset: Optional[ResetView] = None
     _reset_at: float = NAN
+    _base: Optional[BaseView] = None
+    _base_at: float = NAN
     events_missed: int = 0
     counts: Dict[str, int] = field(default_factory=lambda: {'teleop': 0, 'episode': 0})
 
@@ -363,6 +381,10 @@ class StatusTracker:
     def on_reset(self, r: ResetView, now: float) -> None:
         """Take one ResetState (``now``: monotonic arrival time, s)."""
         self._reset, self._reset_at = r, now
+
+    def on_base(self, b: BaseView, now: float) -> None:
+        """Take one BaseState (``now``: monotonic arrival time, s)."""
+        self._base, self._base_at = b, now
 
     @staticmethod
     def _severity(code: int) -> int:
@@ -450,6 +472,18 @@ class StatusTracker:
                 out.reset_event_age = max(0.0, wall_now - r.event_wall_time)
             out.reset_text = reset_text(r.state, r.reason, r.posture, r.moveit_error_code,
                                         out.reset_event_age)
+        b = self._base
+        if b is not None:
+            out.base_age = now - self._base_at
+        if b is not None and out.base_age <= self.base_stale_s:
+            out.base_valid = True
+            out.base_state = int(b.state)
+            out.base_reason = int(b.reason)
+            if int(b.last_event) != 0 and math.isfinite(b.event_wall_time):
+                out.base_event_age = max(0.0, wall_now - b.event_wall_time)
+            other = b.reason_text.split(': ', 1)[1] if ': ' in b.reason_text else ''
+            out.base_text = base_text(b.state, b.reason, b.mode, b.turn_ignored, b.active_limit,
+                                      out.base_event_age, other)
         return out
 
 

@@ -201,11 +201,11 @@ def test_headset_item_relay_role():
 
 def test_version_item():
     peers = {'peers': {'127.0.0.1:5': 't'}}
-    item = pf.version_item('feedback-6', False, peers)
-    assert item.status == pf.UNKNOWN and 'client feedback-6' in item.todo
-    assert pf.version_item('feedback-6', True, peers).status == pf.OK
-    item = pf.version_item('feedback-6', True, {'peers': {}})
-    assert item.status == pf.UNKNOWN and 'client feedback-6' in item.todo
+    item = pf.version_item('feedback-7', False, peers)
+    assert item.status == pf.UNKNOWN and 'client feedback-7' in item.todo
+    assert pf.version_item('feedback-7', True, peers).status == pf.OK
+    item = pf.version_item('feedback-7', True, {'peers': {}})
+    assert item.status == pf.UNKNOWN and 'client feedback-7' in item.todo
     assert pf.version_item(None, True, peers).status == pf.UNKNOWN
 
 
