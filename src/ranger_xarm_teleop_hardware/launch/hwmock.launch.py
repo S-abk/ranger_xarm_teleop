@@ -19,7 +19,7 @@ What it is: a stand-in with the shape of the robot workspace's real bring-up
 execution). The same robot description, ros2_control_node, controller files, controller
 spawners and move_group, with the real xArm plugin replaced by mock_components/GenericSystem
 and the real gripper proxy replaced by a stand-in (hwmock_gripper_proxy). Both stages also run
-a stand-in for the vendor driver's /xarm/robot_states (robot_states_standin: err 0, mode 1,
+a stand-in for the vendor driver's /xarm_xarm/robot_states (robot_states_standin: err 0, mode 1,
 state 2, 5 Hz). The execution stage also loads this package's teleop controller file and
 spawns teleop_arm_controller inactive, as the real bring-up does once that fragment is added
 there. Everything runs on the system clock; nothing publishes /clock.

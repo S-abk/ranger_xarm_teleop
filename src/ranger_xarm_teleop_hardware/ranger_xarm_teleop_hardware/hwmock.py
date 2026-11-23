@@ -132,7 +132,8 @@ def refusal_reason(node_names, robot_description_publishers):
     return None
 
 
-ROBOT_STATES_TOPIC = '/xarm/robot_states'
+# The real driver's topic name: it publishes in its hardware namespace.
+ROBOT_STATES_TOPIC = '/xarm_xarm/robot_states'
 ROBOT_STATES_RATE_HZ = 5.0
 # One bit per axis, joint 1 the lowest: all six set.
 ALL_AXES = 0b111111

@@ -11,13 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The arm-state rule on /xarm/robot_states, from synthetic captures."""
+"""The arm-state rule on the driver's xarm_msgs/msg/RobotMsg topic, from synthetic captures."""
 
-from ranger_xarm_teleop_check import rules
+from types import SimpleNamespace
+
+from ranger_xarm_teleop_check import hw_check, rules
 from ranger_xarm_teleop_check.rules import FAIL, INFO, NOT_JUDGED, Options, PASS
 from test_hw_check_rules import idle_data
 
-RULE = 'arm state (/xarm/robot_states)'
+RULE = 'arm state (xarm_msgs/RobotMsg)'
+TOPIC = '/xarm_xarm/robot_states'     # the real driver's, in its hardware namespace
+TYPE = 'xarm_msgs/msg/RobotMsg'
 THRESHOLD = 'err 0, mode 1 (servo), state <= 2 (1 running, 2 ready) in every message'
 
 
@@ -30,7 +34,8 @@ def capture(n=50, **last):
     messages = [message(1000.0 + 0.2 * i) for i in range(n)]
     if last:
         messages[-1] = message(1000.0 + 0.2 * (n - 1), **last)
-    return {'publishers': ['/xarm/driver'], 'unavailable': None, 'messages': messages}
+    return {'topics': {TOPIC: ['/xarm/driver']}, 'topic': TOPIC, 'unavailable': None,
+            'messages': messages}
 
 
 def judged(robot_states):
@@ -42,7 +47,7 @@ def judged(robot_states):
 def test_all_messages_good_pass():
     r = judged(capture())
     assert r.verdict == PASS and r.threshold == THRESHOLD
-    assert '50 messages at 5.0 Hz' in r.measured
+    assert f'50 messages on {TOPIC} at 5.0 Hz' in r.measured
     assert 'last err 0, warn 0, state 2, mode 1' in r.measured
     assert '0 of 50 messages broke the rule' in r.measured
     assert r.line().startswith(f'PASS  {RULE}: ')
@@ -88,22 +93,84 @@ def test_a_message_breaking_two_ways_counts_once_and_gives_both_advices():
 
 def test_no_topic_is_info_not_available_and_leaves_a_simulation_clean():
     r = judged(None)
-    assert r.verdict == INFO and r.measured == 'not available: no publisher of /xarm/robot_states'
-    absent = judged({'publishers': [], 'unavailable': None, 'messages': []})
+    assert r.verdict == INFO and r.measured == f'not available: no publisher of {TYPE}'
+    absent = judged({'topics': {}, 'topic': None, 'unavailable': None, 'messages': []})
     assert absent.verdict == INFO and absent.measured == r.measured
     _, results = rules.evaluate('idle', idle_data(), Options())
     assert rules.exit_status([x for x in results if x.rule == RULE]) == 0
 
 
 def test_xarm_msgs_missing_is_info_not_available():
-    r = judged({'publishers': ['/xarm/driver'], 'unavailable': 'xarm_msgs not installed',
-                'messages': []})
+    r = judged({'topics': {TOPIC: ['/xarm/driver']}, 'topic': None,
+                'unavailable': 'xarm_msgs not installed', 'messages': []})
     assert r.verdict == INFO and r.measured == 'not available (xarm_msgs not installed)'
 
 
 def test_a_publisher_that_sent_nothing_is_not_judged():
-    r = judged({'publishers': ['/xarm/driver'], 'unavailable': None, 'messages': []})
-    assert r.verdict == NOT_JUDGED and '/xarm/driver' in r.measured and r.advice
+    r = judged({'topics': {TOPIC: ['/xarm/driver']}, 'topic': TOPIC, 'unavailable': None,
+                'messages': []})
+    assert r.verdict == NOT_JUDGED and f'/xarm/driver on {TOPIC}' in r.measured and r.advice
+
+
+def test_two_topics_of_the_type_are_named_and_neither_is_judged():
+    r = judged({'topics': {TOPIC: ['/xarm/driver'], '/xarm/robot_states': ['/standin']},
+                'topic': None, 'unavailable': None, 'messages': []})
+    assert r.verdict == NOT_JUDGED
+    assert r.measured == (f'2 publishers of {TYPE}: /standin on /xarm/robot_states; '
+                          f'/xarm/driver on {TOPIC}; none judged')
+    assert 'stop every publisher of that type' in r.advice
+
+
+def test_two_publishers_on_one_topic_are_named_and_not_judged():
+    r = judged({'topics': {TOPIC: ['/a', '/b']}, 'topic': None, 'unavailable': None,
+                'messages': []})
+    assert r.verdict == NOT_JUDGED and f'/a on {TOPIC}; /b on {TOPIC}' in r.measured
+
+
+class _Graph:
+    """A node's graph queries, for the capture's topic lookup."""
+
+    def __init__(self, topics):
+        self.topics = topics        # {topic: (type, [publisher node names])}
+
+    def get_topic_names_and_types(self):
+        return [(t, [kind]) for t, (kind, _) in self.topics.items()]
+
+    def get_publishers_info_by_topic(self, topic):
+        return [SimpleNamespace(node_namespace='/', node_name=n.lstrip('/'))
+                for n in self.topics[topic][1]]
+
+
+def _poll(topics):
+    data, subscribed = {}, []
+    reader = hw_check._RobotStates(_Graph(topics), data,
+                                   lambda kind, topic, *rest: subscribed.append(topic))
+    reader.poll(0.0)
+    return data['robot_states'], subscribed
+
+
+def test_the_capture_finds_the_topic_by_type_whatever_its_name():
+    record, subscribed = _poll({TOPIC: (TYPE, ['driver']), '/joint_states':
+                                ('sensor_msgs/msg/JointState', ['jsb'])})
+    assert record['topics'] == {TOPIC: ['/driver']}
+    if record['unavailable'] is None:        # xarm_msgs installed: subscribed to that topic
+        assert subscribed == [TOPIC] and record['topic'] == TOPIC
+    else:
+        assert subscribed == [] and record['unavailable'] == 'xarm_msgs not installed'
+
+
+def test_the_capture_reads_nothing_when_several_publish_and_ignores_subscriber_only_topics():
+    record, subscribed = _poll({TOPIC: (TYPE, ['driver']), '/xarm/robot_states':
+                                (TYPE, ['standin']), '/listener': (TYPE, [])})
+    assert record['topics'] == {TOPIC: ['/driver'], '/xarm/robot_states': ['/standin']}
+    assert subscribed == [] and record['topic'] is None and record['messages'] == []
+    record, subscribed = _poll({'/listener': (TYPE, [])})
+    assert record['topics'] == {} and subscribed == []
+
+
+def test_two_publishers_of_one_name_both_count():
+    record, subscribed = _poll({TOPIC: (TYPE, ['driver', 'driver'])})
+    assert record['topics'] == {TOPIC: ['/driver', '/driver']} and subscribed == []
 
 
 def test_axis_bits_are_six_characters_with_joint_1_first():

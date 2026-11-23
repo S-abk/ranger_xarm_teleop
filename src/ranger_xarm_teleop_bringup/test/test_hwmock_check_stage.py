@@ -217,8 +217,11 @@ def test_the_idle_check_passes_on_the_check_stage(stage2):
     # real plugin's does): not judged here, said so, never passed silently.
     assert verdicts.get('velocity_control') == 'NOT JUDGED', output[-4000:]
     assert verdicts.get('joint_states effort') == 'INFO'
-    # The stand-in for the vendor driver's /xarm/robot_states: err 0, mode 1, state 2.
-    assert verdicts.get('arm state (/xarm/robot_states)') == 'PASS', output[-4000:]
+    # The stand-in for the vendor driver's /xarm_xarm/robot_states, found by its type:
+    # err 0, mode 1, state 2.
+    assert verdicts.get('arm state (xarm_msgs/RobotMsg)') == 'PASS', output[-4000:]
+    arm_state = next(r for r in report['rules'] if r['rule'] == 'arm state (xarm_msgs/RobotMsg)')
+    assert 'on /xarm_xarm/robot_states at' in arm_state['measured'], arm_state
     clock = [r for r in report['rules'] if 'clock' in r['rule']]
     assert clock and all(r['verdict'] == 'PASS' for r in clock), clock
     if ws:
