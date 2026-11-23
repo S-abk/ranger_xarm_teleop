@@ -500,9 +500,21 @@ MoveIt Servo's collision halt. The model is built from `/robot_description` when
   Left out, and logged at start-up: a moving link attached directly to a fixed one, and a pair
   that is within the margin in every sampled posture. The service `/teleop/keepout_info`
   (`std_srvs/Trigger`) lists the model, the pairs left out and why.
-- **The model never reports more clearance than the geometry has.** Moving links are covered
-  by spheres (25 mm cells) that contain every triangle; fixed boxes, cylinders and spheres are
-  used exactly. Only STL collision meshes are supported; other formats refuse the start.
+- **The model never reports more clearance than the geometry has.** Moving links, and fixed
+  meshes, are covered by spheres (25 mm cells) that contain every triangle; fixed boxes,
+  cylinders and spheres are used exactly. Only STL collision meshes are supported; other
+  formats refuse the start.
+- **Finer cells where the model, not the geometry, holds a pair.** A pair whose model
+  clearance stays below the margin plus its covers' own error (each covered side's largest
+  sphere radius) at every sampled posture is covered again on its covered sides with cells
+  0.6 times as large (15 mm). Nothing is named: the choice is sampled from the description and
+  logged at start-up (also in `/teleop/keepout_info`).
+- **Held at work.** A kept pair that the refined model still never sees more than that error
+  clear of the margin, and finds inside it at more than a quarter of the postures sampled in
+  the solver's joint range, would hold the arm over much of its range. The hardware path
+  refuses the start, naming the pair, its clearance range and the largest margin that frees
+  it; simulation logs the same as a warning. At every start the node also logs the largest
+  margin no pair is inside at the start posture and 0.1 rad either way of each joint.
 - **In the solver.** Within 60 mm of the margin, a pair's clearance `d` may fall at most at
   `(d - margin) / 0.2 s`: 0.3 m/s at 60 mm, nothing at the margin, so at 0.25 m/s motion toward
   the structure slows from about 50 mm and stops at the margin; motion along or away from it
