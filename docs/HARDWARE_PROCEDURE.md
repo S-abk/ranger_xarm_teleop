@@ -322,10 +322,13 @@ release it stops within about a centimetre and within 0.2 s (the command ramps t
 acceleration limit; the arm also finishes the points already on their way); the target in RViz;
 the check gives `PASS` on `stale repeats while moving`, `target lead (largest, translation)`,
 `wrist oscillation`, `commanded joint acceleration (MoveIt Servo output)` (every point of
-MoveIt Servo's output within twice your acceleration limit: one Servo skip can join two command
-steps) and `stop time after a release` (at most 0.2 s plus one cycle), reports
-`joint-state acceleration (20 ms, INFO)` (information only: differentiated encoder data, with
-MoveIt's value for reference) and `target lag`
+MoveIt Servo's output within twice your acceleration limit, plus 5 % for Servo's point timing:
+one Servo skip can join two command steps) and `stop time after a release` (at most 0.2 s plus
+one cycle), reports `joint-state acceleration (20 ms, INFO)` (information only: differentiated
+encoder data, with MoveIt's value for reference), `Servo output above 1.1 x limit without a
+skip (INFO)` (the share of points above 1.1 times your limit that no detected Servo skip
+explains, and how many skips there were; keep these numbers: they decide whether the rule is
+tightened) and `target lag`
 [`test_hwmock_execution`: one short armed stroke with the teleop check].
 
 **Stop if** (release the grip; press the emergency stop if it does not stop):

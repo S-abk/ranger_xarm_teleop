@@ -17,6 +17,7 @@ import datetime
 import json
 
 import numpy as np
+import pytest
 
 from ranger_xarm_teleop_check import report as rep, rules, stats, sysinfo
 from ranger_xarm_teleop_check.rules import FAIL, INFO, NOT_JUDGED, Options, PASS
@@ -191,9 +192,10 @@ def test_a_compliant_ramp_at_exactly_the_limit_passes_with_no_skip():
     assert cm['above_1x'] == 0 and cm['above_2x'] == 0
     assert '0 points above 1 x limit' in accel.measured
     assert 'p50 20.0 p99' in accel.measured and 'ms' in accel.measured
-    assert 'x joint_acceleration_limit_rad_s2 = 4 rad/s^2' in accel.threshold
+    assert '2 x 1.05 x joint_acceleration_limit_rad_s2 = 4.2 rad/s^2' in accel.threshold
     assert 'a Servo skip can join two consecutive command steps into one' in accel.threshold
-    assert 'up to 2 x the limit' in accel.threshold
+    assert 'up to 2 x the limit' in accel.threshold and "1.05 for Servo's point timing" \
+        in accel.threshold
 
 
 def test_resent_points_do_not_change_the_reading():
@@ -465,3 +467,82 @@ def test_the_latency_is_read_from_the_teleop_servo_yaml():
                         'config', 'servo.yaml')
     assert sysinfo.servo_latency(path) == 0.06
     assert sysinfo.servo_latency(os.path.join(os.path.dirname(__file__), 'missing.yaml')) is None
+
+
+# ---- the skip margin and the skips told from the teleop node's commands ------------------
+
+INFO_NAME = 'Servo output above 1.1 x limit without a skip (INFO)'
+
+
+def jog_rows(cmds):
+    """Return ``data['jog']`` rows for the teleop node's commands (by name, reversed order)."""
+    return [(NAMES, tuple(float(x) for x in c[::-1])) for c in cmds]
+
+
+def with_skip(node_cmds, at):
+    """Return Servo's steps for ``node_cmds``: it reuses command ``at - 1`` and skips ``at``."""
+    used = np.array(node_cmds, dtype=float).copy()
+    used[at] = node_cmds[at - 1]
+    return used
+
+
+@pytest.mark.parametrize('factor, verdict', [(2.0, PASS), (2.09, PASS), (2.11, FAIL)])
+def test_a_point_fails_only_above_twice_the_limit_with_the_margin(factor, verdict):
+    joined = np.concatenate([up(0.4), [0.4 + factor * RAMP] * 6])
+    cm, accel, _ = judge(servo_data(commands(joined, down(0.4 + factor * RAMP, 30))))
+    assert accel.verdict == verdict, accel.line()
+
+
+def test_servo_skips_are_told_from_the_commands():
+    node = commands(up(0.6), [0.6] * 3, down(0.6, 30))
+    servo = with_skip(node, 10)
+    path = stats.command_points([m[1:] for m in servo_messages(servo)])
+    runs = stats.split_runs(path['t'])
+    sk = stats.servo_skips(path['p'], runs, stats.jog_commands(jog_rows(node)), PERIOD)
+    assert sk['skips'] == 1 and sk['skipped_commands'] == 1 and sk['reused'] == 1
+    assert sk['unmatched'] == 0
+    assert sk['skip_points'] == [11]               # the point at the start of the joined step
+
+
+def test_a_scaled_step_matches_no_command():
+    node = commands(up(0.6), [0.6] * 3, down(0.6, 30))
+    servo = node.copy()
+    servo[12] = servo[12] * 0.5                    # Servo slowed one step (collision scale)
+    path = stats.command_points([m[1:] for m in servo_messages(servo)])
+    sk = stats.servo_skips(path['p'], stats.split_runs(path['t']),
+                           stats.jog_commands(jog_rows(node)), PERIOD)
+    assert sk['unmatched'] == 1 and sk['skips'] == 0
+
+
+def test_a_skip_explains_its_point_and_the_info_line_says_so():
+    node = commands(up(0.6), [0.6] * 3, down(0.6, 30))
+    data = servo_data(with_skip(node, 10))
+    data['jog'] = jog_rows(node)
+    res = {r.rule: r for r in rules.evaluate('teleop', data, options())[1]}
+    info = res[INFO_NAME]
+    assert info.verdict == INFO
+    assert info.measured.startswith('0 of ') and '(1 above in all)' in info.measured
+    assert '1 skips (1 commands skipped), 1 reused, 0 steps matching no command' in info.measured
+    assert res[NAME].verdict == PASS
+
+
+def test_a_jump_no_skip_explains_counts_as_unexplained():
+    jump = np.concatenate([up(0.4), [0.4 + 1.5 * RAMP] * 6])
+    node = commands(jump, down(0.4 + 1.5 * RAMP, 30))   # the command itself jumped
+    data = servo_data(node)
+    data['jog'] = jog_rows(node)
+    cm = rules.command_measures(data, LIMIT)
+    assert cm['above_explained_limit'] == 1 and cm['unexplained'] == 1
+    assert cm['skips']['skips'] == 0
+    info = rules.info_unexplained_acceleration(cm, options())
+    total = cm['judged_points']
+    assert info.measured.startswith(f'1 of {total} points ({100.0 / total:.2f} %)')
+
+
+def test_without_the_commands_skips_are_not_detectable():
+    cm = rules.command_measures(servo_data(commands(up(0.8), down(0.8, 20))), LIMIT)
+    info = rules.info_unexplained_acceleration(cm, options())
+    assert info.verdict == INFO and 'skips not detectable' in info.measured
+    assert rules.DEFAULT_JOG_TOPIC in info.measured
+    none = rules.info_unexplained_acceleration(cm, options(limit=None))
+    assert 'not known' in none.measured

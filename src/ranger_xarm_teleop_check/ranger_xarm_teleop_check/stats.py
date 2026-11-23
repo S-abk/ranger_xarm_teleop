@@ -518,6 +518,91 @@ def command_analysis(t: Sequence[float], p: Sequence[Sequence[float]],
             'ends_moving': ends_moving}
 
 
+# MoveIt Servo integrates each command over its fixed publish period: a step of its output,
+# divided by the period, is the joint-jog command it used, to floating-point rounding. A step
+# within this of a command (rad/s, every joint) was made from it.
+JOG_MATCH_RAD_S = 1e-6
+# How far past the last matched command a step is looked for. Servo uses one command per cycle;
+# a skip jumps one (rarely more).
+JOG_SEARCH = 5
+
+
+def jog_commands(messages) -> List[np.ndarray]:
+    """
+    Return the arm joints' joint-jog commands, in order.
+
+    ``messages`` holds ``(names, velocities)`` of the teleop node's JointJog commands (rad/s);
+    one without all six arm joints is left out. Each is returned as velocities (6,).
+    """
+    out = []
+    for names, velocities in messages:
+        index = {}
+        for i, name in enumerate(names):
+            index.setdefault(name, i)
+        if not all(j in index for j in ARM_JOINTS) or len(velocities) != len(names):
+            continue
+        out.append(np.array([float(velocities[index[j]]) for j in ARM_JOINTS]))
+    return out
+
+
+def servo_skips(p: Sequence[Sequence[float]], runs: Sequence[Tuple[int, int]],
+                commands: Sequence[np.ndarray], period: float) -> dict:
+    """
+    Return which commands MoveIt Servo skipped or used twice, from its output and the commands.
+
+    Each step of Servo's output (point i to i + 1 of a run, over ``period``) is matched by value
+    to the teleop node's commands, in order: the first command after the last one matched,
+    up to ``JOG_SEARCH`` ahead, that it equals; or the last one again (a reuse). A match more
+    than one command ahead is a skip, which joins the steps of the commands it jumped into
+    one: the point at the start of that step (its acceleration) is explained by it. A step
+    with no motion at the start of a run, before any match, is passed over; any other step
+    that matches nothing (Servo scaled it, for a collision or a limit) is counted unmatched
+    and taken as made from the next command.
+
+    Returns ``{'steps', 'matched', 'reused', 'skips', 'skipped_commands', 'unmatched',
+    'skip_points'}``; ``skip_points`` are point indices.
+    """
+    p = np.asarray(p, dtype=float).reshape(-1, 6)
+    cmds = np.asarray(commands, dtype=float).reshape(-1, 6)
+    out = {'steps': 0, 'matched': 0, 'reused': 0, 'skips': 0, 'skipped_commands': 0,
+           'unmatched': 0, 'skip_points': []}
+
+    def equal(k, v):
+        return bool(np.max(np.abs(cmds[k] - v)) <= JOG_MATCH_RAD_S)
+
+    cursor = -1
+    for a, b in runs:
+        last = None                      # the command matched last in this run
+        for i in range(a, b - 1):
+            v = (p[i + 1] - p[i]) / period
+            out['steps'] += 1
+            if last is None:
+                if not np.any(np.abs(v) > JOG_MATCH_RAD_S):
+                    continue             # at rest before the run's first command
+                found = next((k for k in range(cursor + 1, len(cmds)) if equal(k, v)), None)
+            else:
+                found = next((k for k in range(last + 1, min(last + 1 + JOG_SEARCH, len(cmds)))
+                              if equal(k, v)), None)
+            if found is None:
+                if last is not None and equal(last, v):
+                    out['reused'] += 1
+                    out['matched'] += 1
+                else:
+                    # Servo changed the step (scaled it): taken as made from the next command,
+                    # so the following step is not read as a skip.
+                    out['unmatched'] += 1
+                    if last is not None:
+                        last = cursor = min(last + 1, len(cmds) - 1)
+                continue
+            if last is not None and found > last + 1:
+                out['skips'] += 1
+                out['skipped_commands'] += found - last - 1
+                out['skip_points'].append(i)
+            out['matched'] += 1
+            last = cursor = found
+    return out
+
+
 def clutch_events(samples: Sequence[Tuple[int, bool]]) -> Tuple[List[int], List[int]]:
     """
     Return ``(releases, engages)``: stamps (ns) where the clutch went False or True.

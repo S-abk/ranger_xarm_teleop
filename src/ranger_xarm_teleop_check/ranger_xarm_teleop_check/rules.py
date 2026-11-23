@@ -87,10 +87,16 @@ WRIST_JOINTS = (3, 5)
 # MoveIt Servo's output, the teleop command (G-18): the controller's trajectory topic, and the
 # command period (s).
 DEFAULT_COMMAND_TOPIC = '/teleop_arm_controller/joint_trajectory'
+# The teleop node's joint-jog commands to MoveIt Servo, read to tell Servo's skips.
+DEFAULT_JOG_TOPIC = '/servo_node/delta_joint_cmds'
 COMMAND_PERIOD_S = 0.02
-# A Servo skip can join two consecutive command steps into one: a point is accepted up to this
-# many times the acceleration limit.
+# A Servo skip can join two consecutive command steps into one, at most 2 x the limit; Servo's
+# point timing moves that slightly either way. A point FAILs only above SKIP_FACTOR x
+# SKIP_MARGIN x the limit. The first real reports decide whether to tighten it.
 SKIP_FACTOR = 2.0
+SKIP_MARGIN = 1.05
+# Points above this many times the limit that no detected skip explains are reported (INFO).
+EXPLAINED_ABOVE = 1.1
 # Relative slack for floating-point rounding in the comparisons with the limit.
 COMMAND_ROUNDING = 1e-6
 
@@ -139,6 +145,7 @@ class Options:
     # from the servo.yaml the teleop launch loads; None when it could not be read.
     servo_latency_s: Any = None
     command_topic: str = DEFAULT_COMMAND_TOPIC
+    jog_topic: str = DEFAULT_JOG_TOPIC
     expect_fingerprint: Optional[str] = None
     expect_active: Tuple[str, ...] = ()
     expect_inactive: Tuple[str, ...] = ()
@@ -635,10 +642,26 @@ def command_measures(data: dict, limit: Optional[float], latency: float = 0.0) -
                           'max': _ms(max(spacing) if spacing else None)},
            'releases_seen': len(releases), 'stops': stops,
            'above_1x': None, 'above_2x': None}
+    # Servo's skips, from its steps matched to the teleop node's commands (stats.servo_skips).
+    jog = stats.jog_commands(data.get('jog', []))
+    out['jog_messages'] = len(data.get('jog', []))
+    skips = stats.servo_skips(p, an['runs'], jog, COMMAND_PERIOD_S) if jog else None
+    out['skips'] = ({k: v for k, v in skips.items() if k != 'skip_points'}
+                    if skips is not None else None)
+    out['judged_points'] = int(judged.sum())
+    out['above_explained_limit'] = None
+    out['unexplained'] = None
     if limit is not None:
         finite = point_peak[np.isfinite(point_peak)]
         out['above_1x'] = int((finite > limit * (1.0 + COMMAND_ROUNDING)).sum())
-        out['above_2x'] = int((finite > SKIP_FACTOR * limit * (1.0 + COMMAND_ROUNDING)).sum())
+        out['above_2x'] = int((finite > SKIP_FACTOR * SKIP_MARGIN * limit
+                               * (1.0 + COMMAND_ROUNDING)).sum())
+        high = [i for i in range(len(t)) if np.isfinite(point_peak[i])
+                and point_peak[i] > EXPLAINED_ABOVE * limit * (1.0 + COMMAND_ROUNDING)]
+        out['above_explained_limit'] = len(high)
+        if skips is not None:
+            explained = set(skips['skip_points'])
+            out['unexplained'] = sum(1 for i in high if i not in explained)
     return out
 
 
@@ -647,14 +670,16 @@ def _ms(seconds) -> Optional[float]:
 
 
 def rule_command_acceleration(cm: dict, opts: Options) -> Result:
-    """Servo's output: every point's acceleration within 2 x the limit (a stop above)."""
+    """Servo's output: every point's acceleration within 2 x 1.05 x the limit (a stop above)."""
     name = 'commanded joint acceleration (MoveIt Servo output)'
+    bound = SKIP_FACTOR * SKIP_MARGIN
     skip = ('a Servo skip can join two consecutive command steps into one, so a single step '
-            f'is accepted up to {SKIP_FACTOR:g} x the limit')
+            f'is accepted up to {SKIP_FACTOR:g} x the limit, with {SKIP_MARGIN:g} for '
+            "Servo's point timing")
     limit, todo = _command_limit(opts)
-    threshold = f'every point <= {SKIP_FACTOR:g} x {ACCELERATION_NAME}'
+    threshold = f'every point <= {SKIP_FACTOR:g} x {SKIP_MARGIN:g} x {ACCELERATION_NAME}'
     if limit is not None:
-        threshold += f' = {SKIP_FACTOR * limit:g} rad/s^2 (limit {limit:g}'
+        threshold += f' = {bound * limit:g} rad/s^2 (limit {limit:g}'
     else:
         threshold += ' (limit not known'
     threshold += f'; {skip})'
@@ -686,11 +711,39 @@ def rule_command_acceleration(cm: dict, opts: Options) -> Result:
                       'topic?)')
     if cm['above_2x']:
         return Result(name, FAIL, measured + f"; {cm['above_2x']} points above "
-                      f'{SKIP_FACTOR:g} x limit', threshold,
+                      f'{bound:g} x limit', threshold,
                       'a stop: (procedure stage 4): the joint command accelerates faster than '
-                      f'{SKIP_FACTOR:g} x the limit; release the grip, keep the report and '
+                      f'{bound:g} x the limit; release the grip, keep the report and '
                       'report it')
     return Result(name, PASS, measured, threshold)
+
+
+def info_unexplained_acceleration(cm: dict, opts: Options) -> Result:
+    """INFO: Servo-output points above 1.1 x the limit that no detected skip explains."""
+    name = 'Servo output above 1.1 x limit without a skip (INFO)'
+    threshold = (f'informational: points above {EXPLAINED_ABOVE:g} x {ACCELERATION_NAME} that '
+                 "no detected Servo skip explains (a skip: Servo's step matches a teleop command "
+                 f'more than one ahead of the last, on {opts.jog_topic}), as a share of the '
+                 'judged points, and the number of skips; the first real reports decide '
+                 'whether the stop rule is tightened')
+    limit, _ = _command_limit(opts)
+    sk = cm.get('skips')
+    if limit is None or cm.get('above_explained_limit') is None:
+        return Result(name, INFO, 'not judged: the acceleration limit is not known', threshold)
+    high, total = cm['above_explained_limit'], cm.get('judged_points') or 0
+    if sk is None:
+        return Result(name, INFO,
+                      f'{high} of {total} points above {EXPLAINED_ABOVE:g} x limit; skips not '
+                      f'detectable: no teleop command on {opts.jog_topic} '
+                      f"({cm.get('jog_messages', 0)} messages)", threshold)
+    unexplained = cm['unexplained']
+    share = 100.0 * unexplained / total if total else 0.0
+    return Result(name, INFO,
+                  f'{unexplained} of {total} points ({share:.2f} %) above '
+                  f'{EXPLAINED_ABOVE:g} x limit without a skip ({high} above in all); '
+                  f"{sk['skips']} skips ({sk['skipped_commands']} commands skipped), "
+                  f"{sk['reused']} reused, {sk['unmatched']} steps matching no command, over "
+                  f"{sk['steps']} steps and {cm.get('jog_messages', 0)} commands", threshold)
 
 
 def rule_stop_time(cm: dict, latency=None) -> Result:
@@ -967,5 +1020,6 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
         cm = command_measures(data, _command_limit(opts)[0],
                               latency if isinstance(latency, (int, float)) else 0.0)
         measures['servo_command'] = cm
-        results += [rule_command_acceleration(cm, opts), rule_stop_time(cm, latency)]
+        results += [rule_command_acceleration(cm, opts), info_unexplained_acceleration(cm, opts),
+                    rule_stop_time(cm, latency)]
     return measures, results

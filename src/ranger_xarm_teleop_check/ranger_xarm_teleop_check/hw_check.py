@@ -79,6 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument('--joint-limits',
                     help='MoveIt joint_limits.yaml (max_acceleration): the limit of the motion '
                     "stage's peak joint acceleration; shown for reference in the teleop stage")
+    ap.add_argument('--jog-topic', default=rules.DEFAULT_JOG_TOPIC,
+                    help="teleop stage: the teleop node's joint-jog commands to MoveIt Servo, "
+                    "read to tell Servo's skips (default: %(default)s)")
     ap.add_argument('--command-topic', default=rules.DEFAULT_COMMAND_TOPIC,
                     help='teleop stage: the controller trajectory topic MoveIt Servo publishes '
                     'on, read for the acceleration and stop-time rules (default: %(default)s)')
@@ -102,7 +105,7 @@ def resolve_options(args) -> tuple:
                    expect_active=_names(args.expect_active),
                    expect_inactive=_names(args.expect_inactive),
                    expect_fingerprint=args.expect_fingerprint,
-                   command_topic=args.command_topic)
+                   command_topic=args.command_topic, jog_topic=args.jog_topic)
     if args.limits:
         data, problem = sysinfo.load_yaml_file(args.limits)
         if problem:
@@ -189,7 +192,7 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
     executor.add_node(node)
     data = {'arm': [], 'gripper': [], 'js_publishers': [], 'clock_publishers': [],
             'activity': None, 'controller_state': {}, 'description': None, 'states': [],
-            'targets': [], 'command': [], 'command_capture': None, 'clutch': [],
+            'targets': [], 'command': [], 'jog': [], 'command_capture': None, 'clutch': [],
             'warnings': [], 'robot_states': None,
             'rosout': {'overruns': 0, 'read_failures': 0, 'overrun_examples': [],
                        'read_examples': []},
@@ -249,7 +252,7 @@ def _stamp_ns(header) -> int:
 
 
 def _subscribe_stack(stage, opts, data, subscribe, system_clock):
-    from control_msgs.msg import JointTrajectoryControllerState
+    from control_msgs.msg import JointJog, JointTrajectoryControllerState
     from controller_manager_msgs.msg import ControllerManagerActivity
     from geometry_msgs.msg import PoseStamped
     from rcl_interfaces.msg import Log
@@ -323,6 +326,11 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
 
         subscribe(JointTrajectory, opts.command_topic, on_command, COMMAND_DEPTH, 'reliable',
                   'volatile')
+
+        def on_jog(msg):
+            data['jog'].append((tuple(msg.joint_names), tuple(msg.velocities)))
+
+        subscribe(JointJog, opts.jog_topic, on_jog, COMMAND_DEPTH, 'reliable', 'volatile')
 
     overrun = re.compile('overrun', re.IGNORECASE)
 

@@ -37,6 +37,8 @@ EXECUTION = {'joint_state_broadcaster': 'active', 'xarm6_traj_controller': 'acti
              'teleop_arm_controller': 'inactive'}
 JOINT_LIMITS = os.path.join(get_package_share_directory('ranger_xarm_moveit_config'), 'config',
                             'joint_limits.yaml')
+# hw_check's INFO line on Servo-output points above 1.1 x the limit that no skip explains.
+UNEXPLAINED = 'Servo output above 1.1 x limit without a skip (INFO)'
 FIFTH = {'linear_speed_cap_m_s': 0.05, 'angular_speed_cap_rad_s': 0.2,
          'joint_speed_cap_rad_s': 0.4, 'joint_acceleration_limit_rad_s2': 2.0}
 
@@ -97,3 +99,5 @@ def test_a_stroke_at_a_fifth_of_the_caps_passes_the_acceleration_and_stop_rules(
         output[-4000:]
     assert verdicts.get('stop time after a release') == 'PASS', output[-4000:]
     assert verdicts.get('joint-state acceleration (20 ms, INFO)') == 'INFO', output[-4000:]
+    assert verdicts.get(UNEXPLAINED) == 'INFO', output[-4000:]
+    assert 'skips not detectable' not in output, output[-4000:]   # the commands were read

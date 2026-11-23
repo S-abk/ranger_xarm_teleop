@@ -57,6 +57,8 @@ TELEOP_COMMAND = f'/{TELEOP}/joint_trajectory'
 ELSEWHERE = [0.3, -0.4, -0.9, 0.2, 1.1, -0.3]
 JOINT_LIMITS = os.path.join(get_package_share_directory('ranger_xarm_moveit_config'), 'config',
                             'joint_limits.yaml')
+# hw_check's INFO line on Servo-output points above 1.1 x the limit that no skip explains.
+UNEXPLAINED = 'Servo output above 1.1 x limit without a skip (INFO)'
 
 
 def control(env, logs, label, *args, timeout=60.0):
@@ -257,6 +259,7 @@ def test_one_short_armed_stroke_with_the_teleop_check(stage3):
         output[-4000:]
     assert verdicts.get('stop time after a release') in ('PASS', 'NOT JUDGED'), output[-4000:]
     assert verdicts.get('joint-state acceleration (20 ms, INFO)') == 'INFO', output[-4000:]
+    assert verdicts.get(UNEXPLAINED) == 'INFO', output[-4000:]
     assert 'peak joint acceleration' not in verdicts
     # The gripper proxy's own joint states (10 Hz, gripper only) never took the arm's
     # measured pose away while engaged.

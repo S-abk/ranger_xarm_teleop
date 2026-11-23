@@ -37,6 +37,7 @@ import time
 from control_msgs.msg import JointJog
 import numpy as np
 import pytest
+from ranger_xarm_teleop_check.rules import COMMAND_ROUNDING, SKIP_FACTOR, SKIP_MARGIN
 from ranger_xarm_teleop_interfaces.msg import ArmOwner
 from ranger_xarm_teleop_servo import joint_accel as ja
 from stack_helpers import (assert_stack_nodes, child_environment, MOCK_STACK_NODES, Probe,
@@ -185,13 +186,15 @@ def test_the_command_stays_within_the_limit_and_stops_within_the_stop_time(stack
     steps = command_steps(commands)
     assert max(steps) <= A * T * (1 + 1e-6), (fixture, max(steps) / T)
     assert max(float(np.max(np.abs(c[2]))) for c in commands) <= CAP + 1e-9
-    # MoveIt Servo's output: within the skip tolerance; reported.
+    # MoveIt Servo's output: within hw_check's skip tolerance; reported.
     servo = servo_accelerations(trajectories)
     over = [a for a in servo if a > A * (1 + 1e-3)]
     print(f'{fixture}: command peak {max(steps) / T:.2f} rad/s^2; Servo output peak '
           f'{max(servo):.2f}, {len(over)} of {len(servo)} points above the limit'
           + (f' (largest {max(over):.2f})' if over else ''))
-    assert max(servo) <= 2 * A * 1.02, (fixture, max(servo))
+    # hw_check's stage-4 rule (G-18): a point FAILs only above 2 x 1.05 x the limit.
+    bound = SKIP_FACTOR * SKIP_MARGIN * A * (1 + COMMAND_ROUNDING)
+    assert max(servo) <= bound, (fixture, max(servo), bound)
     # INV-5: the bounds keep their meaning under the limit.
     engaged = [s for _, s in timed if s.clutch_engaged]
     if fixture == 'clutch_joint_limit':
