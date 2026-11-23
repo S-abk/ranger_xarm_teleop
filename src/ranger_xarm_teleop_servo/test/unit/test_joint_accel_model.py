@@ -40,7 +40,7 @@ CASES = {
 JOINT_LIMIT_START = [0.0, -0.6, -0.7, 0.0, -1.2, 0.0]
 NAMES = ('clutch_line', 'clutch_fast', 'clutch_step', 'clutch_release_moving',
          'clutch_joint_limit', 'clutch_reach', 'clutch_circle', 'clutch_scale_switch',
-         'clutch_shoulder', 'clutch_rotation')
+         'clutch_shoulder', 'clutch_rotation', 'clutch_engage_moving')
 STARTS = {'clutch_joint_limit': JOINT_LIMIT_START,
           'clutch_shoulder': [0.0, -0.5, -1.1, 0.0, 1.6, 0.0]}
 MARGIN = 0.15               # the solver's joint margin; MoveIt Servo halts at 0.1

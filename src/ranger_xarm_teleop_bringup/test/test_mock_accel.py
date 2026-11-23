@@ -16,7 +16,8 @@ The joint acceleration limit of the teleop command (G-18) in mock execution.
 
 Over fixtures that exercise each source of acceleration measured before the limit existed
 (a release while moving, a fast hand into the speed cap, a step, full reach, a joint bound,
-the scale switch, the link keep-out, a G-4 fault, the wrist singularity):
+the scale switch, the link keep-out, a G-4 fault, the wrist singularity, and an engagement
+with the hand already moving):
 
 * the joint command the teleop node sends (``JointJog``) never changes by more than
   ``a * period`` on any joint, engaged, stopping or engaging again (INV-1, decided on the
@@ -59,6 +60,7 @@ FIXTURES = {
     'clutch_keepout_reverse': (READY, 2.0),
     'gate_out_of_view': (READY, 0.5),
     'clutch_singularity': (BEYOND_HARD_STOP, 2.0),
+    'clutch_engage_moving': (READY, 1.0),       # the grip closes with the hand moving
 }
 # Points already on their way at a release: MoveIt Servo's window and the controller (the
 # tool lags the target by about 0.11 s in mock execution); plus 3 mm for the measurement.
