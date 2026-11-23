@@ -852,6 +852,17 @@ def test_an_unanswered_servo_call_does_not_pause_servo_during_a_ramp(ros):
         node.destroy_node()
 
 
+def test_a_refusal_names_every_missing_value_at_once(ros):
+    """INV-6: with nothing given, the gate's values and G-18's are all named in one refusal."""
+    with pytest.raises(StartupRefused) as refused:
+        TeleopNode(node_name='teleop_refused_all',
+                   parameter_overrides=overrides({'motion_enabled': True}))
+    text = str(refused.value)
+    for name in ('linear_speed_cap_m_s', 'max_lead_translation_m', 'joint_speed_cap_rad_s',
+                 'joint_acceleration_limit_rad_s2'):
+        assert name in text
+
+
 def test_the_command_never_changes_faster_than_the_limit_nor_exceeds_the_cap(harness):
     """INV-1 at the node: every command against the one before, engaged and stopping."""
     h = harness(joint_acceleration_limit_rad_s2=2.0, joint_speed_cap_rad_s=0.4)

@@ -410,9 +410,13 @@ class TeleopNode(Node):
         values = {'motion_enabled': bool(self.get_parameter('motion_enabled').value)}
         for name in list(_REQUIRED_DOUBLES) + list(_OPTIONAL):
             values[name] = self._value_or_none(name)
+        # G-18's two values are required too: a refusal names every missing value at once.
+        motion_missing = [name for name in ja.NAMES if self._value_or_none(name) is None]
         try:
             self.params = gate_params.build_params(values)
-        except ValueError as err:           # MissingValue included
+        except gate_params.MissingValue as err:
+            raise StartupRefused(str(err) + ''.join(', ' + n for n in motion_missing)) from err
+        except ValueError as err:
             raise StartupRefused(str(err)) from err
         gripper_values = {'gripper_enabled': bool(self.get_parameter('gripper_enabled').value),
                           'gripper_joint': str(self.get_parameter('gripper_joint').value)}
