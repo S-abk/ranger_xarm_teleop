@@ -17,6 +17,7 @@ import math
 import re
 
 import yaml
+from ranger_xarm_teleop_servo import joint_accel
 
 SIMULATION_ONLY_KEY = 'limits_are_simulation_only'
 
@@ -62,6 +63,8 @@ RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translat
             'gripper_closed_position', 'gripper_max_speed',
             # The reset (G-16): its speed scaling.
             'reset_speed_scaling',
+            # The joint command's speed cap and acceleration limit (G-18).
+            'joint_speed_cap_rad_s', 'joint_acceleration_limit_rad_s2',
             # The hardware path's guards: the node's check of the hardware values, and the
             # mux's refusal of teleop while motion is disabled.
             'hardware_limits', 'refuse_teleop')
@@ -85,8 +88,9 @@ def check_limits_file(path: str, simulation: bool) -> dict:
 
     Raises ``SimulationOnlyRefused`` when the file is marked simulation-only and
     ``simulation`` is false, and ``ValueError`` when a speed cap, a lead limit, the
-    largest translation scale or the link keep-out margin is missing (the teleop node
-    enforces them itself; they have no default).
+    largest translation scale, the link keep-out margin, the joint speed cap or the joint
+    acceleration limit is missing (the teleop node enforces them itself; they have no
+    default), or when a stop from the joint speed cap would take longer than G-18 allows.
     """
     values = load_limits(path)
     if values.get(SIMULATION_ONLY_KEY) and not simulation:
@@ -95,10 +99,25 @@ def check_limits_file(path: str, simulation: bool) -> dict:
             'path is a simulation (simulation:=true, set only by the mock and simulator '
             'launch files)')
     for name in ('linear_speed_cap_m_s', 'angular_speed_cap_rad_s', 'max_lead_translation_m',
-                 'max_lead_rotation_deg', 'max_translation_scale', 'link_keepout_margin_m'):
+                 'max_lead_rotation_deg', 'max_translation_scale', 'link_keepout_margin_m',
+                 *joint_accel.NAMES):
         if not isinstance(values.get(name), (int, float)) or isinstance(values.get(name), bool):
             raise ValueError(f'{path}: {name} is required and has no default')
+    _check_stop_time(path, values)
     return values
+
+
+def _check_stop_time(path: str, values: dict) -> None:
+    """Raise ``ValueError`` when both G-18 values are valid and a stop would take too long."""
+    try:
+        joint_accel.check_values(values[joint_accel.ACCELERATION_NAME],
+                                 values[joint_accel.SPEED_CAP_NAME])
+    except (KeyError, ValueError):
+        return      # missing or bad: reported as such, not as a stop time
+    line = joint_accel.stop_time_refusal(values[joint_accel.ACCELERATION_NAME],
+                                         values[joint_accel.SPEED_CAP_NAME])
+    if line:
+        raise ValueError(f'{path}: {line}')
 
 
 def check_gripper_limits(path: str, values: dict) -> None:
@@ -110,7 +129,8 @@ def check_gripper_limits(path: str, values: dict) -> None:
 
 
 # The values a hardware limits file must supply, in the order of the shipped template: the
-# gate's PENDING values (ranger_xarm_teleop_servo.params.REQUIRED), then the link keep-out
+# gate's PENDING values (ranger_xarm_teleop_servo.params.REQUIRED) with the joint speed cap and
+# the joint acceleration limit (G-18) after the angular speed cap, then the link keep-out
 # margin and the tool pose timeout. None has a default or a shipped number.
 HARDWARE_REQUIRED = (
     'max_offset_translation_m',
@@ -120,6 +140,8 @@ HARDWARE_REQUIRED = (
     'step_rotation_limit_deg',
     'linear_speed_cap_m_s',
     'angular_speed_cap_rad_s',
+    joint_accel.SPEED_CAP_NAME,             # G-18: the cap is chosen first
+    joint_accel.ACCELERATION_NAME,
     'max_lead_translation_m',
     'max_lead_rotation_deg',
     'max_translation_scale',
@@ -149,7 +171,9 @@ def check_hardware_limits_file(path: str) -> dict:
     problem and every problem listed, when the file cannot be read, still has the template's
     marker line, leaves any of ``HARDWARE_REQUIRED`` missing, ``PENDING`` or not a positive
     finite number, enables gripper teleop or sets the reset's speed scaling (both are
-    simulation only), or sets a translation scale above ``max_translation_scale``.
+    simulation only), sets a translation scale above ``max_translation_scale``, or has a joint
+    speed cap and acceleration limit whose stop from the cap would take longer than G-18
+    allows (``joint_accel.stop_time_refusal``).
     """
     try:
         with open(path, encoding='utf-8') as handle:
@@ -192,6 +216,10 @@ def check_hardware_limits_file(path: str) -> dict:
                 problems.append(f'{path}: max_translation_scale ({largest!r}) is below the '
                                 f'default {name} ({_DEFAULT_SCALE:g}): set {name} in your file '
                                 'to at most max_translation_scale')
+    try:
+        _check_stop_time(path, values)
+    except ValueError as err:
+        problems.append(str(err))
     if values.get('gripper_enabled') not in (None, False):
         problems.append(f'{path}: gripper_enabled is {values["gripper_enabled"]!r}: gripper '
                         'teleop is simulation only; remove it from the file')

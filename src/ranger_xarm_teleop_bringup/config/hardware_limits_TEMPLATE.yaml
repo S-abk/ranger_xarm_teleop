@@ -42,6 +42,16 @@
     # What it bounds: the tool's angular speed, enforced on the joint command. Unit: radians per
     # second. How to choose: a fraction of the simulation value; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
     angular_speed_cap_rad_s: PENDING
+    # What it bounds (G-18): the speed of every arm joint in the joint command, whatever the
+    # tool speed. Unit: radians per second. How to choose: choose it first, well under the arm's
+    # rated joint speed; see docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    joint_speed_cap_rad_s: PENDING
+    # What it bounds (G-18): how fast the joint command may change; it never changes faster, and
+    # a stop ramps down at this rate. Unit: radians per second squared. How to choose: well
+    # under the arm's rated joint acceleration, and so that joint_speed_cap_rad_s divided by it is
+    # at most 0.2 s (the file is refused otherwise); see docs/HARDWARE_PROCEDURE.md, "Values you
+    # supply".
+    joint_acceleration_limit_rad_s2: PENDING
     # What it bounds: how far the target may lead the measured tool pose, translation. Unit:
     # metres. How to choose: at least the linear speed cap times the lag you measured between
     # command and motion on this arm, or the clamp holds the arm below its cap; see
