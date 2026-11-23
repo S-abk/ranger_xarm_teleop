@@ -217,6 +217,8 @@ def test_the_idle_check_passes_on_the_check_stage(stage2):
     # real plugin's does): not judged here, said so, never passed silently.
     assert verdicts.get('velocity_control') == 'NOT JUDGED', output[-4000:]
     assert verdicts.get('joint_states effort') == 'INFO'
+    # The stand-in for the vendor driver's /xarm/robot_states: err 0, mode 1, state 2.
+    assert verdicts.get('arm state (/xarm/robot_states)') == 'PASS', output[-4000:]
     clock = [r for r in report['rules'] if 'clock' in r['rule']]
     assert clock and all(r['verdict'] == 'PASS' for r in clock), clock
     if ws:
