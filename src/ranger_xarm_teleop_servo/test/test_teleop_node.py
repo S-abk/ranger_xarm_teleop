@@ -849,10 +849,11 @@ def test_an_unanswered_servo_call_does_not_pause_servo_during_a_ramp(ros):
     try:
         node.pause_client = _Client(lambda request: _Ok())
         node.servo_state = teleop_node.SERVO_UNKNOWN
-        node.manage_servo(10.0, True)               # engaged or ramping: no pause
+        node.stopping = True
+        node.manage_servo(10.0, True)               # a ramp runs: no pause
         assert node.pause_client.requests == []
-        node.servo_call_since = None
-        node.manage_servo(10.0, False)              # afterwards: paused
+        node.stopping = False
+        node.manage_servo(10.0, True)               # only waiting to engage: paused
         assert [r.data for r in node.pause_client.requests] == [True]
     finally:
         node.close()

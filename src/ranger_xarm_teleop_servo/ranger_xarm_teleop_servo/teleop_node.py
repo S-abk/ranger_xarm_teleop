@@ -1817,10 +1817,10 @@ class TeleopNode(Node):
             self.servo_state = SERVO_UNKNOWN
             self.servo_verified = False
         if self.servo_state == SERVO_UNKNOWN:
-            # A call that went unanswered does not show that Servo stopped running. While the
-            # gate still wants it (the cycle before the gate sees it unknown and releases) or a
-            # stop ramp runs, it is not paused: the ramp goes out whole (G-18), then the pause.
-            if want_active:
+            # A call that went unanswered does not show that Servo stopped running. While a
+            # command is out or a stop ramp runs, it is not paused: the ramp goes out whole
+            # (G-18), then the pause. Otherwise (also while waiting to engage) it is paused.
+            if self.stopping or self.commanding:
                 return
             if self.pause_client.service_is_ready():
                 self._call(self.pause_client, SetBool.Request(data=True), self._paused)

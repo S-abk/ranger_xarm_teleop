@@ -128,3 +128,20 @@ def test_values_must_be_finite_positive_numbers(value):
 
 def test_stop_travel_bound():
     assert ja.stop_travel_bound(0.25, 1.9, 10.0) == pytest.approx(0.02375)
+
+
+def test_the_node_flushes_at_least_servos_window():
+    """G-18: the zeros after a ramp cover MoveIt Servo's window (servo.yaml)."""
+    import ast
+    import os
+    import re
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(here, '..', '..')
+    yaml_text = open(os.path.join(src, '..', 'ranger_xarm_teleop_bringup', 'config',
+                                  'servo.yaml')).read()
+    latency = float(re.search(r'^max_expected_latency:\s*([0-9.]+)', yaml_text, re.M).group(1))
+    period = float(re.search(r'^publish_period:\s*([0-9.]+)', yaml_text, re.M).group(1))
+    tree = ast.parse(open(os.path.join(src, 'ranger_xarm_teleop_servo', 'teleop_node.py')).read())
+    flush = next(node.value.value for node in tree.body if isinstance(node, ast.Assign)
+                 and getattr(node.targets[0], 'id', '') == 'FLUSH_CYCLES')
+    assert flush * period >= latency - 1e-9, (flush, period, latency)
