@@ -102,13 +102,15 @@ the coarser cells, which at a margin of 0.04 held joints 1 and 2 still at the st
 and left the tool pivoting about the wrist on the first stage 4 run). If a kept pair is still
 inside the margin over more than a quarter of the joint range the solver allows, the hardware
 path refuses the start, naming the pair and the largest margin that frees it: on this arm 0.05
-is refused that way (free up to about 48 mm), 0.045 is not. At the stage 4 posture and on
-10 cm strokes from it, no pair is inside a margin up to about 0.042 in open space; pulling the
-tool back over the base brings link 2 within the margin of the structure behind the arm,
-which is real structure and is meant to hold it. 0.025 is the value that has worked on the
-arm. The node logs at every start the largest margin no pair is inside around the posture it
-starts in. Whatever margin you choose, check it in the preview at the stage 4 posture (3b')
-before arming.
+is refused that way (free up to about 48 mm), 0.045 is not. That suggested margin is worked
+out with the finer cells chosen at the refused margin; a start at it runs the whole check
+again, and on this arm the pair gets the finer cells at every margin from 0.025 to 0.05. At
+the stage 4 posture and on 10 cm strokes from it, no pair is inside a margin up to about 0.042
+in open space; pulling the tool back over the base brings link 2 within the margin of the
+structure behind the arm, which is real structure and is meant to hold it. 0.025 is the
+value that has worked on the arm. The node logs at every start the largest margin no pair is
+inside around the posture it starts in. Whatever margin you choose, check it in the preview
+at the stage 4 posture (3b') before arming.
 
 **The joint speed cap and the joint acceleration limit (G-18).** The arm's streamed servo mode
 (the firmware's mode 1, which the ros2_control driver uses) executes each point it receives at
