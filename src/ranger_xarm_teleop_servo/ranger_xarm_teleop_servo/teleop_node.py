@@ -199,10 +199,13 @@ SOLVER_LIMITS = {dls.LIMIT_JOINT_POSITION: Limit.JOINT_POSITION,
                  dls.LIMIT_TOOL_SPEED: Limit.TOOL_SPEED,
                  dls.LIMIT_LINK_KEEPOUT: Limit.LINK_KEEPOUT}
 # G-18: zero commands sent after a stop ramp's zero, before MoveIt Servo is paused. Servo
-# publishes every point of its window but the newest and keeps max_expected_latency of them
-# (0.06 s in servo.yaml, 3 cycles); paused at once, the ramp's last points never reach the
-# controller, which then holds from the last speed it got: a step at the end of every ramp.
-FLUSH_CYCLES = 3
+# publishes every point of its window but the newest and keeps max_expected_latency of them;
+# paused at once, the ramp's last points never reach the controller, which then holds from
+# the last speed it got: a step at the end of every ramp. The window in cycles, plus one for
+# a cycle Servo skips (ja.flush_cycles). Both values are servo.yaml's (a unit test ties them).
+SERVO_WINDOW_S = 0.06       # servo.yaml max_expected_latency
+SERVO_PERIOD_S = 0.02       # servo.yaml publish_period
+FLUSH_CYCLES = ja.flush_cycles(SERVO_WINDOW_S, SERVO_PERIOD_S)
 # The limits the acceleration limit (G-18) is shown instead of when it acted: the speed-type
 # limits it acts after (the panel ranks them alike). The lead clamp and the position-type bounds
 # (offset, keep-out, joint position) rank higher and stay the ones shown;

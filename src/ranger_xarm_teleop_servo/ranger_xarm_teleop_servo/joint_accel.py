@@ -120,6 +120,19 @@ def ramp_step(previous: Sequence[float], acceleration: float, period: float) -> 
     return Step(previous * keep, keep, True)
 
 
+def flush_cycles(window: float, period: float) -> int:
+    """
+    Return how many zero commands follow a stop ramp's zero before MoveIt Servo is paused.
+
+    Servo keeps ``window`` seconds of points (its max_expected_latency) and publishes every
+    one but the newest: the window in command periods, rounded up, brings it to rest; one
+    more covers a cycle Servo skips (its loop runs without phase to this node's).
+    """
+    if not (window > 0.0 and period > 0.0):
+        raise ValueError(f'window {window} s and period {period} s must be positive')
+    return math.ceil(window / period - _ROUNDING) + 1
+
+
 def stop_time(velocity: Sequence[float], acceleration: float) -> float:
     """Return how long a stop ramp from ``velocity`` takes (s)."""
     velocity = np.asarray(velocity, dtype=float)
