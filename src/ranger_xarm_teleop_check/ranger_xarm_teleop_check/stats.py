@@ -22,6 +22,8 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ranger_xarm_teleop_servo.tracking import resample, RESAMPLE_S
+
 ARM_JOINTS = tuple(f'xarm_joint{i}' for i in range(1, 7))
 GRIPPER_JOINT = 'xarm_drive_joint'
 
@@ -346,3 +348,236 @@ def lag_estimate(state_t: Sequence[float], measured: Sequence[Tuple[float, float
         if score > best_score:
             best, best_score = float(lag), score
     return best if best_score > 0 else None
+
+
+# ---- the joint states on a command-period grid ------------------------------------------
+
+def resampled_peak_acceleration(t: Sequence[float], pos: Sequence[Sequence[float]],
+                                step: float = RESAMPLE_S) -> List[Optional[float]]:
+    """
+    Return the peak |acceleration| per joint (rad/s^2) of positions resampled to ``step`` s.
+
+    Linear interpolation onto a uniform grid, then the second difference (the servo package's
+    ``resample``); None for every joint when fewer than three grid samples remain. The window
+    is one command period, so a ramp at the limit reads the limit.
+    """
+    if len(pos) < 3:
+        return [None] * 6
+    tt = np.asarray(t, dtype=float)
+    times, positions = resample(tt - tt[0], np.asarray(pos, dtype=float), step)
+    if len(times) < 3:
+        return [None] * 6
+    velocity = np.diff(positions, axis=0) / np.diff(times)[:, None]
+    middle = (times[1:] + times[:-1]) / 2.0
+    acc = np.abs(np.diff(velocity, axis=0) / np.diff(middle)[:, None])
+    return [float(acc[:, j].max()) if np.isfinite(acc[:, j]).any() else None
+            for j in range(6)]
+
+
+# ---- MoveIt Servo's output: the position path of the trajectory messages -----------------
+
+# Points whose times differ by less than this are one point (Servo re-sends the same states in
+# later windows).
+SERVO_MERGE_S = 1e-3
+# A gap longer than this ends a run: the controller holds its last point, so a run starts and
+# ends at rest.
+SERVO_RUN_GAP_S = 0.1
+# A segment is moving above this joint speed on any joint (rad/s).
+SERVO_REST_SPEED = 1e-3
+
+
+def command_points(messages) -> dict:
+    """
+    Return the arm joints' position path of JointTrajectory messages, merged and sorted.
+
+    ``messages`` holds ``(stamp_ns, names, points)``: the header stamp in integer nanoseconds,
+    the joint names, and ``[(time_from_start_s, positions), ...]``. A point's time is the
+    stamp plus its ``time_from_start``; positions are taken by joint name (the arm joints, in
+    order) and a message without all six, or with positions of another length, is skipped.
+    Points less than ``SERVO_MERGE_S`` apart are merged (the first is kept).
+
+    Returns ``{'origin_ns', 't', 'p', 'skipped'}``: ``t`` (n,) in seconds from ``origin_ns``
+    (the earliest stamp), ``p`` (n, 6), and the number of messages skipped.
+    """
+    usable = []
+    skipped = 0
+    for stamp_ns, names, points in messages:
+        index = {}
+        for i, name in enumerate(names):
+            index.setdefault(name, i)
+        if not all(j in index for j in ARM_JOINTS) or not points:
+            skipped += 1
+            continue
+        order = [index[j] for j in ARM_JOINTS]
+        rows = []
+        for tfs, positions in points:
+            if len(positions) != len(names):
+                rows = None
+                break
+            rows.append((float(tfs), [float(positions[i]) for i in order]))
+        if rows is None:
+            skipped += 1
+            continue
+        usable.append((int(stamp_ns), rows))
+    if not usable:
+        return {'origin_ns': None, 't': np.zeros(0), 'p': np.zeros((0, 6)), 'skipped': skipped}
+    origin = min(u[0] for u in usable)
+    times, positions = [], []
+    for stamp_ns, rows in usable:
+        for tfs, pos in rows:
+            times.append((stamp_ns - origin) * 1e-9 + tfs)
+            positions.append(pos)
+    order = np.argsort(np.asarray(times), kind='stable')
+    times = np.asarray(times)[order]
+    positions = np.asarray(positions)[order]
+    keep = [0]
+    for i in range(1, len(times)):
+        if times[i] - times[keep[-1]] >= SERVO_MERGE_S:
+            keep.append(i)
+    return {'origin_ns': origin, 't': times[keep], 'p': positions[keep], 'skipped': skipped}
+
+
+def split_runs(t: Sequence[float], gap: float = SERVO_RUN_GAP_S) -> List[Tuple[int, int]]:
+    """Return ``(first, stop)`` index ranges of ascending times split at gaps over ``gap``."""
+    if not len(t):
+        return []
+    cuts = [i + 1 for i in range(len(t) - 1) if t[i + 1] - t[i] > gap]
+    bounds = [0] + cuts + [len(t)]
+    return list(zip(bounds[:-1], bounds[1:]))
+
+
+def capture_edges(first_arrival: Optional[float], last_arrival: Optional[float],
+                  began: Optional[float], ended: Optional[float],
+                  gap: float = SERVO_RUN_GAP_S) -> Tuple[bool, bool]:
+    """
+    Return ``(open_start, open_end)``: whether the capture cut the stream at either end.
+
+    The stream starts open when its first message arrived within ``gap`` of the capture
+    beginning, and ends open when its last arrived within ``gap`` of the capture end: there
+    the arm may have been moving, so "at rest" cannot be assumed. Arrivals and the capture
+    times are on one clock.
+    """
+    if None in (first_arrival, last_arrival, began, ended):
+        return False, False
+    return first_arrival - began < gap, ended - last_arrival < gap
+
+
+def command_analysis(t: Sequence[float], p: Sequence[Sequence[float]],
+                     open_start: bool = False, open_end: bool = False,
+                     gap: float = SERVO_RUN_GAP_S) -> dict:
+    """
+    Return the segment speeds and the accelerations of a position path (Servo's output).
+
+    Segment velocity is dp / dt. The acceleration at a point is the difference of the
+    neighbouring segment velocities over the mean of the two segment lengths, per joint. Runs
+    (``split_runs``) start and end at rest: a virtual zero-velocity segment, as long as the
+    real one beside it, is added at each end, except at the start of the first run when
+    ``open_start`` and at the end of the last run when ``open_end`` (the capture cut the
+    stream there; nothing is assumed, and the point at that end gets no acceleration).
+
+    Returns ``{'runs', 'speed', 'acc', 'spacing', 'ends_moving'}``: ``speed`` (n,) the
+    largest joint speed of the segment starting at each point (NaN for the last point of a
+    run), ``acc`` (n, 6) in rad/s^2 (NaN where undefined), ``spacing`` the gaps between
+    consecutive points of a run, ``ends_moving`` whether the final segment of an open-ended
+    stream is moving.
+    """
+    t = np.asarray(t, dtype=float)
+    p = np.asarray(p, dtype=float).reshape(len(t), 6)
+    n = len(t)
+    runs = split_runs(t, gap)
+    speed = np.full(n, np.nan)
+    acc = np.full((n, 6), np.nan)
+    spacing: List[float] = []
+    ends_moving = False
+    for k, (a, b) in enumerate(runs):
+        if b - a < 2:
+            continue
+        dt = np.diff(t[a:b])
+        spacing.extend(float(x) for x in dt)
+        v = np.diff(p[a:b], axis=0) / dt[:, None]
+        speed[a:b - 1] = np.abs(v).max(axis=1)
+        rows, lengths, first = [], [], a
+        lead = not (k == 0 and open_start)
+        tail = not (k == len(runs) - 1 and open_end)
+        if lead:
+            rows.append(np.zeros(6))
+            lengths.append(dt[0])
+        else:
+            first = a + 1
+        rows.extend(v)
+        lengths.extend(dt)
+        if tail:
+            rows.append(np.zeros(6))
+            lengths.append(dt[-1])
+        else:
+            ends_moving = bool(speed[b - 2] > SERVO_REST_SPEED)
+        vel, length = np.asarray(rows), np.asarray(lengths)
+        change = (vel[1:] - vel[:-1]) / ((length[1:] + length[:-1]) / 2.0)[:, None]
+        acc[first:first + len(change)] = change
+    return {'runs': runs, 'speed': speed, 'acc': acc, 'spacing': spacing,
+            'ends_moving': ends_moving}
+
+
+def clutch_events(samples: Sequence[Tuple[int, bool]]) -> Tuple[List[int], List[int]]:
+    """
+    Return ``(releases, engages)``: stamps (ns) where the clutch went False or True.
+
+    ``samples`` are ``(stamp_ns, clutch_engaged)`` in arrival order. A release is a message with
+    the clutch off after one with it on, so it is seen at the first cycle after the release.
+    """
+    releases, engages = [], []
+    for (_, before), (stamp, after) in zip(samples[:-1], samples[1:]):
+        if before and not after:
+            releases.append(stamp)
+        elif after and not before:
+            engages.append(stamp)
+    return releases, engages
+
+
+def stop_durations(t: Sequence[float], analysis: dict,
+                   releases: Sequence[float], engages: Sequence[float],
+                   open_end: bool = False) -> List[dict]:
+    """
+    Return, per release with motion, how long Servo's output took to stop.
+
+    ``releases`` and ``engages`` are times (s, the clock of ``t``). A release's window ends at
+    the next engage. The stop lasts from the first point at or after the release to the last
+    point whose segment speed (any joint) is above ``SERVO_REST_SPEED``, plus that segment (all
+    runs are scanned: a stall of Servo's output inside a stop counts into it);
+    0 when only the segment before the first point was moving. A release has motion when the
+    segment into that point or any later segment in the window moves; the others are left out.
+    ``unfinished`` is True when the stream ended (``open_end``) while the last segment still
+    moved: the duration is then the time seen so far.
+
+    Each entry: ``{'release_s', 'first_point_s', 'duration_s', 'unfinished'}``.
+    """
+    t = np.asarray(t, dtype=float)
+    speed = analysis['speed']
+    runs = analysis['runs']
+    out = []
+    for release in releases:
+        end = min([e for e in engages if e > release], default=math.inf)
+        first = int(np.searchsorted(t, release, side='left'))
+        if first >= len(t) or t[first] >= end:
+            continue
+        a = next(r[0] for r in runs if r[0] <= first < r[1])
+        into = first > a and speed[first - 1] > SERVO_REST_SPEED
+        last = None
+        for j in range(first, len(t) - 1):
+            if t[j] >= end:
+                break
+            if speed[j] > SERVO_REST_SPEED:      # NaN (the last point of a run) is not
+                last = j
+        if not into and last is None:
+            continue
+        duration = float(t[last + 1] - t[first]) if last is not None else 0.0
+        # The stream ended while the arm still moved: the capture cut it at a moving segment,
+        # either the last one in the window or the one into the final point.
+        if last is not None:
+            unfinished = open_end and last == len(t) - 2 and t[last + 1] < end
+        else:
+            unfinished = open_end and first == len(t) - 1
+        unfinished = bool(unfinished)
+        out.append({'release_s': float(release), 'first_point_s': float(t[first]),
+                    'duration_s': duration, 'unfinished': unfinished})
+    return out
