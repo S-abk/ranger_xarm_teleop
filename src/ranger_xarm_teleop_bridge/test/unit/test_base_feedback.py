@@ -23,7 +23,8 @@ from ranger_xarm_teleop_bridge import base_feedback as bf
 from ranger_xarm_teleop_bridge import relay_messages as rm
 from ranger_xarm_teleop_bridge.base_feedback import BaseEvents, BaseSample
 from ranger_xarm_teleop_bridge.episode_feedback import Pattern
-from ranger_xarm_teleop_bridge.operator_status import BaseView, Snapshot, StatusTracker
+from ranger_xarm_teleop_bridge.operator_status import (BASE_EVENT_AT_REST, BaseView, Snapshot,
+                                                       StatusTracker)
 import yaml
 
 MSG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..',
@@ -320,16 +321,18 @@ def test_a_refusal_ages_and_goes_in_the_snapshot_text():
     assert t.snapshot(10.1, 125.0).base_valid
 
 
-def test_a_stop_is_aged_from_the_newest_event_so_the_arrival_at_rest_restarts_it():
+def test_a_stop_is_aged_from_its_own_event_not_the_arrival_at_rest():
     # The base node's state stays STOPPED when the base comes to rest: the newest event is then
-    # AT_REST, and the age of the line is the age of that event (as BaseState.last_event_wall_time
-    # says). Pinned so a change to latching the stop's own time is a deliberate one.
+    # AT_REST, but the line is aged from the stop.
     t = StatusTracker()
     reason = CODE['INPUT_STALE']
     t.on_base(view(state=S_STOPPED, reason=reason, event=STOPPED, wall=90.0), 10.0)
     assert t.snapshot(10.1, 100.0).base_text.endswith('(10 s ago)')
     t.on_base(view(state=S_STOPPED, reason=reason, event=AT_REST, wall=98.0), 10.2)
-    assert t.snapshot(10.3, 100.0).base_text.endswith('(2 s ago)')
+    snap = t.snapshot(10.3, 100.0)
+    assert snap.base_text.endswith('(10 s ago)')
+    assert snap.base_event_age == 2.0                  # the newest event, as the field says
+    assert BASE_EVENT_AT_REST == AT_REST
 
 
 def test_other_sections_are_not_changed_by_a_base_state():

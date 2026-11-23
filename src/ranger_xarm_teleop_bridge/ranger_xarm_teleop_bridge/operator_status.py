@@ -35,6 +35,8 @@ from .episode_feedback import EVENT_NAMES
 from .reset_feedback import reset_text
 
 NAN = float('nan')
+# BaseState.EVENT_AT_REST: the base came to rest after a drive (not what the line shows).
+BASE_EVENT_AT_REST = 5
 
 # TeleopState.HOLD_* (checked against the message definition by the unit tests).
 HOLD_NAMES = {
@@ -351,6 +353,7 @@ class StatusTracker:
     _reset_at: float = NAN
     _base: Optional[BaseView] = None
     _base_at: float = NAN
+    _base_line_wall: float = NAN     # wall time of the event the base line shows
     events_missed: int = 0
     counts: Dict[str, int] = field(default_factory=lambda: {'teleop': 0, 'episode': 0})
 
@@ -383,7 +386,14 @@ class StatusTracker:
         self._reset, self._reset_at = r, now
 
     def on_base(self, b: BaseView, now: float) -> None:
-        """Take one BaseState (``now``: monotonic arrival time, s)."""
+        """
+        Take one BaseState (``now``: monotonic arrival time, s).
+
+        The panel line is aged from the event that made it (a start, refusal or stop): the
+        base coming to rest afterwards (AT_REST) is a later event that does not restart it.
+        """
+        if int(b.last_event) not in (0, BASE_EVENT_AT_REST):
+            self._base_line_wall = b.event_wall_time
         self._base, self._base_at = b, now
 
     @staticmethod
@@ -481,9 +491,12 @@ class StatusTracker:
             out.base_reason = int(b.reason)
             if int(b.last_event) != 0 and math.isfinite(b.event_wall_time):
                 out.base_event_age = max(0.0, wall_now - b.event_wall_time)
+            line_age = NAN
+            if math.isfinite(self._base_line_wall):
+                line_age = max(0.0, wall_now - self._base_line_wall)
             other = b.reason_text.split(': ', 1)[1] if ': ' in b.reason_text else ''
             out.base_text = base_text(b.state, b.reason, b.mode, b.turn_ignored, b.active_limit,
-                                      out.base_event_age, other)
+                                      line_age, other)
         return out
 
 

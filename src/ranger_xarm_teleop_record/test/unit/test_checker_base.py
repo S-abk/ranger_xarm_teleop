@@ -84,9 +84,19 @@ def with_drive(first, last, with_odom=True, vx=0.3, odom_first=None, odom_last=N
     return ep
 
 
+def with_base_state(ep):
+    """Record the base node's state (base driving on), unless the episode has it already."""
+    if 'base_state' not in ep.streams:
+        stamps = T0 + np.arange(0.0, 12.0, 0.1)
+        n = len(stamps)
+        add(ep, 'base_state', stamps, {name: np.zeros(n) for name in (
+            'state', 'mode', 'reason', 'active_limit')})
+    return ep
+
+
 def run(ep, checks=CHECKS):
-    """Check an episode."""
-    return checker.check_episode(ep, checks)
+    """Check an episode recorded with base driving on."""
+    return checker.check_episode(with_base_state(ep), checks)
 
 
 def flags(report, name):
@@ -104,7 +114,7 @@ def failing_checks():
 # ---- moved or not, travel, drive time, cycles ----
 
 def test_base_streams_absent_report_not_recorded_and_raise_nothing():
-    report = run(synth.build())
+    report = checker.check_episode(synth.build(), CHECKS)
     assert report['base'] == {'mode': 'parked: no base topics recorded', 'streams': {}}
     assert flags(report, 'BASE_DURING_CLUTCH') == []
 
@@ -266,7 +276,7 @@ def test_both_causes_are_named_in_one_flag():
 
 
 def test_without_teleop_state_the_overlap_is_not_judged():
-    ep = with_drive(2.0, 2.5)
+    ep = with_base_state(with_drive(2.0, 2.5))
     del ep.streams['state']
     overlap = checker._base_report(ep, CHECKS, [])['clutch_overlap']
     assert overlap == {'checked': False, 'why': 'no teleop state'}
@@ -294,7 +304,22 @@ def test_the_flag_fails_the_episode_when_the_tolerances_list_it():
 
 
 def test_the_checker_does_not_change_an_episode_with_base_streams():
-    ep = with_drive(2.0, 2.5)
+    ep = with_base_state(with_drive(2.0, 2.5))
     before = synth.snapshot(ep)
     run(ep)
     assert synth.same(before, synth.snapshot(ep))
+
+
+def test_without_the_base_nodes_state_the_overlap_is_not_judged():
+    """Base driving off (no base state recorded): another source's base command is not judged."""
+    ep = synth.build()
+    stamps, twist = cmd_rows(2.0, 2.4)
+    add(ep, 'cmd_vel', stamps, {'twist': twist}, has_header=False)
+    report = checker.check_episode(ep, CHECKS)
+    assert flags(report, 'BASE_DURING_CLUTCH') == []
+    overlap = report['base']['clutch_overlap']
+    assert overlap == {'checked': False, 'why': 'no base state recorded: base driving was off'}
+
+
+def test_the_flag_fails_an_episode_with_the_shipped_tolerances():
+    assert 'BASE_DURING_CLUTCH' in CHECKS['flags']['fail_flags']

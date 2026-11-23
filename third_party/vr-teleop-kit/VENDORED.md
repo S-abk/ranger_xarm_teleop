@@ -344,7 +344,7 @@ Reason for each change:
  
    <!-- bump v= to force the Quest browser to refetch the JS after a change -->
 -  <script src="/static/client.js?v=37"></script>
-+  <script src="/static/feedback.js?v=6"></script>
++  <script src="/static/feedback.js?v=7"></script>
 +  <script src="/static/client.js?v=39"></script>
  </body>
  </html>

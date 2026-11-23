@@ -23,7 +23,7 @@ flags:
   base_clutch_turn_rps: 0.02      # ... or this /odom turn rate, while the arm's clutch is engaged
   link_input_age_p99_s: 0.1     # LINK_DEGRADED above this p99 input age, or any reconnect or sequence gap
   reconnect_gap_s: 1.0          # a status gap longer than this (wall) counts as a reconnect
-  fail_flags: [DATA_LOST, RECORDER_ERROR, TELEOP_STATE_LOST]   # these flags fail an episode
+  fail_flags: [DATA_LOST, RECORDER_ERROR, TELEOP_STATE_LOST, BASE_DURING_CLUTCH]   # these flags fail an episode
 consistency:
   lag_grid_s: [-0.3, 0.3, 0.005]   # lag search grid: start, stop, step
   lag_min_s: 0.04               # the measured motion must follow the command by at least ...
