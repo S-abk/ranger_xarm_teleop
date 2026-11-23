@@ -144,8 +144,11 @@ def test_real_controllers_are_spawned_by_the_mock(stage):
     real = [name for name in _real_spawner_names(stage) if name]
     mock = [name for name, _ in hwmock.spawner_specs(stage)]
     assert real and all(name in mock for name in real)
-    assert [name for name in mock if name not in real] == (
-        ['teleop_arm_controller'] if stage == 'execution' else [])
+    # The mock adds the teleop controller of the workspace patch (P1) to the execution stage;
+    # a workspace with P1 applied spawns it itself, and then the mock adds nothing.
+    extra = (['teleop_arm_controller']
+             if stage == 'execution' and 'teleop_arm_controller' not in real else [])
+    assert [name for name in mock if name not in real] == extra
 
 
 def test_description_args_stay_real_hardware_free():
