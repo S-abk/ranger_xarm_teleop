@@ -80,8 +80,8 @@ from geometry_msgs.msg import PoseStamped, TransformStamped
 from moveit_msgs.msg import ServoStatus
 from moveit_msgs.srv import ServoCommandType
 import numpy as np
-from ranger_xarm_teleop_bridge.bridge_node import (HEAD_POSE_TOPIC, JOY_TOPIC,
-                                                   POSE_TOPICS, STATUS_QOS, STATUS_TOPIC)
+from ranger_xarm_teleop_bridge.topics import (HEAD_POSE_TOPIC, JOY_TOPIC, POSE_TOPICS,
+                                              STATUS_QOS, STATUS_TOPIC)
 from ranger_xarm_teleop_interfaces.msg import ArmOwner, GripperCommand, InputStatus, TeleopState
 from ranger_xarm_teleop_interfaces.srv import GetJointPath, SetArmOwner
 from ranger_xarm_teleop_servo import calls

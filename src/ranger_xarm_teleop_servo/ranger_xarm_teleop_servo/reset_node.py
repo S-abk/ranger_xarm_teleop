@@ -47,8 +47,8 @@ from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import PoseStamped
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint
-from ranger_xarm_teleop_bridge.bridge_node import (HEAD_POSE_TOPIC, JOY_TOPIC, POSE_TOPICS,
-                                                   STATUS_QOS, STATUS_TOPIC)
+from ranger_xarm_teleop_bridge.topics import (HEAD_POSE_TOPIC, JOY_TOPIC, POSE_TOPICS,
+                                              STATUS_QOS, STATUS_TOPIC)
 from ranger_xarm_teleop_interfaces.msg import (ArmOwner, EpisodeState, InputStatus,
                                                ResetHeartbeat, ResetState, ResetWatchdog,
                                                TeleopState)

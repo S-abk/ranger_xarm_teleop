@@ -16,4 +16,5 @@ WebXR relay to ROS 2 input bridge.
 
 Pure modules (no ROS imports, unit-tested without ROS): ``axes``, ``frame_parse``,
 ``joy_layout``, ``jsonl_io``, ``analysis``. ROS wrappers: ``bridge_node``, ``replay_node``.
+Topic names and QoS: ``topics`` (ROS only, no WebSocket library), for the arm-side readers.
 """

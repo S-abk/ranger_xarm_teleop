@@ -52,36 +52,17 @@ from ranger_xarm_teleop_bridge.outbox import Outbox
 from ranger_xarm_teleop_bridge.relay_messages import (echo_of, encode, FrameInfo,
                                                       haptic_payload, panel_config,
                                                       status_payload)
+# The topic names and QoS live in ``topics`` (no WebSocket import) and are re-exported here.
+from ranger_xarm_teleop_bridge.topics import (HANDS, HAPTIC_QOS, HAPTIC_TOPIC,  # noqa: F401
+                                              HEAD_POSE_TOPIC, JOY_QOS, JOY_TOPIC,
+                                              OPERATOR_STATUS_QOS, OPERATOR_STATUS_TOPIC,
+                                              POSE_QOS, POSE_TOPICS, STATUS_QOS, STATUS_TOPIC)
 from ranger_xarm_teleop_interfaces.msg import HandStatus, Haptic, InputStatus, OperatorStatus
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Joy
 import websockets
-
-HANDS = ('left', 'right')
-POSE_TOPICS = {hand: f'/teleop/input/{hand}/pose' for hand in HANDS}
-HEAD_POSE_TOPIC = '/teleop/input/head/pose'
-JOY_TOPIC = '/teleop/input/joy'
-STATUS_TOPIC = '/teleop/input/status'
-HAPTIC_TOPIC = '/teleop/haptic'
-OPERATOR_STATUS_TOPIC = '/teleop/operator/status'
-
-# Interface contract: poses and joy best effort, depth 1; status reliable, depth 10.
-POSE_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST,
-                      depth=1, durability=DurabilityPolicy.VOLATILE)
-JOY_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST,
-                     depth=1, durability=DurabilityPolicy.VOLATILE)
-STATUS_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST,
-                        depth=10, durability=DurabilityPolicy.VOLATILE)
-
-# Operator feedback in: as published by the operator feedback node.
-HAPTIC_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST,
-                        depth=10, durability=DurabilityPolicy.VOLATILE)
-OPERATOR_STATUS_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
-                                 history=HistoryPolicy.KEEP_LAST, depth=1,
-                                 durability=DurabilityPolicy.VOLATILE)
 
 LOG_THROTTLE_S = 2.0
 MIN_SEND_BUFFER = 1024
