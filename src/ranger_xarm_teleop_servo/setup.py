@@ -38,6 +38,7 @@ setup(
             'arm_mux_node = ranger_xarm_teleop_servo.arm_mux_node:main',
             'gripper_relay_node = ranger_xarm_teleop_servo.gripper_relay_node:main',
             'reset_node = ranger_xarm_teleop_servo.reset_node:main',
+            'base_node = ranger_xarm_teleop_servo.base_node:main',
             'reset_watchdog_node = ranger_xarm_teleop_servo.reset_watchdog_node:main',
         ],
     },
