@@ -15,7 +15,7 @@
 (function (root) {
   'use strict';
 
-  const FEEDBACK_VERSION = 'feedback-6';
+  const FEEDBACK_VERSION = 'feedback-7';
   const SEEN_MAX = 512;               // (run, id) pairs remembered for de-duplication
   const MAX_PULSES = 32;
   const MAX_PATTERN_MS = 10000;
@@ -263,6 +263,18 @@
       } else if (typeof rs.text === 'string' && rs.text) {
         const bad = rs.state === 'REFUSED' || (rs.state === 'STOPPED' && rs.reason !== 'RELEASED');
         addWrapped(rs.text, bad ? 'bad' : (rs.state === 'ARRIVED' ? 'ok' : 'text'), 'small', 3);
+      }
+    }
+
+    // The base line (driving the base with the left grip): the same rule, a base section only once a
+    // base state has been seen; its text carries its own age.
+    const bs = msg.base;
+    if (bs && typeof bs === 'object') {
+      if (!bs.valid) {
+        add('Base: no data', 'warn');
+      } else if (typeof bs.text === 'string' && bs.text) {
+        const bad = bs.state === 'REFUSED' || (bs.state === 'STOPPED' && bs.reason !== 'RELEASED');
+        addWrapped(bs.text, bad ? 'bad' : 'text', 'small', 3);
       }
     }
     return { stale: false, lines, key: lines.map((l) => l.size + '|' + l.tone + '|' + l.text).join('\n') };
