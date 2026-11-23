@@ -32,7 +32,7 @@ from typing import List, Optional
 from ranger_xarm_teleop_check import report as rep
 from ranger_xarm_teleop_check import rules, stats, sysinfo
 from ranger_xarm_teleop_check.rules import Options
-from ranger_xarm_teleop_servo.joint_accel import ACCELERATION_NAME
+from ranger_xarm_teleop_servo.joint_accel import ACCELERATION_NAME, IMMEDIATE_STOP_LOG
 
 NODE_NAME = 'hw_check'
 VERSION_PACKAGES = ('controller_manager', 'joint_trajectory_controller', 'moveit_servo')
@@ -194,7 +194,8 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
             'activity': None, 'controller_state': {}, 'description': None, 'states': [],
             'targets': [], 'command': [], 'jog': [], 'command_capture': None, 'clutch': [],
             'warnings': [], 'robot_states': None,
-            'rosout': {'overruns': 0, 'read_failures': 0, 'overrun_examples': [],
+            'rosout': {'overruns': 0, 'read_failures': 0, 'immediate_stops': 0,
+                       'overrun_examples': [],
                        'read_examples': []},
             'cameras': {}, 'qos': {}}
     try:
@@ -340,6 +341,8 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
             r['overruns'] += 1
             if len(r['overrun_examples']) < 5:
                 r['overrun_examples'].append(f'{msg.name}: {msg.msg}')
+        if IMMEDIATE_STOP_LOG in msg.msg:     # the teleop node's stop without a ramp
+            r['immediate_stops'] += 1
         if 'Read() returns' in msg.msg:
             r['read_failures'] += 1
             if len(r['read_examples']) < 5:

@@ -24,9 +24,8 @@ Rules for every stage:
 - Robot address, camera serials and your limits file are yours: they are arguments or files
   outside any checkout, never committed. Below they are written `<robot_ip>`, `<serial>` and
   `<limits>` (the path of your limits file), and `<planes>` (the path of your keep-out planes
-  file, stage 4's precondition).
-- The robot workspace (the folder holding `src/xarm_ros2`) is written `~/ranger_xarm_ws` in the
-  commands. If yours is elsewhere, type its path there: a shell variable set in another
+  file, stage 4's precondition), and `<robot_ws>`: the path of the robot workspace's folder,
+  the one holding `src/xarm_ros2`. Type the path itself: a shell variable set in another
   terminal is empty in a new one.
 
 **Building the teleop checkout** on the robot computer (once, and after every update): in a
@@ -179,12 +178,12 @@ launch prints `ATTACH PREFLIGHT OK`; the check tool's first line says it only su
   it, the state was stair-stepped at 5 Hz under `report_type:=normal`. Check:
 
   ```bash
-  git -C ~/ranger_xarm_ws/src/xarm_ros2 merge-base --is-ancestor cc44f9f HEAD && echo contains
+  git -C <robot_ws>/src/xarm_ros2 merge-base --is-ancestor cc44f9f HEAD && echo contains
   ```
 
   If git does not know the commit (a shallow clone or a rebased fork), check the source
-  instead: `grep -n 20250318 ~/ranger_xarm_ws/src/xarm_ros2/xarm_controller/src/hardware/uf_robot_system_hardware.cpp`
-  must print a line. `hw_check idle --limits <limits> --workspace ~/ranger_xarm_ws` judges the same rule.
+  instead: `grep -n 20250318 <robot_ws>/src/xarm_ros2/xarm_controller/src/hardware/uf_robot_system_hardware.cpp`
+  must print a line. `hw_check idle --limits <limits> --workspace <robot_ws>` judges the same rule.
   **If neither shows it, stop:** update the driver first.
 - CPU governor at `performance` on the robot computer (the idle check reports it), for
   example `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`.
@@ -215,7 +214,7 @@ ros2 launch ranger_xarm_teleop_hardware teleop_hardware.launch.py stage:=check l
 tools/relay.sh                                                                             # terminal 3
 adb reverse tcp:8443 tcp:8443
 ros2 launch ranger_xarm_teleop_bridge bridge.launch.py record_path:=recordings/hw_stage2.jsonl   # terminal 4
-ros2 run ranger_xarm_teleop_check hw_check idle --limits <limits> --workspace ~/ranger_xarm_ws --expect-active joint_state_broadcaster   # terminal 5
+ros2 run ranger_xarm_teleop_check hw_check idle --limits <limits> --workspace <robot_ws> --expect-active joint_state_broadcaster   # terminal 5
 ```
 
 Note the arm's firmware version from terminal 1's start-up log (the tool cannot ask the arm
@@ -291,7 +290,7 @@ ros2 launch ranger_xarm_moveit_config real_execution.launch.py robot_ip:=<robot_
 ros2 launch ranger_xarm_teleop_hardware teleop_hardware.launch.py stage:=execution motion_enabled:=true limits_file:=<limits> teleop_params_file:=<planes>   # terminal 2
 tools/relay.sh; adb reverse tcp:8443 tcp:8443                                              # terminal 3
 ros2 launch ranger_xarm_teleop_bridge bridge.launch.py record_path:=recordings/hw_stage3.jsonl   # terminal 4
-ros2 run ranger_xarm_teleop_check hw_check idle --limits <limits> --workspace ~/ranger_xarm_ws --expect-active joint_state_broadcaster,xarm6_traj_controller --expect-inactive teleop_arm_controller   # terminal 5
+ros2 run ranger_xarm_teleop_check hw_check idle --limits <limits> --workspace <robot_ws> --expect-active joint_state_broadcaster,xarm6_traj_controller --expect-inactive teleop_arm_controller   # terminal 5
 ```
 
 `motion_enabled:=true` here is the deliberate step that lets the arm be switched to teleop at
@@ -306,7 +305,7 @@ plus `controller xarm6_traj_controller active` and `controller teleop_arm_contro
 **3a. A small planned motion.** In terminal 5 start
 
 ```bash
-ros2 run ranger_xarm_teleop_check hw_check motion --seconds 40 --limits <limits> --joint-limits ~/ranger_xarm_ws/src/ranger_xarm_moveit_config/config/joint_limits.yaml   # terminal 5
+ros2 run ranger_xarm_teleop_check hw_check motion --seconds 40 --limits <limits> --joint-limits <robot_ws>/src/ranger_xarm_moveit_config/config/joint_limits.yaml   # terminal 5
 ```
 
 then in RViz plan a small motion (one joint, about 10 degrees, velocity scaling 0.1), look at
@@ -381,7 +380,9 @@ terminal 5, 2, 4, then 1.
   people stand) in your planes file, and pass it to the teleop launch (terminal 2 of stages 2
   to 4) as `teleop_params_file:=<planes>`.
   - The wrist point is bounded only when `wrist_frame` names it: a frame fixed to the tool
-    (on this arm the flange, `xarm_link6`). Without it, only the tool point is kept inside.
+    (on this arm the flange, `xarm_link6`). On the hardware path the teleop node refuses to
+    start with keep-out planes and no `wrist_frame`, in one line naming it; its start-up line
+    says which points the planes bound.
   - Write every number with a decimal point (`1.0`, not `1`): the list is a list of decimals.
   - The format, with example numbers only:
 
@@ -401,7 +402,7 @@ terminal 5, 2, 4, then 1.
 **Commands:** before arming, start the check (everything joins before arming):
 
 ```bash
-ros2 run ranger_xarm_teleop_check hw_check teleop --seconds 120 --limits <limits> --joint-limits ~/ranger_xarm_ws/src/ranger_xarm_moveit_config/config/joint_limits.yaml   # terminal 5
+ros2 run ranger_xarm_teleop_check hw_check teleop --seconds 120 --limits <limits> --joint-limits <robot_ws>/src/ranger_xarm_moveit_config/config/joint_limits.yaml   # terminal 5
 ```
 
 Then, in the headset: point forward and press A (calibrate), press B (arm). **Arming moves
@@ -415,7 +416,10 @@ one more stroke the other way.
 release it stops within about a centimetre and within 0.2 s (the command ramps to zero at the
 acceleration limit; the arm also finishes the points already on their way); the target in RViz;
 the check gives `PASS` on `stale repeats while moving`, `target lead (largest, translation)`,
-`wrist oscillation`, `commanded joint acceleration (MoveIt Servo output)` (every point of
+`wrist oscillation`, `commanded joint acceleration (teleop joint command)` (every step of the
+teleop node's own joint command within your acceleration limit, where G-18 is enforced; a step
+straight to zero only as an immediate stop the node announced: teleop lost the arm, or MoveIt
+Servo halted), `commanded joint acceleration (MoveIt Servo output)` (every point of
 MoveIt Servo's output within twice your acceleration limit, plus 5 % for Servo's point timing:
 one Servo skip can join two command steps) and `stop time after a release` (at most 0.2 s plus
 one cycle), reports `joint-state acceleration (20 ms, INFO)` (information only: differentiated
@@ -431,8 +435,8 @@ tightened) and `target lag`
 - it keeps moving more than about 2 cm after you release;
 - the wrist oscillates (the solver's limit cycle near the wrist singularity: release, then
   disarm, and plan the arm away from the singular posture through MoveIt);
-- `commanded joint acceleration (MoveIt Servo output)` or `stop time after a release` fails:
-  keep the report and stop the stage;
+- `commanded joint acceleration (teleop joint command)`, `commanded joint acceleration (MoveIt
+  Servo output)` or `stop time after a release` fails: keep the report and stop the stage;
 - the arm reports a collision error: payload, mounting or sensitivity may be set wrong, but
   uneven point timing can also cause it, because the firmware estimates acceleration from the
   points it receives (the check reports Servo's point spacing). Keep the report and stop.
@@ -469,7 +473,7 @@ The bring-up's cameras default to 15 fps; the recording profile expects 30 fps a
 hence the two profile arguments.
 
 Before arming, also run the idle check again on this bring-up (cameras and recorder add load
-to the robot computer): `hw_check idle --limits <limits> --workspace ~/ranger_xarm_ws` in
+to the robot computer): `hw_check idle --limits <limits> --workspace <robot_ws>` in
 terminal 5.
 
 **You should see:** `PASS` on every camera's rate, gap and size rules, and the idle check as in

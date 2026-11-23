@@ -172,6 +172,9 @@ REQUEST_RETRY_S = 1.0       # pause between ownership requests after a refusal
 # no owner report while it serves a request or reads (one executor), so a report is fresh only
 # when it is doing neither, and a repeat is never sent meanwhile.
 OWNER_REQUEST_TIMEOUT_S = 5.0
+# The wrist point the keep-out planes bound with the tool point, as usually set on this arm
+# (the flange, fixed to the tool); named in the hardware refusal of planes without one.
+USUAL_WRIST_FRAME = 'xarm_link6'
 # An arm request whose outcome is still unknown this long after it was sent (no fresh report
 # from the mux) disarms: the arm press does not wait on a silent mux, and teleop never takes
 # the arm by itself long after it. Longer than the mux's worst case for one request (17 s).
@@ -442,6 +445,7 @@ class TeleopNode(Node):
             raise StartupRefused(str(err) + ''.join(', ' + n for n in motion_missing)) from err
         except ValueError as err:
             raise StartupRefused(str(err)) from err
+        self._check_plane_points()
         gripper_values = {'gripper_enabled': bool(self.get_parameter('gripper_enabled').value),
                           'gripper_joint': str(self.get_parameter('gripper_joint').value)}
         for name in grip.REQUIRED_WHEN_ENABLED + ('gripper_close_threshold',
@@ -798,6 +802,31 @@ class TeleopNode(Node):
             self.static.add(t.header.frame_id, t.child_frame_id,
                             Pose((tr.x, tr.y, tr.z), (ro.x, ro.y, ro.z, ro.w)))
         self._resolve_fixed_frames()
+
+    def _check_plane_points(self) -> None:
+        """
+        Say which points the keep-out planes bound; on hardware, refuse planes without a wrist.
+
+        The safety gate keeps the tool frame and the wrist out of every keep-out plane. Without
+        ``wrist_frame`` the planes bound the tool point alone, so the hardware path refuses
+        them; simulation runs as it is, and the start-up line says so.
+        """
+        count = len(self.params.keep_out_planes)
+        if not count:
+            self.get_logger().info('keep-out planes: none set')
+            return
+        if not self.wrist_frame:
+            if self.hardware_limits:
+                raise StartupRefused(
+                    f'keep_out_planes ({count}) bound the tool point only: set wrist_frame '
+                    f'with them (on this arm usually {USUAL_WRIST_FRAME}, the flange)')
+            self.get_logger().warning(
+                f'keep-out planes: {count}, bounding the tool point ({self.tool_frame}) only: '
+                'wrist_frame is not set')
+            return
+        self.get_logger().info(
+            f'keep-out planes: {count}, bounding the tool point ({self.tool_frame}) and the '
+            f'wrist point ({self.wrist_frame})')
 
     def _resolve_fixed_frames(self) -> None:
         if self.tool_to_tip is None:
@@ -1629,8 +1658,9 @@ class TeleopNode(Node):
             self.stop_command(stamp)
             return
         if immediate:
-            self.get_logger().warning(f'joint command stopped at once: {immediate}',
-                                      throttle_duration_sec=1.0)
+            # Not throttled: the check tool counts these lines against the steps to zero.
+            # At most one per engagement (the zero ends it; a new grip starts the next).
+            self.get_logger().warning(f'{ja.IMMEDIATE_STOP_LOG}: {immediate}')
             self.stop_command(stamp, force=True)
             return
         if not self.stopping:

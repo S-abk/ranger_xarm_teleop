@@ -95,6 +95,9 @@ def test_a_stroke_at_a_fifth_of_the_caps_passes_the_acceleration_and_stop_rules(
         probe.disarm()
     finally:
         code, verdicts, report, output = check_report(process, data_dir, 90.0)
+    # G-18 judged where it is enforced: the teleop node's own command steps.
+    assert verdicts.get('commanded joint acceleration (teleop joint command)') == 'PASS', \
+        output[-4000:]
     assert verdicts.get('commanded joint acceleration (MoveIt Servo output)') == 'PASS', \
         output[-4000:]
     assert verdicts.get('stop time after a release') == 'PASS', output[-4000:]
