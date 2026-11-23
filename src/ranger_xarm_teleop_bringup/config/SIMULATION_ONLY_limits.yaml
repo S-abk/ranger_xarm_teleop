@@ -21,6 +21,11 @@
     step_rotation_limit_deg: 10.0      # per 20 ms target cycle (500 deg/s)
     linear_speed_cap_m_s: 0.25         # tool speed, enforced on the joint command by the teleop node
     angular_speed_cap_rad_s: 1.0
+    # G-18: joint command limits. The cap is today's value, 0.95 x the 2.0 rad/s joint velocity
+    # limit. The acceleration limit is simulation only; the stop from the cap takes 0.19 s,
+    # within G-18's 0.2 s.
+    joint_speed_cap_rad_s: 1.9
+    joint_acceleration_limit_rad_s2: 10.0
     # G-14: lead of the target over the measured tool pose. At least cap x lag, or the
     # clamp would hold the arm below the caps: Gazebo lag 0.17 s gives 43 mm and 9.7 deg
     # at the caps above; 20 % added.
