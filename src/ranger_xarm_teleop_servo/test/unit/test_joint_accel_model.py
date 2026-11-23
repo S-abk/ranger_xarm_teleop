@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-The joint acceleration limit through the whole driving path (G-18): gate, solver, limiter,
-delayed model arm (150 ms, Servo's state as reference), over the solver fixtures.
+The joint acceleration limit through the whole driving path (G-18), over the solver fixtures.
 
+The path is the gate, the solver, the limiter and the delayed model arm (150 ms, Servo's
+state as reference).
 Three configurations: the simulation values (joint speed cap 1.9 rad/s, 10 rad/s^2, tool caps
 0.25 m/s and 1 rad/s), and a hardware-like pair (0.4 rad/s, 2 rad/s^2: a 0.2 s stop) at the
 simulation tool caps and at a fifth of them. These are test values only.
@@ -32,9 +33,9 @@ from ranger_xarm_teleop_servo.teleop_model import run
 
 T = 0.02
 CASES = {
-    'simulation': dict(cap=1.9, a=10.0, linear=0.25, angular=1.0),
-    'hardware-like': dict(cap=0.4, a=2.0, linear=0.25, angular=1.0),
-    'hardware-like, fifth caps': dict(cap=0.4, a=2.0, linear=0.05, angular=0.2),
+    'simulation': {'cap': 1.9, 'a': 10.0, 'linear': 0.25, 'angular': 1.0},
+    'hardware-like': {'cap': 0.4, 'a': 2.0, 'linear': 0.25, 'angular': 1.0},
+    'hardware-like, fifth caps': {'cap': 0.4, 'a': 2.0, 'linear': 0.05, 'angular': 0.2},
 }
 JOINT_LIMIT_START = [0.0, -0.6, -0.7, 0.0, -1.2, 0.0]
 NAMES = ('clutch_line', 'clutch_fast', 'clutch_step', 'clutch_release_moving',
@@ -133,8 +134,12 @@ def test_release_travel_is_within_the_formula(arm, runs, case):
 
 
 def test_the_limiter_adds_no_catch_up_after_the_hand_stops(arm):
-    """INV-3 / G-18: with the limit, the arm travels no further after the hand stops than
-    without it, beyond the stop ramp's own bound (the mapping is never moved)."""
+    """
+    INV-3 / G-18: no catch-up after the hand stops beyond the stop ramp's own bound.
+
+    With the limit the arm travels no further after the hand stops than without it, plus the
+    stop bound; the mapping is never moved.
+    """
     frames = fixture('clutch_fast')
     moving = [f.arrival for a, f in zip(frames, frames[1:])
               if a.controller is not None and f.controller is not None
