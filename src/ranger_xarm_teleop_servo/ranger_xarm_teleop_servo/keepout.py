@@ -699,6 +699,15 @@ class Model:
                 world = np.einsum('pij,pj->pi', rot[body], self._sphere_centre[spheres]) \
                     + pos[body]
                 d, normal = units.pair_distance(world, pair_units)
+                # A cluster's bounding sphere is no farther than any of its members: an entry
+                # already beyond the limit there is dropped before its members are expanded
+                # (exact: none of them can be within the limit).
+                bound = d - self._sphere_radius[spheres]
+                reach = bound <= limit
+                if not reach.all():
+                    lower = min(lower, float(bound[~reach].min()))
+                    d, normal, spheres = d[reach], normal[reach], spheres[reach]
+                    pair_units, body, world = pair_units[reach], body[reach], world[reach]
                 cluster = units.mem_count[pair_units] > 0
                 if cluster.any():
                     # Replace each cluster's lower bound by its member spheres.

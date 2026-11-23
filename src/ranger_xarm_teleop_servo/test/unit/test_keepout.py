@@ -15,6 +15,7 @@
 
 import math
 
+from keepout_brute import assert_search_is_exhaustive
 from keepout_robot import box_stl, JOINTS, MESHES, READY, resolve, robot_urdf
 import numpy as np
 import pytest
@@ -288,6 +289,18 @@ def test_clearance_is_the_brute_force_minimum_over_every_sphere(model, extra):
             assert model.pairs.index(rows.nearest) == int(np.argmin(minima))
         else:
             assert not rows.exact and rows.clearance <= brute + 1e-12
+
+
+@pytest.mark.parametrize('spread', [0.3, 0.8, None])
+def test_the_pruned_search_lists_what_a_brute_force_search_finds(model, extra, spread):
+    """Pruning (bodies, groups, a mesh's clusters) never drops a sphere pair within reach."""
+    rng = np.random.default_rng(13)
+    lower = np.array([-3.0, -2.0, -3.9, -3.0, -1.6, -3.0])
+    upper = np.array([3.0, 2.0, 0.1, 3.0, 3.1, 3.0])
+    for _ in range(15):
+        q = (rng.uniform(lower, upper) if spread is None
+             else np.array(READY) + rng.normal(0.0, spread, 6))
+        assert_search_is_exhaustive(model, q, extra, (MARGIN, model.influence, 0.2))
 
 
 def test_row_gradients_are_the_derivative_of_the_distance(model, extra):
