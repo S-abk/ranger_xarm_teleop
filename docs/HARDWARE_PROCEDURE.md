@@ -49,6 +49,8 @@ suggestions, not defaults, and appear nowhere the hardware path reads them.
 |---|---|---|
 | `linear_speed_cap_m_s` | tool linear speed (joint command) | 20 % of the simulation value: 0.05 m/s |
 | `angular_speed_cap_rad_s` | tool angular speed | 20 % of the simulation value: 0.2 rad/s |
+| `joint_speed_cap_rad_s` | every arm joint's commanded speed (G-18) | choose it first, well under the arm's rated joint speed (see below) |
+| `joint_acceleration_limit_rad_s2` | every arm joint's commanded acceleration, also the stop after a release, a gate fault or a disarm (G-18) | then this: large enough that the joint speed cap divided by it is at most 0.2 s, and well under the arm's rated joint acceleration (see below) |
 | `max_lead_translation_m` | target ahead of the measured tool | at least cap x lag x 1.2. Lag is unknown until stage 4 (simulation: 0.11 to 0.17 s), so start at 0.015 m and recompute from stage 4's `target lag` |
 | `max_lead_rotation_deg` | the same in rotation | angular cap x lag x 1.2 in degrees; start at 3 |
 | `max_offset_translation_m` | target from the pose at clutch engagement | 0.10 m (simulation 0.60) |
@@ -62,6 +64,29 @@ suggestions, not defaults, and appear nowhere the hardware path reads them.
 
 The speed cap and the lead limit bound each other: the arm cannot go faster than lead / lag.
 Raise them together, deliberately, and only after a stage has passed at the lower values.
+
+**The joint speed cap and the joint acceleration limit (G-18).** The arm's streamed servo mode
+(the firmware's mode 1, which the ros2_control driver uses) executes each point it receives at
+the fastest speed and acceleration, with no buffer and no smoothing of its own: the smoothness
+of the command is all there is. So teleop limits its joint command itself. Every cycle the
+change of all joints together is scaled so that no joint changes faster than the acceleration
+limit, and no joint is commanded faster than the joint speed cap. A release, a gate fault or a
+disarm ramps the command to zero at the limit, keeping the tool's direction.
+
+- **Choose the joint speed cap first**, well under the arm's rated joint speed (180 degrees/s,
+  3.14 rad/s, in the vendor's manual).
+- **Then the acceleration limit:** large enough that the stop from the cap takes at most 0.2 s
+  (cap / limit <= 0.2 s; the stack refuses to start otherwise, with one line naming the value to
+  change), and well under the arm's rated joint acceleration (the vendor's manual gives a range
+  up to 1145 degrees/s^2, 20 rad/s^2).
+- **What it costs:**
+  - a stop after a release adds at most v x q / (2 a) of tool travel to the points already on
+    their way, where v is the tool speed, q the fastest joint's speed and a the limit;
+  - starts are softer, so the arm lags the hand a little longer at the start of a stroke, and
+    the lead clamp acts more often;
+  - recompute the lead limits from stage 4's `target lag` as above.
+- MoveIt's `joint_limits.yaml` value is for planned motion (stage 3's check uses it); it is not
+  this limit.
 
 ---
 
@@ -125,6 +150,20 @@ launch prints `ATTACH PREFLIGHT OK`; the check tool's first line says it only su
   **If neither shows it, stop:** update the driver first.
 - CPU governor at `performance` on the robot computer (the idle check reports it), for
   example `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`.
+- **In the vendor's software, confirm and write down** (next to this stage's report):
+  - the firmware version (2.3.0 or later is wanted: it reports fault details and the safety
+    boundary's status);
+  - the mounting direction;
+  - the tool payload and its centre of mass (wrong values give false collision alarms);
+  - collision detection on, sensitivity 3 or more;
+  - collision rebound off;
+  - self-collision detection on;
+  - the safety boundary set;
+  - reduced mode set.
+
+  None of these screens a streamed command before the arm executes it: they act on the arm's
+  own measurements, after the fact. Stage 3 tests the boundary with a small planned motion
+  across it.
 - Emergency stops in reach; nobody else near the arm.
 
 **Commands**
@@ -149,8 +188,10 @@ for it); write it next to the check report.
 - The check tool: `PASS` on `joint_states rate`, `joint_states largest gap`,
   `velocity_control` (position control), `no /clock publisher`, `stamp offset`, the three
   `teleop cycle` rules, `overruns and read failures`, `xarm_ros2 joint-state change` and
-  `cpu governor`. `joint_states effort` is `INFO absent`: this driver does not copy effort
-  into the state interface. It writes one report file under `~/teleop_data/hardware_checks/`.
+  `cpu governor`, and `arm state (/xarm/robot_states)`: err 0, mode 1 (servo), state 2 or lower
+  in every message, with the brake and enable flags shown (`INFO not available` where the
+  driver does not publish the topic). `joint_states effort` is `INFO absent`: this driver does
+  not copy effort into the state interface. It writes one report file under `~/teleop_data/hardware_checks/`.
 - In the bring-up's RViz, add a PoseStamped display on `/teleop/preview/target_pose`. Point
   the right controller where "arm forward" should be and press A (calibrate). Hold the grip
   and move your hand forward slowly: the preview pose moves forward from the tool (in this
@@ -183,9 +224,8 @@ Then set `tool_pose_timeout_s` from this run's largest gap (Values you supply) b
 ## Stage 3: MoveIt motion through the owner switch, nothing armed
 
 **Before you start:** stage 2 passed and its report kept; P1 applied and built on the robot
-computer; P3 applied, or else keep joint 3 below 5 degrees in every motion of stages 3 and 4
-(planned or teleoperated) and stop if it goes higher; the arm in a posture with room around it; emergency stops in reach. Shut stage 2
-down first.
+computer; P3 applied and built on the robot computer (stages 3 and 4 need it); the arm in a
+posture with room around it; emergency stops in reach. Shut stage 2 down first.
 
 **Commands**
 
@@ -216,9 +256,9 @@ the planned path, and execute it.
   `stale repeats while moving` and `wrist oscillation`.
 - **Stop if:** the arm moves anywhere the plan did not show, or does not stop at its goal
   (emergency stop); `stale repeats while moving` fails (the driver is not reading the arm every
-  cycle: stop the stage); `wrist oscillation` fails. If `peak joint acceleration` fails, keep
-  the report and plan the next motion slower; this is an open item (acceleration limiting is
-  not built).
+  cycle: stop the stage); `wrist oscillation` fails. If `peak joint acceleration` fails (the
+  planned motion against MoveIt's `joint_limits.yaml`), keep the report and plan the next
+  motion slower.
 
 **3b. To the posture for stage 4**, only after 3a's check has passed. Plan the arm to a
 posture with the wrist bent (joint 5 well away from zero; the tests use 0, -0.6, -0.7, 0, 1.3,
@@ -226,8 +266,16 @@ posture with the wrist bent (joint 5 well away from zero; the tests use 0, -0.6,
 
 - You should see: the arm moves along the planned path and stops there; the check passes as in
   3a.
-- **Stop if:** as in 3a; and, without P3, if the path takes joint 3 above 5 degrees (do not
-  execute such a plan).
+- **Stop if:** as in 3a.
+
+**3b'. The safety boundary.** With a new `hw_check motion` running, plan a small motion (velocity
+scaling 0.1) that crosses the safety boundary you set by a few centimetres, look at the path,
+and execute it.
+
+- You should see: the arm stops at the boundary, and the firmware reports a boundary error
+  (terminal 1). That is an arm error: follow "After an emergency stop" (restart from stage 2),
+  then come back to 3b.
+- **Stop if:** the arm crosses the boundary (emergency stop), or stops anywhere else.
 
 **3c. The switch to teleop and back.**
 
@@ -269,10 +317,15 @@ release. Read terminal 5's result before the next stroke: it prints when its 120
 disarm (B), let it finish, check it as below, and start a new run before arming again. Then
 one more stroke the other way.
 
-**What you should see:** the tool follows your hand at no more than the speed cap and stops
-within about a centimetre after you release (the arm finishes the points it already has); the
-target in RViz; the check gives `PASS` on `stale repeats while moving`,
-`target lead (largest, translation)` and `wrist oscillation`, and reports `target lag`
+**What you should see:** the tool follows your hand at no more than the speed cap, and after you
+release it stops within about a centimetre and within 0.2 s (the command ramps to zero at the
+acceleration limit; the arm also finishes the points already on their way); the target in RViz;
+the check gives `PASS` on `stale repeats while moving`, `target lead (largest, translation)`,
+`wrist oscillation`, `commanded joint acceleration (MoveIt Servo output)` (every point of
+MoveIt Servo's output within twice your acceleration limit: one Servo skip can join two command
+steps) and `stop time after a release` (at most 0.2 s plus one cycle), reports
+`joint-state acceleration (20 ms, INFO)` (information only: differentiated encoder data, with
+MoveIt's value for reference) and `target lag`
 [`test_hwmock_execution`: one short armed stroke with the teleop check].
 
 **Stop if** (release the grip; press the emergency stop if it does not stop):
@@ -281,9 +334,11 @@ target in RViz; the check gives `PASS` on `stale repeats while moving`,
 - it keeps moving more than about 2 cm after you release;
 - the wrist oscillates (the solver's limit cycle near the wrist singularity: release, then
   disarm, and plan the arm away from the singular posture through MoveIt);
-- without P3 applied, joint 3 goes above 5 degrees (the unchecked link 2 and link 4 pair);
-- `peak joint acceleration` fails: keep the report and stop the stage (open item: acceleration
-  bursts; the mock shows them too at 40 % of the simulation speed caps).
+- `commanded joint acceleration (MoveIt Servo output)` or `stop time after a release` fails:
+  keep the report and stop the stage;
+- the arm reports a collision error: payload, mounting or sensitivity may be set wrong, but
+  uneven point timing can also cause it, because the firmware estimates acceleration from the
+  points it receives (the check reports Servo's point spacing). Keep the report and stop.
 
 Afterwards, recompute the lead limits from the measured lag (Values you supply) before more
 strokes.
@@ -352,6 +407,9 @@ manager's (ros2_control 4.48.1):
 - Other users report the arm jumping back toward an old setpoint after control was handed
   back from another mode or after the arm was moved outside the controller (xarm_ros2 issues
   83 and 117). A fresh bring-up starts its controllers from the measured position.
+- The arm sags slightly on its brakes after a stop, and the last joint values on ROS may be
+  stale, so the joint state the stack holds is not where the arm is: one more reason for the
+  restart.
 
 G-17 is the backstop: armed teleop that loses the arm without asking disarms and never asks for
 it again. The instruction is still to disarm before releasing the stop.

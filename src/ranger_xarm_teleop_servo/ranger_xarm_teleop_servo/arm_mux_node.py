@@ -47,7 +47,8 @@ Threads. "Stopped" is judged from the arrival times of joint states, so their ca
 must never wait behind a service call. The process therefore runs three nodes, each on
 its own executor thread: ``arm_mux`` (service and owner topic; its callbacks may block),
 ``arm_mux_observer`` (joint states, goal status, teleop state) and ``arm_mux_client``
-(the controller manager clients).
+(the controller manager clients, and the subscription to the controller manager's activity
+reports, so that a switch is tracked from them too).
 """
 
 import threading
