@@ -229,6 +229,59 @@ def test_hardware_limits_refuse_the_node_without_each_value(ros, missing):
         TeleopNode(node_name='teleop_hardware_missing', parameter_overrides=overrides(values))
 
 
+PLANES = [0.0, 0.0, 1.0, 0.05, -1.0, 0.0, 0.0, -0.60]
+
+
+class _Lines:
+    """A logger that keeps its lines."""
+
+    def __init__(self):
+        self.lines = []
+
+    def info(self, text):
+        self.lines.append(('info', text))
+
+    def warning(self, text):
+        self.lines.append(('warning', text))
+
+
+def test_hardware_refuses_keep_out_planes_without_a_wrist_frame(ros):
+    with pytest.raises(StartupRefused) as refused:
+        TeleopNode(node_name='teleop_hardware_planes_no_wrist',
+                   parameter_overrides=overrides({**HARDWARE, 'keep_out_planes': PLANES}))
+    assert str(refused.value) == ('keep_out_planes (2) bound the tool point only: set '
+                                  'wrist_frame with them (on this arm usually xarm_link6, '
+                                  'the flange)')
+
+
+def test_hardware_starts_with_keep_out_planes_and_a_wrist_frame(ros):
+    node = TeleopNode(node_name='teleop_hardware_planes_wrist',
+                      parameter_overrides=overrides({**HARDWARE, 'keep_out_planes': PLANES,
+                                                     'wrist_frame': 'xarm_link6'}))
+    try:
+        lines = _Lines()
+        node.get_logger = lambda: lines
+        node._check_plane_points()
+        assert lines.lines == [('info', 'keep-out planes: 2, bounding the tool point '
+                                f'({node.tool_frame}) and the wrist point (xarm_link6)')]
+    finally:
+        node.close()
+
+
+def test_simulation_keeps_planes_without_a_wrist_frame_and_says_what_they_bound(ros):
+    node = TeleopNode(node_name='teleop_sim_planes_no_wrist',
+                      parameter_overrides=overrides({**LIMITS, 'keep_out_planes': PLANES}))
+    try:
+        assert len(node.params.keep_out_planes) == 2
+        lines = _Lines()
+        node.get_logger = lambda: lines
+        node._check_plane_points()
+        assert lines.lines == [('warning', 'keep-out planes: 2, bounding the tool point '
+                                f'({node.tool_frame}) only: wrist_frame is not set')]
+    finally:
+        node.close()
+
+
 def test_hardware_limits_refuse_simulation_only_values(ros):
     values = {**HARDWARE, 'limits_are_simulation_only': True}
     with pytest.raises(StartupRefused, match='never loads simulation-only'):
