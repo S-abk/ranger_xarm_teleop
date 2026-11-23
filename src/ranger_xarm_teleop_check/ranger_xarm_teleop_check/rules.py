@@ -645,7 +645,9 @@ def command_measures(data: dict, limit: Optional[float], latency: float = 0.0) -
     # Servo's skips, from its steps matched to the teleop node's commands (stats.servo_skips).
     jog = stats.jog_commands(data.get('jog', []))
     out['jog_messages'] = len(data.get('jog', []))
-    skips = stats.servo_skips(p, an['runs'], jog, COMMAND_PERIOD_S) if jog else None
+    step_limit = limit * COMMAND_PERIOD_S if limit is not None else math.inf
+    skips = (stats.servo_skips(p, an['runs'], jog, COMMAND_PERIOD_S, step_limit)
+             if jog else None)
     out['skips'] = ({k: v for k, v in skips.items() if k != 'skip_points'}
                     if skips is not None else None)
     out['judged_points'] = int(judged.sum())
@@ -721,11 +723,12 @@ def rule_command_acceleration(cm: dict, opts: Options) -> Result:
 def info_unexplained_acceleration(cm: dict, opts: Options) -> Result:
     """INFO: Servo-output points above 1.1 x the limit that no detected skip explains."""
     name = 'Servo output above 1.1 x limit without a skip (INFO)'
-    threshold = (f'informational: points above {EXPLAINED_ABOVE:g} x {ACCELERATION_NAME} that '
-                 "no detected Servo skip explains (a skip: Servo's step matches a teleop command "
-                 f'more than one ahead of the last, on {opts.jog_topic}), as a share of the '
-                 'judged points, and the number of skips; the first real reports decide '
-                 'whether the stop rule is tightened')
+    threshold = (f'informational: the share of points above {EXPLAINED_ABOVE:g} x '
+                 f'{ACCELERATION_NAME} that no detected Servo skip explains (a skip: a step of '
+                 "Servo's matches a teleop command more than one ahead of the last, on "
+                 f'{opts.jog_topic}; it explains a point only if the commands it jumped each '
+                 'change within the limit), and the number of skips; the first real reports '
+                 'decide whether the stop rule is tightened')
     limit, _ = _command_limit(opts)
     sk = cm.get('skips')
     if limit is None or cm.get('above_explained_limit') is None:
@@ -737,10 +740,10 @@ def info_unexplained_acceleration(cm: dict, opts: Options) -> Result:
                       f'detectable: no teleop command on {opts.jog_topic} '
                       f"({cm.get('jog_messages', 0)} messages)", threshold)
     unexplained = cm['unexplained']
-    share = 100.0 * unexplained / total if total else 0.0
+    share = f'{100.0 * unexplained / high:.1f} %' if high else 'none above'
     return Result(name, INFO,
-                  f'{unexplained} of {total} points ({share:.2f} %) above '
-                  f'{EXPLAINED_ABOVE:g} x limit without a skip ({high} above in all); '
+                  f'{unexplained} of {high} points above {EXPLAINED_ABOVE:g} x limit ({share}) '
+                  f'without a skip that explains them, of {total} judged points; '
                   f"{sk['skips']} skips ({sk['skipped_commands']} commands skipped), "
                   f"{sk['reused']} reused, {sk['unmatched']} steps matching no command, over "
                   f"{sk['steps']} steps and {cm.get('jog_messages', 0)} commands", threshold)

@@ -525,6 +525,9 @@ JOG_MATCH_RAD_S = 1e-6
 # How far past the last matched command a step is looked for. Servo uses one command per cycle;
 # a skip jumps one (rarely more).
 JOG_SEARCH = 5
+# How far past the last command matched in an earlier run the first step of a run is looked
+# for (about a second of commands): one wrong match cannot carry the rest of the capture away.
+JOG_START_SEARCH = 50
 
 
 def jog_commands(messages) -> List[np.ndarray]:
@@ -546,7 +549,8 @@ def jog_commands(messages) -> List[np.ndarray]:
 
 
 def servo_skips(p: Sequence[Sequence[float]], runs: Sequence[Tuple[int, int]],
-                commands: Sequence[np.ndarray], period: float) -> dict:
+                commands: Sequence[np.ndarray], period: float,
+                step_limit: float = math.inf) -> dict:
     """
     Return which commands MoveIt Servo skipped or used twice, from its output and the commands.
 
@@ -554,10 +558,16 @@ def servo_skips(p: Sequence[Sequence[float]], runs: Sequence[Tuple[int, int]],
     to the teleop node's commands, in order: the first command after the last one matched,
     up to ``JOG_SEARCH`` ahead, that it equals; or the last one again (a reuse). A match more
     than one command ahead is a skip, which joins the steps of the commands it jumped into
-    one: the point at the start of that step (its acceleration) is explained by it. A step
-    with no motion at the start of a run, before any match, is passed over; any other step
-    that matches nothing (Servo scaled it, for a collision or a limit) is counted unmatched
-    and taken as made from the next command.
+    one: the point at the start of that step (its acceleration) is explained by it, but only
+    when every command step it jumped is itself within ``step_limit`` (rad/s per command: the
+    acceleration limit times the period). A skip inside a run of equal commands is invisible
+    and leaves the matching one command behind, so a later change of the command itself
+    can look like a skip; that check keeps a too-large command step from being explained. The
+    first step of a run is looked for up to ``JOG_START_SEARCH`` commands past the last match;
+    a step at rest there matches a command at rest (the node may send them while the hand is
+    still), and one that matches nothing is passed over. Any other step that matches nothing
+    (Servo scaled it, for a collision or a limit) is counted unmatched and taken as made from
+    the next command.
 
     Returns ``{'steps', 'matched', 'reused', 'skips', 'skipped_commands', 'unmatched',
     'skip_points'}``; ``skip_points`` are point indices.
@@ -577,9 +587,11 @@ def servo_skips(p: Sequence[Sequence[float]], runs: Sequence[Tuple[int, int]],
             v = (p[i + 1] - p[i]) / period
             out['steps'] += 1
             if last is None:
-                if not np.any(np.abs(v) > JOG_MATCH_RAD_S):
-                    continue             # at rest before the run's first command
-                found = next((k for k in range(cursor + 1, len(cmds)) if equal(k, v)), None)
+                found = next((k for k in range(cursor + 1,
+                                               min(cursor + 1 + JOG_START_SEARCH, len(cmds)))
+                              if equal(k, v)), None)
+                if found is None and not np.any(np.abs(v) > JOG_MATCH_RAD_S):
+                    continue             # at rest with no command to match: passed over
             else:
                 found = next((k for k in range(last + 1, min(last + 1 + JOG_SEARCH, len(cmds)))
                               if equal(k, v)), None)
@@ -597,7 +609,9 @@ def servo_skips(p: Sequence[Sequence[float]], runs: Sequence[Tuple[int, int]],
             if last is not None and found > last + 1:
                 out['skips'] += 1
                 out['skipped_commands'] += found - last - 1
-                out['skip_points'].append(i)
+                jumped = np.abs(np.diff(cmds[last:found + 1], axis=0)).max()
+                if jumped <= step_limit * (1.0 + 1e-6):
+                    out['skip_points'].append(i)
             out['matched'] += 1
             last = cursor = found
     return out

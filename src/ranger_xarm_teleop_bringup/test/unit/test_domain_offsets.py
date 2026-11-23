@@ -38,6 +38,11 @@ def offsets_of(source: str) -> set:
                 if (kw.arg == 'offset' and isinstance(kw.value, ast.Constant)
                         and isinstance(kw.value.value, int)):
                     found.add(kw.value.value)
+            name = getattr(node.func, 'id', getattr(node.func, 'attr', ''))
+            if (name == 'child_environment' and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, int)):
+                found.add(node.args[0].value)       # child_environment(7)
     for node in ast.parse(source).body:
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
                 and isinstance(node.value.value, int):
@@ -46,22 +51,33 @@ def offsets_of(source: str) -> set:
     return found
 
 
+def makes_environments(source: str) -> bool:
+    """Return whether a test module builds a child environment (a ROS domain of its own)."""
+    return 'child_environment(' in source or 'import environment' in source \
+        or ' environment,' in source or 'environment(tmp' in source
+
+
 def stack_modules() -> dict:
-    """Return {module file: offsets} for every test module that names a domain offset."""
+    """Return {module file: offsets} for every test module that builds an environment."""
     out = {}
     for name in sorted(os.listdir(TEST_DIR)):
         if not (name.startswith('test_') and name.endswith('.py')) or name in STARTS_NOTHING:
             continue
         with open(os.path.join(TEST_DIR, name), encoding='utf-8') as handle:
-            offsets = offsets_of(handle.read())
-        if offsets:
-            out[name] = offsets
+            source = handle.read()
+        if makes_environments(source):
+            out[name] = offsets_of(source)
     return out
+
+
+def test_every_stack_test_module_names_its_offset():
+    missing = [name for name, offsets in stack_modules().items() if not offsets]
+    assert not missing, f'modules that build an environment without a literal offset: {missing}'
 
 
 def test_no_two_stack_test_modules_share_a_domain_offset():
     modules = stack_modules()
-    assert len(modules) >= 20, modules                 # the reader still finds them
+    assert len(modules) >= 24, sorted(modules)          # the reader still finds them all
     owners = {}
     for name, offsets in modules.items():
         for offset in offsets:
@@ -81,6 +97,7 @@ def test_offsets_stay_in_the_band():
     ('def g():\n    return environment(tmp, offset=OFFSET)', set()),
     ('X = 3\nenv = child_environment(offset=4)  # and 5\nenv = child_environment(offset=5)',
      {4, 5}),
+    ('env = stack_helpers.child_environment(7)', {7}),
 ])
 def test_the_reader_finds_literal_offsets_and_offset_constants(source, expected):
     assert offsets_of(source) == expected

@@ -521,7 +521,7 @@ def test_a_skip_explains_its_point_and_the_info_line_says_so():
     res = {r.rule: r for r in rules.evaluate('teleop', data, options())[1]}
     info = res[INFO_NAME]
     assert info.verdict == INFO
-    assert info.measured.startswith('0 of ') and '(1 above in all)' in info.measured
+    assert info.measured.startswith('0 of 1 points above 1.1 x limit (0.0 %) without a skip')
     assert '1 skips (1 commands skipped), 1 reused, 0 steps matching no command' in info.measured
     assert res[NAME].verdict == PASS
 
@@ -536,7 +536,8 @@ def test_a_jump_no_skip_explains_counts_as_unexplained():
     assert cm['skips']['skips'] == 0
     info = rules.info_unexplained_acceleration(cm, options())
     total = cm['judged_points']
-    assert info.measured.startswith(f'1 of {total} points ({100.0 / total:.2f} %)')
+    assert info.measured.startswith('1 of 1 points above 1.1 x limit (100.0 %) without a skip')
+    assert f'of {total} judged points' in info.measured
 
 
 def test_without_the_commands_skips_are_not_detectable():
@@ -546,3 +547,34 @@ def test_without_the_commands_skips_are_not_detectable():
     assert rules.DEFAULT_JOG_TOPIC in info.measured
     none = rules.info_unexplained_acceleration(cm, options(limit=None))
     assert 'not known' in none.measured
+
+
+def test_a_skip_on_a_plateau_does_not_explain_a_later_jump_of_the_command():
+    """Reviewer case: a skip among equal commands is invisible; a later command jump is not its."""
+    jump = 0.6 - 1.5 * RAMP                         # the command itself drops by 1.5 x limit
+    node = commands(up(0.6), [0.6] * 8, [jump] * 4, down(jump, 30))
+    servo = np.delete(node, 17, axis=0)             # Servo skips one command of the plateau
+    data = servo_data(servo)
+    data['jog'] = jog_rows(node)
+    cm = rules.command_measures(data, LIMIT)
+    assert cm['above_explained_limit'] == 1 and cm['unexplained'] == 1
+    assert cm['skips']['skips'] == 1                # still counted as a skip
+
+
+def test_a_wrong_first_match_cannot_reach_past_the_start_search():
+    node = commands(up(0.6), down(0.6, 30))
+    far = np.vstack([np.zeros((stats.JOG_START_SEARCH + 5, 6)) + 0.123, node])
+    path = stats.command_points([m[1:] for m in servo_messages(node)])
+    sk = stats.servo_skips(path['p'], stats.split_runs(path['t']),
+                           stats.jog_commands(jog_rows(far)), PERIOD)
+    assert sk['matched'] == 0 and sk['skips'] == 0 and sk['unmatched'] >= sk['steps'] - 1
+
+
+def test_steps_at_rest_keep_pace_with_commands_at_rest_before_a_stroke():
+    """The node may send commands at rest for a while: Servo's rest steps take them, in step."""
+    node = commands(np.zeros(stats.JOG_START_SEARCH + 20), up(0.6), down(0.6, 30))
+    path = stats.command_points([m[1:] for m in servo_messages(node)])
+    sk = stats.servo_skips(path['p'], stats.split_runs(path['t']),
+                           stats.jog_commands(jog_rows(node)), PERIOD)
+    assert sk['unmatched'] == 0 and sk['skips'] == 0
+    assert sk['matched'] == len(node)
