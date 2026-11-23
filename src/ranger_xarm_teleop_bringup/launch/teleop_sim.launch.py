@@ -53,6 +53,9 @@ def generate_launch_description():
             'record', default_value='false',
             description='Start the demonstration recorder and episode node (paused until X).'),
         DeclareLaunchArgument(
+            'base', default_value='false',
+            description='Base driving from the headset (G-19, simulation only).'),
+        DeclareLaunchArgument(
             'reset', default_value='false',
             description='Hold the right thumbstick pulled back (disarmed) to return the arm to '
                         'the ready posture (G-16).'),
@@ -81,6 +84,7 @@ def generate_launch_description():
                 'teleop_params_file': LaunchConfiguration('teleop_params_file'),
                 'gripper_enabled': LaunchConfiguration('gripper_enabled'),
                 'reset': LaunchConfiguration('reset'),
+                'base': LaunchConfiguration('base'),
                 'feedback': LaunchConfiguration('feedback'),
                 'moveit_gripper_controller': 'xarm_xarm_gripper_traj_controller',
             }.items()),

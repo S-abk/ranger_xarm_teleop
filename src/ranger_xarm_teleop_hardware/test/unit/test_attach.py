@@ -110,3 +110,8 @@ def test_the_check_stage_has_no_gripper_so_the_tool_frame_is_the_flange():
     assert tool_frame('check') == 'xarm_link_eef'
     assert tool_frame('execution') == 'xarm_link_tcp'
     assert tool_frame('check', 'my_tool') == 'my_tool'
+
+
+def test_base_driving_is_refused_on_the_hardware_path():
+    with pytest.raises(ValueError, match='base:=true is refused'):
+        check_launch_options('execution', True, False, False, False, base=True)

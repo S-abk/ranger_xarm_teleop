@@ -9,9 +9,10 @@
 # the marker line or a PENDING, missing or non-positive value. The hardware path also refuses
 # the simulation-only limits file, so numbers cannot be borrowed from it by pointing at it.
 #
-# Gripper teleop and the reset are simulation only: they are refused on hardware, so their
-# values (gripper_enabled, gripper_open_position, gripper_closed_position, gripper_max_speed,
-# reset_speed_scaling) are not here and must not be set in your copy.
+# Gripper teleop, the reset and base driving are simulation only: they are refused on
+# hardware, so their values (gripper_enabled, gripper_open_position, gripper_closed_position,
+# gripper_max_speed, reset_speed_scaling, base_driving and the base_* values) are not here and
+# must not be set in your copy.
 #
 # How to choose each value is in docs/HARDWARE_PROCEDURE.md, "Values you supply".
 /**:

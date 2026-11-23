@@ -45,6 +45,15 @@ arming; with ``reset:=false`` neither starts. The postures and the control's thr
 from ``reset_params_file`` (default: this package's config/reset.yaml); the speed scaling,
 which has no default, from the limits file (``reset_speed_scaling``). Simulation only: the
 reset node refuses every request unless the robot description shows simulator hardware only.
+
+Base driving (``base``, default false, rule G-19): hold the left grip to drive the mobile base
+from the left thumbstick (and turn in place from the right thumbstick's x). Starts the base node
+with the stack, before arming; with ``base:=false`` it does not start and nothing reads the
+left grip or the base. Its caps, acceleration limits and the turn that invalidates the arm's
+calibration have no default and come from the limits file (``base_*``). The command goes to
+``base_cmd_topic`` (default /cmd_vel, what the simulated base takes) and to
+/teleop/base/cmd_vel. Simulation only: refused outside simulation, and the base node commands
+nothing unless the robot description shows simulator hardware only.
 """
 
 import os
@@ -56,9 +65,9 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from ranger_xarm_teleop_bringup.limits import (check_extra_params_file, check_gripper_limits,
-                                               check_hardware_limits_file, check_limits_file,
-                                               load_limits)
+from ranger_xarm_teleop_bringup.limits import (check_base_limits, check_extra_params_file,
+                                               check_gripper_limits, check_hardware_limits_file,
+                                               check_limits_file, load_limits)
 import yaml
 
 
@@ -94,6 +103,11 @@ def launch_setup(context, *args, **kwargs):
         if gripper:
             raise ValueError('gripper_enabled:=true is refused outside simulation: the '
                              'gripper adapter for the real gripper action is not built yet')
+        if _true(arg('base')):
+            raise ValueError('base:=true is refused outside simulation: base driving (G-19) is '
+                             'simulation only')
+    base = _true(arg('base'))
+    base_values = check_base_limits(limits_file, limits) if base else {}
     if gripper:
         check_gripper_limits(limits_file, limits)
         if not arg('moveit_gripper_controller'):
@@ -214,7 +228,8 @@ def launch_setup(context, *args, **kwargs):
                               'joint_velocity_limit_names': velocity_names,
                               'joint_velocity_limits': velocity_values,
                               'gripper_enabled': gripper,
-                              'gripper_joint': arg('gripper_joint')})
+                              'gripper_joint': arg('gripper_joint'),
+                              'base_driving': base})
     teleop_parameters.append(sim_time)
     # Single-threaded linear algebra: the solver works on 6 x 6 matrices every 20 ms, and
     # BLAS worker threads competing with a simulator stretch a cycle past the time a
@@ -251,9 +266,17 @@ def launch_setup(context, *args, **kwargs):
         reset_nodes.append(Node(
             package='ranger_xarm_teleop_servo', executable='reset_node', output='screen',
             parameters=[reset_params, {'reset_speed_scaling': float(speed),
-                                       'enabled': True}, sim_time]))
+                                       'enabled': True, 'base_driving': base}, sim_time]))
 
-    nodes = [mux, teleop] + gripper_nodes + feedback_nodes + reset_nodes
+    base_nodes = []
+    if base:
+        # Only the base's own values go to the base node (not the whole limits file).
+        base_nodes.append(Node(
+            package='ranger_xarm_teleop_servo', executable='base_node', output='screen',
+            parameters=[{**base_values, 'enabled': True, 'cmd_topic': arg('base_cmd_topic'),
+                         'tool_frame': arg('tool_frame')}, sim_time]))
+
+    nodes = [mux, teleop] + gripper_nodes + feedback_nodes + reset_nodes + base_nodes
     if simulation:
         return [spawner, servo_node] + nodes
     # Hardware path: the teleop controller is the bring-up's own (spawned inactive there), and
@@ -308,6 +331,14 @@ def generate_launch_description():
             'reset_params_file', default_value='',
             description="Postures and control thresholds of the reset (empty: this package's "
                         'config/reset.yaml).'),
+        DeclareLaunchArgument(
+            'base', default_value='false',
+            description='Start the base node: hold the left grip to drive the base from the '
+                        'left thumbstick, turn in place from the right thumbstick (G-19; '
+                        'simulation only; the simulated base must be drivable).'),
+        DeclareLaunchArgument(
+            'base_cmd_topic', default_value='/cmd_vel',
+            description='The velocity command topic the base driver takes.'),
         DeclareLaunchArgument(
             'feedback', default_value='true',
             description='Start the operator feedback node (vibration and panel status for the '

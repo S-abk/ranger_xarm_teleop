@@ -64,7 +64,8 @@ def launch_setup(context, *args, **kwargs):
     stage = arg('stage')
     motion_enabled = _true(arg('motion_enabled'))
     check_launch_options(stage, motion_enabled, _true(arg('simulation')), _true(arg('reset')),
-                         _true(arg('gripper_enabled')))           # raises: nothing started
+                         _true(arg('gripper_enabled')),
+                         base=_true(arg('base')))                 # raises: nothing started
     limits_file = arg('limits_file')
     check_hardware_limits_file(limits_file)                       # raises: nothing started
     frame = tool_frame(stage, arg('tool_frame'))
@@ -86,6 +87,7 @@ def launch_setup(context, *args, **kwargs):
             'teleop_params_file': arg('teleop_params_file'),
             'gripper_enabled': 'false',
             'reset': 'false',
+            'base': 'false',
             'feedback': arg('feedback'),
         }.items())
     started = [LogInfo(msg=f'teleop_hardware: attaching to the {stage} stage, motion '
@@ -148,5 +150,6 @@ def generate_launch_description():
         DeclareLaunchArgument('simulation', default_value='false'),
         DeclareLaunchArgument('reset', default_value='false'),
         DeclareLaunchArgument('gripper_enabled', default_value='false'),
+        DeclareLaunchArgument('base', default_value='false'),
         OpaqueFunction(function=launch_setup),
     ])

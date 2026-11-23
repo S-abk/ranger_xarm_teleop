@@ -48,7 +48,7 @@ def check_stage(stage: str) -> str:
 
 
 def check_launch_options(stage: str, motion_enabled: bool, simulation: bool, reset: bool,
-                         gripper_enabled: bool) -> None:
+                         gripper_enabled: bool, base: bool = False) -> None:
     """Raise ValueError with one line for an option the hardware path refuses."""
     check_stage(stage)
     if simulation:
@@ -63,6 +63,9 @@ def check_launch_options(stage: str, motion_enabled: bool, simulation: bool, res
     if gripper_enabled:
         raise ValueError('gripper_enabled:=true is refused on the hardware path: the gripper '
                          'adapter for the real gripper action is not built yet')
+    if base:
+        raise ValueError('base:=true is refused on the hardware path: base driving (G-19) is '
+                         'simulation only')
 
 
 def tool_frame(stage: str, requested: str = '') -> str:
