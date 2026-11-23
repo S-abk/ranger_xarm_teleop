@@ -16,8 +16,8 @@
 import math
 import re
 
-import yaml
 from ranger_xarm_teleop_servo import joint_accel
+import yaml
 
 SIMULATION_ONLY_KEY = 'limits_are_simulation_only'
 
@@ -103,6 +103,11 @@ def check_limits_file(path: str, simulation: bool) -> dict:
                  *joint_accel.NAMES):
         if not isinstance(values.get(name), (int, float)) or isinstance(values.get(name), bool):
             raise ValueError(f'{path}: {name} is required and has no default')
+    try:
+        joint_accel.check_values(values[joint_accel.ACCELERATION_NAME],
+                                 values[joint_accel.SPEED_CAP_NAME])
+    except ValueError as err:
+        raise ValueError(f'{path}: {err}') from err
     _check_stop_time(path, values)
     return values
 

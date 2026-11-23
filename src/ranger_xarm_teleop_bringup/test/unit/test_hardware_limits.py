@@ -27,7 +27,7 @@ from ranger_xarm_teleop_bringup import limits
 from ranger_xarm_teleop_bringup.limits import (check_hardware_limits_file, HARDWARE_REQUIRED,
                                                HardwareLimitsRefused, load_limits,
                                                SimulationOnlyRefused)
-from ranger_xarm_teleop_servo import params
+from ranger_xarm_teleop_servo import joint_accel, params
 import yaml
 
 PKG = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -56,14 +56,33 @@ def lines_of(err):
     return str(err.value).splitlines()
 
 
-def test_the_required_names_are_the_gates_pending_values_and_two_more():
-    assert HARDWARE_REQUIRED[:len(params.REQUIRED)] == params.REQUIRED
-    assert HARDWARE_REQUIRED[len(params.REQUIRED):] == ('link_keepout_margin_m',
-                                                        'tool_pose_timeout_s')
-    assert len(HARDWARE_REQUIRED) == 12
+def test_the_required_names_are_the_gates_pending_values_and_four_more():
+    gate = tuple(name for name in HARDWARE_REQUIRED if name not in (
+        'joint_speed_cap_rad_s', 'joint_acceleration_limit_rad_s2', 'link_keepout_margin_m',
+        'tool_pose_timeout_s'))
+    assert gate == params.REQUIRED
+    assert HARDWARE_REQUIRED[-2:] == ('link_keepout_margin_m', 'tool_pose_timeout_s')
+    assert len(HARDWARE_REQUIRED) == 14
 
 
-def test_the_template_holds_the_twelve_names_in_order_all_pending():
+def test_the_joint_speed_cap_comes_right_after_the_angular_speed_cap_then_the_acceleration():
+    at = HARDWARE_REQUIRED.index('angular_speed_cap_rad_s')
+    assert HARDWARE_REQUIRED[at + 1:at + 3] == ('joint_speed_cap_rad_s',
+                                                'joint_acceleration_limit_rad_s2')
+    assert set(joint_accel.NAMES) == {'joint_speed_cap_rad_s', 'joint_acceleration_limit_rad_s2'}
+
+
+def test_the_servo_package_requires_the_two_values_on_every_path_outside_the_gate():
+    assert set(params.MOTION_REQUIRED) == set(joint_accel.NAMES)
+    assert not set(params.MOTION_REQUIRED) & set(params.REQUIRED)
+    assert set(params.MOTION_REQUIRED) <= set(params.HARDWARE_REQUIRED)
+
+
+def test_the_two_values_may_not_be_set_by_an_extra_parameter_file():
+    assert set(joint_accel.NAMES) <= set(limits.RESERVED)
+
+
+def test_the_template_holds_the_fourteen_names_in_order_all_pending():
     values = load_limits(TEMPLATE)
     assert tuple(values) == HARDWARE_REQUIRED
     assert set(values.values()) == {'PENDING'}
@@ -273,3 +292,82 @@ def test_a_largest_scale_below_the_default_scales_needs_the_scales_set(tmp_path)
     assert 'translation_scale_fine' in text and 'translation_scale_coarse' in text
     values.update(translation_scale_fine=0.5, translation_scale_coarse=0.5)
     assert check_hardware_limits_file(write(tmp_path, values, 'set.yaml')) == values
+
+
+def test_the_simulation_file_holds_the_two_values_and_passes_the_stop_time_rule():
+    values = limits.check_limits_file(SIM_LIMITS, simulation=True)
+    assert values['joint_speed_cap_rad_s'] == 1.9
+    assert values['joint_acceleration_limit_rad_s2'] == 10.0
+    assert joint_accel.stop_time_refusal(10.0, 1.9) == ''
+    assert 1.9 / 10.0 <= joint_accel.STOP_TIME_LIMIT_S
+
+
+@pytest.mark.parametrize('name', joint_accel.NAMES)
+@pytest.mark.parametrize('case', ['missing', 'PENDING', 0, True, math.nan])
+def test_the_simulation_path_requires_each_of_the_two_values(tmp_path, name, case):
+    values = dict(load_limits(SIM_LIMITS))
+    if case == 'missing':
+        del values[name]
+    else:
+        values[name] = case
+    path = write(tmp_path, values)
+    with pytest.raises(ValueError, match=f'{name}'):
+        limits.check_limits_file(path, simulation=True)
+
+
+def test_the_two_values_are_required_on_the_simulation_path_with_the_shipped_message(tmp_path):
+    values = load_limits(SIM_LIMITS)
+    del values['joint_acceleration_limit_rad_s2']
+    path = write(tmp_path, values)
+    with pytest.raises(ValueError) as err:
+        limits.check_limits_file(path, simulation=True)
+    assert str(err.value) == (f'{path}: joint_acceleration_limit_rad_s2 is required and has '
+                              'no default')
+
+
+@pytest.mark.parametrize('simulation', [True, False])
+def test_a_stop_from_the_cap_that_takes_too_long_is_refused_with_one_line(tmp_path, simulation):
+    values = dict(load_limits(SIM_LIMITS), joint_speed_cap_rad_s=0.5,
+                  joint_acceleration_limit_rad_s2=2.0)
+    if not simulation:
+        values = dict(good_values(), joint_speed_cap_rad_s=0.5,
+                      joint_acceleration_limit_rad_s2=2.0)
+    path = write(tmp_path, values)
+    with pytest.raises(ValueError) as err:
+        if simulation:
+            limits.check_limits_file(path, simulation=True)
+        else:
+            check_hardware_limits_file(path)
+    assert lines_of(err) == [f'{path}: {joint_accel.stop_time_refusal(2.0, 0.5)}']
+    assert 'joint_acceleration_limit_rad_s2' in lines_of(err)[0]
+    if not simulation:
+        assert isinstance(err.value, HardwareLimitsRefused)
+
+
+@pytest.mark.parametrize('cap, acceleration', [(0.4, 2.0), (0.5, 2.5), (1.9, 10.0)])
+def test_a_stop_within_the_time_is_accepted_even_at_the_limit(tmp_path, cap, acceleration):
+    assert cap / acceleration <= joint_accel.STOP_TIME_LIMIT_S * (1 + 1e-9)
+    values = dict(good_values(), joint_speed_cap_rad_s=cap,
+                  joint_acceleration_limit_rad_s2=acceleration)
+    assert check_hardware_limits_file(write(tmp_path, values)) == values
+    sim = dict(load_limits(SIM_LIMITS), joint_speed_cap_rad_s=cap,
+               joint_acceleration_limit_rad_s2=acceleration)
+    assert limits.check_limits_file(write(tmp_path, sim, 'sim.yaml'), simulation=True) == sim
+
+
+def test_the_stop_time_refusal_is_not_added_to_a_missing_value_line(tmp_path):
+    values = good_values()
+    del values['joint_acceleration_limit_rad_s2']
+    with pytest.raises(HardwareLimitsRefused) as err:
+        check_hardware_limits_file(write(tmp_path, values))
+    assert len(lines_of(err)) == 1 and 'is missing' in lines_of(err)[0]
+
+
+def test_a_stop_time_refusal_is_listed_with_the_other_problems(tmp_path):
+    values = dict(good_values(), joint_speed_cap_rad_s=0.5, joint_acceleration_limit_rad_s2=2.0)
+    del values['tool_pose_timeout_s']
+    with pytest.raises(HardwareLimitsRefused) as err:
+        check_hardware_limits_file(write(tmp_path, values))
+    assert len(lines_of(err)) == 2
+    assert 'tool_pose_timeout_s is missing' in lines_of(err)[0]
+    assert 'G-18' in lines_of(err)[1]
