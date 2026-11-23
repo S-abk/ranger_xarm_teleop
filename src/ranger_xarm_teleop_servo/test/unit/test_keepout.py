@@ -30,6 +30,13 @@ def model():
 
 
 @pytest.fixture(scope='module')
+def close_base():
+    """Return the test robot on a mesh base close under its upper arm (l2) at every posture."""
+    urdf = robot_urdf(base_mesh_top=0.15)
+    return urdf, ko.build(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', MARGIN)
+
+
+@pytest.fixture(scope='module')
 def extra(model):
     return model.extra_values({'finger_left_joint': 0.02})
 
@@ -219,6 +226,80 @@ def test_resolver_reads_package_file_and_plain_paths(tmp_path):
     assert read(f'{tmp_path}/pkg/meshes/a.stl') == b'abc'
 
 
+# --- finer cells where the model, not the geometry, holds a pair ------------------------------
+
+def _largest(model, name):
+    if name in [b.name for b in model.bodies]:
+        return float(next(b for b in model.bodies if b.name == name).radii.max())
+    units = model.units
+    f = units.names.index(name)
+    return max(float(units.mem_rad[units.mem_start[u]:units.mem_start[u] + units.mem_count[u]]
+                     .max()) for u in np.nonzero((units.link == f) & (units.mem_count > 0))[0])
+
+
+def test_a_pair_the_model_holds_gets_finer_cells_on_its_covered_sides(close_base, model):
+    urdf, close = close_base
+    assert model.refined == [] and model.fine_cell is None      # nothing held: nothing finer
+    assert close.refined_by == [('l2', 'xarm_link_base')]
+    assert close.refined == ['l2', 'xarm_link_base']           # both sides are covers
+    assert close.fine_cell == pytest.approx(ko.FINE_CELL_RATIO * ko.DEFAULT_CELL)
+    fine = close.fine_cell * math.sqrt(3.0) / 2.0 + ko.DEFAULT_SPACING
+    assert _largest(close, 'l2') <= fine + 1e-12
+    assert _largest(close, 'xarm_link_base') <= fine + 1e-12
+    for other in ('l1', 'l3', 'l4'):                           # the rest keeps the cell
+        assert _largest(close, other) == _largest(model, other) > fine
+    coarse = ko.build(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', MARGIN,
+                      fine_cell_ratio=None)
+    assert coarse.refined == [] and coarse.sphere_count < close.sphere_count
+    assert set(coarse.pairs) <= set(close.pairs)
+    # It reads the pair closer to its geometry: higher over sampled postures.
+    rng = np.random.default_rng(3)
+    extra = close.extra_values({'finger_left_joint': 0.02})
+    i = close.pairs.index(('l2', 'xarm_link_base'))
+    j = coarse.pairs.index(('l2', 'xarm_link_base'))
+    gain = [close.pair_minima(q, extra)[i] - coarse.pair_minima(q, extra)[j]
+            for q in rng.uniform(-1.5, 1.5, (40, 6))]
+    assert np.median(gain) > 0.005
+
+
+def test_the_choice_follows_the_geometry_not_the_names(close_base):
+    urdf, close = close_base
+    renamed = ko.build(urdf.replace('"l2"', '"upper_arm"').replace('xarm_link_base',
+                                                                   'arm_base'),
+                       resolve, 'arm_base', 'xarm_link_tcp', MARGIN)
+    assert renamed.refined_by == [('upper_arm', 'arm_base')]
+    assert renamed.refined == ['upper_arm', 'arm_base']
+    a = next(b for b in close.bodies if b.name == 'l2')
+    b = next(b for b in renamed.bodies if b.name == 'upper_arm')
+    assert np.array_equal(a.centres, b.centres) and np.array_equal(a.radii, b.radii)
+
+
+def test_the_finer_cover_is_in_the_fingerprint_and_the_margin_is_not(close_base):
+    urdf, close = close_base
+    args = (urdf, resolve, 'xarm_link_base', 'xarm_link_tcp')
+    assert ko.fingerprint(*args, MARGIN) == close.fingerprint
+    assert ko.fingerprint(*args, 0.04) == close.fingerprint
+    assert ko.build(*args, MARGIN, fine_cell_ratio=None, near_samples=0).fingerprint \
+        != close.fingerprint
+
+
+def test_a_pair_still_held_at_work_is_reported_with_the_margin_that_frees_it():
+    urdf = robot_urdf(base_mesh_top=0.16)
+    assert ko.build(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', MARGIN).held == []
+    model = ko.build(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp', 0.04)
+    assert [(h.moving, h.other) for h in model.held] == [('l2', 'xarm_link_base')]
+    held = model.held[0]
+    assert ko.HELD_SHARE < held.share <= 1.0
+    assert held.low < held.free_up_to < 0.04 < held.high
+    assert ('l2', 'xarm_link_base') in model.pairs                 # kept, not left out
+    text = ko.held_text(held, 0.04)
+    assert text.startswith('l2 - xarm_link_base is inside the margin of 40.0 mm at ')
+    assert f'up to a margin of {held.free_up_to * 1000.0:.1f} mm' in text
+    freed = ko.build(urdf, resolve, 'xarm_link_base', 'xarm_link_tcp',
+                     held.free_up_to - 0.001)
+    assert freed.held == []
+
+
 # --- INV-4 within the model: never more clearance than the geometry ---------------------------
 
 def _true_upper_bounds(model, urdf, q, extra, rng):
@@ -256,8 +337,18 @@ def _true_upper_bounds(model, urdf, q, extra, rng):
 
 
 def test_model_clearance_is_never_more_than_the_sampled_surface_distance(model, extra):
+    _assert_never_more_than_the_surfaces(model, robot_urdf(), extra)
+
+
+def test_finer_cells_never_read_more_than_the_surfaces_either(close_base):
+    urdf, model = close_base
+    assert model.refined                     # the finer covers are what is checked here
+    _assert_never_more_than_the_surfaces(model, urdf,
+                                         model.extra_values({'finger_left_joint': 0.02}))
+
+
+def _assert_never_more_than_the_surfaces(model, urdf, extra):
     rng = np.random.default_rng(7)
-    urdf = robot_urdf()
     lower = np.array([-3.0, -2.0, -3.9, -3.0, -1.6, -3.0])
     upper = np.array([3.0, 2.0, 0.1, 3.0, 3.1, 3.0])
     checked = 0
@@ -292,8 +383,13 @@ def test_clearance_is_the_brute_force_minimum_over_every_sphere(model, extra):
 
 
 @pytest.mark.parametrize('spread', [0.3, 0.8, None])
-def test_the_pruned_search_lists_what_a_brute_force_search_finds(model, extra, spread):
+@pytest.mark.parametrize('robot', ['default', 'close base'])
+def test_the_pruned_search_lists_what_a_brute_force_search_finds(model, extra, close_base,
+                                                                 spread, robot):
     """Pruning (bodies, groups, a mesh's clusters) never drops a sphere pair within reach."""
+    if robot == 'close base':
+        model = close_base[1]
+        extra = model.extra_values({'finger_left_joint': 0.02})
     rng = np.random.default_rng(13)
     lower = np.array([-3.0, -2.0, -3.9, -3.0, -1.6, -3.0])
     upper = np.array([3.0, 2.0, 0.1, 3.0, 3.1, 3.0])
