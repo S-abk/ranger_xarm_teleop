@@ -75,6 +75,9 @@ LIMIT_NAMES = {
 LIMIT_NONE = 0
 
 CMD_VEL_EPS = 1e-6
+# BASE_DURING_CLUTCH values (checks.yaml flags), used when an older tolerance file lacks them.
+BASE_CLUTCH_DEFAULTS = {'base_clutch_cmd_window_s': 0.05, 'base_clutch_linear_mps': 0.01,
+                        'base_clutch_turn_rps': 0.02}
 DEFAULT_FAIL_FLAGS = ('DATA_LOST', 'RECORDER_ERROR', 'TELEOP_STATE_LOST')
 # What a gated stream's absence means when its gate never opened in the episode.
 GATE_ACTION = {'engaged': 'teleop arm action', 'gripper_active': 'teleop gripper action'}
@@ -525,16 +528,118 @@ def _wrap(angle: np.ndarray) -> np.ndarray:
     return (np.asarray(angle) + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def _hold_spans(stamp: np.ndarray, mask: np.ndarray, cap: Optional[float] = None
+                ) -> List[Tuple[float, float]]:
+    """
+    Return the ``(start, end)`` times of each run of True in ``mask``.
+
+    A row holds until the next row's stamp (at most ``cap`` s when given); the last row holds
+    for no time.
+    """
+    out = []
+    for first, last in _runs(mask):
+        end = float(stamp[last + 1]) if last + 1 < len(stamp) else float(stamp[last])
+        if cap is not None:
+            end = min(end, float(stamp[last]) + cap)
+        out.append((float(stamp[first]), end))
+    return out
+
+
+def _overlaps(intervals: List[Tuple[float, float]], spans: List[Tuple[float, float]]
+              ) -> Tuple[int, Optional[float]]:
+    """Return how many ``intervals`` touch a span, and the first time any of them does."""
+    count, first = 0, None
+    for a, b in intervals:
+        hit = [max(a, s0) for s0, s1 in spans if a <= s1 and b >= s0]
+        if hit:
+            count += 1
+            first = min(hit) if first is None else min(first, min(hit))
+    return count, first
+
+
+def _nonzero_command(st: Stream) -> np.ndarray:
+    """Return a mask of the rows of a twist stream that command any motion."""
+    twist = np.asarray(st.fields.get('twist', np.zeros((len(st), 6))), dtype=float)
+    return np.any(np.abs(twist) > CMD_VEL_EPS, axis=1) if twist.size else np.zeros(
+        len(st), dtype=bool)
+
+
+def _base_during_clutch(ep: Episode, tol: dict, flags: List[dict], by_command: List[Stream],
+                        report: dict) -> None:
+    """
+    Flag BASE_DURING_CLUTCH: the base commanded or moving while the arm's clutch was engaged.
+
+    The clutch is the ``state`` stream's ``clutch_engaged`` (a cycle holds until the next).
+    The base is commanded for ``base_clutch_cmd_window_s`` after each nonzero command of the
+    base command streams (``base_cmd``, ``/cmd_vel``) and moving while the ``odom`` stream's
+    twist is above ``base_clutch_linear_mps`` or ``base_clutch_turn_rps``.
+    """
+    state = ep.get('state')
+    if state is None or len(state) == 0 or 'clutch_engaged' not in state.fields:
+        report['clutch_overlap'] = {'checked': False, 'why': 'no teleop state'}
+        return
+    engaged = np.asarray(state.fields['clutch_engaged'], dtype=bool)
+    spans = _hold_spans(np.asarray(state.stamp, dtype=float), engaged)
+    tol = {**BASE_CLUTCH_DEFAULTS, **tol}
+    window = float(tol['base_clutch_cmd_window_s'])
+    reasons = []
+    times = []
+    overlap: dict = {'checked': True, 'engaged_spans': len(spans), 'by_command': None,
+                     'by_odometry': None}
+    names = [st.name for st in by_command]
+    commands = [(float(t), float(t) + window) for st in by_command
+                for t in st.stamp[_nonzero_command(st)]]
+    n, first = _overlaps(commands, spans)
+    if n:
+        overlap['by_command'] = {'streams': names, 'commands': n, 'first_time': first}
+        reasons.append(f'the base was commanded ({"/".join(names)}: {n} nonzero commands) '
+                       f'from {first:.2f} s')
+        times.append(first)
+    odom = ep.get('odom')
+    if odom is not None and len(odom) and 'twist' in odom.fields:
+        twist = np.asarray(odom.fields['twist'], dtype=float)
+        with np.errstate(invalid='ignore'):
+            moving = (np.hypot(twist[:, 0], twist[:, 1]) > float(tol['base_clutch_linear_mps'])) \
+                | (np.abs(twist[:, 5]) > float(tol['base_clutch_turn_rps']))
+        n, first = _overlaps(_hold_spans(np.asarray(odom.stamp, dtype=float), moving), spans)
+        if n:
+            overlap['by_odometry'] = {'stream': 'odom', 'spans': n, 'first_time': first}
+            reasons.append(f'the base was moving by odometry (above '
+                           f'{float(tol["base_clutch_linear_mps"]):g} m/s or '
+                           f'{float(tol["base_clutch_turn_rps"]):g} rad/s) from {first:.2f} s')
+            times.append(first)
+    report['clutch_overlap'] = overlap
+    if reasons:
+        _flag(flags, 'BASE_DURING_CLUTCH',
+              'the arm clutch was engaged while ' + ' and '.join(reasons)
+              + f'; first overlap at {min(times):.2f} s', min(times))
+
+
 def _base_report(ep: Episode, checks: dict, flags: List[dict]) -> dict:
-    """Report base motion from the streams the profile marks ``base: true``."""
+    """
+    Report base motion from the streams the profile marks ``base: true``.
+
+    Per odometry stream: ``travel_m``, ``yaw_change_rad`` (and the largest excursions). Per
+    base command stream: ``nonzero_rows``. ``summary``: travel and yaw change by every odometry
+    stream (``/odom``, ``/ground_truth/odom``), ``drive_time_s`` (seconds with ``base_state``
+    driving, else seconds of nonzero ``base_cmd``; a row holds until the next, a command row
+    at most ``streams.gap_max_s``), ``cmd_cycles`` and ``cmd_nonzero_cycles`` (``base_cmd``
+    rows). ``clutch_overlap``: see ``_base_during_clutch``.
+    """
     tol = checks['flags']
     base_streams = [(n, s) for n, s in recorded(ep.profile).items() if s.get('base')]
     present = [(n, s, ep.get(n)) for n, s in base_streams if ep.get(n) is not None
                and len(ep.get(n)) > 0]
-    if not present:
+    state_st = ep.get('base_state')
+    if state_st is not None and len(state_st) == 0:
+        state_st = None
+    if not present and state_st is None:
         return {'mode': 'parked: no base topics recorded', 'streams': {}}
     report: dict = {'streams': {}}
     moved: List[str] = []
+    travel: Dict[str, float] = {}
+    yaw_change: Dict[str, float] = {}
+    by_command: List[Stream] = []
     for name, spec, st in present:
         entry: dict = {'kind': spec.get('kind'), 'n': len(st)}
         if spec.get('kind') == 'odometry' and 'pose' in st.fields:
@@ -548,18 +653,42 @@ def _base_report(ep: Episode, checks: dict, flags: List[dict]) -> dict:
                 'max_excursion_m': float(np.max(excursion)),
                 'yaw_change_rad': float(dyaw[-1]),
                 'max_yaw_excursion_rad': float(np.max(dyaw))})
+            travel[name] = entry['travel_m']
+            yaw_change[name] = entry['yaw_change_rad']
             if entry['max_excursion_m'] > float(tol['base_moved_m']) \
                     or entry['max_yaw_excursion_rad'] > float(tol['base_moved_rad']):
                 moved.append(f'{name}: {entry["max_excursion_m"] * 1e3:.1f} mm, '
                              f'{math.degrees(entry["max_yaw_excursion_rad"]):.2f} deg')
-        elif spec.get('kind') == 'twist' and 'twist' in st.fields:
+        elif spec.get('kind') in ('twist', 'twist_stamped') and 'twist' in st.fields:
             twist = np.abs(np.asarray(st.fields['twist'], dtype=float))
             nonzero = np.any(twist > CMD_VEL_EPS, axis=1)
             entry['nonzero_rows'] = int(np.sum(nonzero))
             entry['max_abs'] = float(np.max(twist)) if twist.size else 0.0
+            by_command.append(st)
             if np.any(nonzero):
                 moved.append(f'{name}: {int(np.sum(nonzero))} nonzero commands')
         report['streams'][name] = entry
+    summary: dict = {'travel_m': travel, 'yaw_change_rad': yaw_change}
+    cap = float(checks.get('streams', {}).get('gap_max_s', 0.1))
+    cmd = ep.get('base_cmd')
+    if cmd is not None and len(cmd) and 'twist' in cmd.fields:
+        nonzero = _nonzero_command(cmd)
+        summary['cmd_cycles'] = int(len(cmd))
+        summary['cmd_nonzero_cycles'] = int(np.sum(nonzero))
+        summary['drive_time_cmd_s'] = float(sum(
+            b - a for a, b in _hold_spans(np.asarray(cmd.stamp, dtype=float), nonzero, cap)))
+    if state_st is not None and 'driving' in state_st.fields:
+        driving = np.asarray(state_st.fields['driving'], dtype=bool)
+        summary['drive_time_state_s'] = float(sum(
+            b - a for a, b in _hold_spans(np.asarray(state_st.stamp, dtype=float), driving)))
+        report['streams']['base_state'] = {'kind': 'base_state', 'n': len(state_st),
+                                           'driving_rows': int(np.sum(driving))}
+    for key in ('drive_time_state_s', 'drive_time_cmd_s'):
+        if key in summary:
+            summary['drive_time_s'] = summary[key]
+            break
+    report['summary'] = summary
+    _base_during_clutch(ep, tol, flags, by_command, report)
     if moved:
         report['mode'] = 'moved'
         report['moved'] = moved

@@ -63,6 +63,8 @@ streams:
   cmd_vel:          {topic: /cmd_vel, kind: twist, type: geometry_msgs/msg/Twist, required: false, rate_hz: null, clock: none, base: true}
   odom:             {topic: /odom, kind: odometry, type: nav_msgs/msg/Odometry, required: false, rate_hz: null, clock: robot, base: true}
   ground_truth_odom: {topic: /ground_truth/odom, kind: odometry, type: nav_msgs/msg/Odometry, required: false, rate_hz: null, clock: robot, base: true}
+  base_cmd:         {topic: /teleop/base/cmd_vel, kind: twist_stamped, type: geometry_msgs/msg/TwistStamped, required: false, rate_hz: null, clock: robot, base: true}
+  base_state:       {topic: /teleop/base/state, kind: base_state, type: ranger_xarm_teleop_interfaces/msg/BaseState, required: false, rate_hz: null, clock: robot}
   episode_state:    {topic: /teleop/episode/state, kind: episode_state, type: ranger_xarm_teleop_interfaces/msg/EpisodeState, required: true, rate_hz: 5, clock: robot}
   haptic:           {topic: /teleop/haptic, kind: other, type: ranger_xarm_teleop_interfaces/msg/Haptic, required: false, rate_hz: null, clock: robot}
   operator_status:  {topic: /teleop/operator/status, kind: other, type: ranger_xarm_teleop_interfaces/msg/OperatorStatus, required: false, rate_hz: null, clock: robot}
