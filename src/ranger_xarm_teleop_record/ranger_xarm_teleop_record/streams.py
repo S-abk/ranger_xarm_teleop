@@ -34,7 +34,9 @@ Field names per stream kind (``kind`` is the profile's ``kind`` of the stream)
 --------------------------------------------------------------------------------
 ``teleop_state`` (TeleopState): bool ``armed``, ``motion_enabled``, ``clutch_engaged``,
 ``calibrated``, ``measured_tool_pose_valid``, ``damped``, ``keepout_bound``,
-``gripper_enabled``, ``gripper_active``, ``gripper_measured_valid``; int ``owner``,
+``gripper_enabled``, ``gripper_active``, ``gripper_measured_valid``,
+``joint_acceleration_limited``, ``stopping`` (G-18; False in recordings made before
+TeleopState carried them, when no such limit existed); int ``owner``,
 ``mux_status``, ``hold_reason``, ``active_limit``, ``servo_status``, ``gripper_hold``,
 ``gripper_request``, ``gripper_reference_source``, ``calibration_session_id``,
 ``calibration_reset_count``, ``input_seq``; float ``calibration_heading``, ``input_age``,

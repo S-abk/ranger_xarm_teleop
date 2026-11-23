@@ -42,6 +42,7 @@ HOLD_NAMES = {
     9: 'OUT_OF_VIEW', 10: 'HEAD_ABSENT', 11: 'HEAD_EMULATED', 12: 'RESET_CHANGED',
     13: 'SESSION_CHANGED', 14: 'SEQ_BACKWARDS', 15: 'INPUT_JUMP', 16: 'STEP_REJECTED',
     17: 'TOOL_POSE_STALE', 18: 'SERVO_NOT_READY', 19: 'SERVO_HALTED', 20: 'SOLVER',
+    21: 'STOPPING',
 }
 HOLD_TEXT = {
     'NONE': '',
@@ -66,15 +67,21 @@ HOLD_TEXT = {
     'SERVO_HALTED': 'Arm halted near a collision or joint limit: disarm (B), then use the '
                     'retreat tool',
     'SOLVER': 'Arm state disagrees with command: release, check arm',
+    'STOPPING': 'Arm stopping: wait',
 }
+# ArmOwner.STATUS_NO_ANSWER in TeleopState.mux_status (checked against the message by the unit
+# tests): teleop's last request for the arm had no answer in time; it is being asked again.
+MUX_NO_ANSWER = 6
+NOT_OWNER_NO_ANSWER_TEXT = 'No answer from the command mux: asking for the arm again'
 # Holds that are the system's state, not a fault; every other hold is a fault and is latched.
 STATE_HOLDS = frozenset({'NONE', 'MOTION_DISABLED', 'NOT_ARMED', 'NOT_OWNER',
-                         'NOT_CALIBRATED', 'CLUTCH_RELEASED'})
+                         'NOT_CALIBRATED', 'CLUTCH_RELEASED', 'STOPPING'})
 
 # TeleopState.LIMIT_*.
 LIMIT_NAMES = {
     0: 'NONE', 1: 'OFFSET_TRANSLATION', 2: 'OFFSET_ROTATION', 3: 'KEEP_OUT', 4: 'SERVO',
     5: 'LEAD', 6: 'TOOL_SPEED', 7: 'JOINT_VELOCITY', 8: 'JOINT_POSITION', 9: 'LINK_KEEPOUT',
+    10: 'JOINT_ACCELERATION',
 }
 LIMIT_TEXT = {
     'NONE': '',
@@ -84,13 +91,15 @@ LIMIT_TEXT = {
     'SERVO': 'arm controller slowing',
     'LEAD': 'arm lagging hand',
     'TOOL_SPEED': 'speed',
-    'JOINT_VELOCITY': 'joint speed',
+    'JOINT_VELOCITY': 'joint speed cap',
     'JOINT_POSITION': 'joint at its end',
     'LINK_KEEPOUT': 'near robot body',
+    'JOINT_ACCELERATION': 'acceleration limit',
 }
 # Higher is more severe; the panel shows the most severe limit of the hold window.
 LIMIT_SEVERITY = {
-    'NONE': 0, 'TOOL_SPEED': 1, 'JOINT_VELOCITY': 1, 'LEAD': 2, 'OFFSET_TRANSLATION': 3,
+    'NONE': 0, 'TOOL_SPEED': 1, 'JOINT_VELOCITY': 1, 'JOINT_ACCELERATION': 1, 'LEAD': 2,
+    'OFFSET_TRANSLATION': 3,
     'OFFSET_ROTATION': 3, 'SERVO': 4, 'JOINT_POSITION': 5, 'KEEP_OUT': 6, 'LINK_KEEPOUT': 6,
 }
 
@@ -179,8 +188,10 @@ def code_name(names: Dict[int, str], code: int) -> str:
     return names.get(int(code), f'UNKNOWN_{int(code)}')
 
 
-def hold_text(code: int) -> str:
+def hold_text(code: int, mux_status: int = 0) -> str:
     name = code_name(HOLD_NAMES, code)
+    if name == 'NOT_OWNER' and int(mux_status) == MUX_NO_ANSWER:
+        return NOT_OWNER_NO_ANSWER_TEXT
     return HOLD_TEXT.get(name, f'Hold {name}')
 
 
@@ -206,6 +217,7 @@ class TeleopSample:
     gripper_request: int
     gripper_measured_valid: bool
     gripper_measured: float
+    mux_status: int = 0         # ArmOwner.STATUS_*: the result of teleop's last request
 
 
 @dataclass(frozen=True)
@@ -378,7 +390,7 @@ class StatusTracker:
             out.calibrated = bool(s.calibrated)
             out.translation_scale = float(s.translation_scale)
             out.hold_reason = int(s.hold_reason)
-            out.hold_text = hold_text(s.hold_reason)
+            out.hold_text = hold_text(s.hold_reason, s.mux_status)
             out.gripper_enabled = bool(s.gripper_enabled)
             out.gripper_active = bool(s.gripper_active)
             out.gripper_hold = int(s.gripper_hold)

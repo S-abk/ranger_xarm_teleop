@@ -36,6 +36,7 @@ uint8 HOLD_TOOL_POSE_STALE = 17    # G-11: measured tool pose too old or unavail
 uint8 HOLD_SERVO_NOT_READY = 18    # MoveIt Servo not verified, not in joint-jog mode, or its output stopped
 uint8 HOLD_SERVO_HALTED = 19       # MoveIt Servo halted (collision or joint bound), see servo_status
 uint8 HOLD_SOLVER = 20             # no kinematic chain or joint state, or commanded and measured disagree
+uint8 HOLD_STOPPING = 21           # G-18: the stop ramp of the last release still runs; engagement follows
 uint8 hold_reason
 
 # Bound that shaped the target or the joint command of this cycle (G-6, G-8, G-14).
@@ -46,9 +47,10 @@ uint8 LIMIT_KEEP_OUT = 3
 uint8 LIMIT_SERVO = 4              # MoveIt Servo is slowing or halting, see servo_status
 uint8 LIMIT_LEAD = 5               # G-14: target clamped to the lead limit, excess absorbed
 uint8 LIMIT_TOOL_SPEED = 6         # G-8: joint command scaled to the tool speed caps
-uint8 LIMIT_JOINT_VELOCITY = 7     # G-8: joint command scaled to the joint velocity limits
+uint8 LIMIT_JOINT_VELOCITY = 7     # G-8, G-18: joint command scaled to the joint speed cap or velocity limits
 uint8 LIMIT_JOINT_POSITION = 8     # G-8: a joint held at its position bound, the rest re-solved
 uint8 LIMIT_LINK_KEEPOUT = 9       # G-15: motion toward the robot's fixed structure removed
+uint8 LIMIT_JOINT_ACCELERATION = 10 # G-18: the joint command's change scaled to the acceleration limit
 uint8 active_limit
 
 # Latest moveit_msgs/ServoStatus code; -1 when none was received.
@@ -160,3 +162,12 @@ builtin_interfaces/Time measured_tool_pose_stamp
 # always empty with motion enabled (the preview topic does not exist then). Last in the message
 # so that earlier recordings stay readable.
 string preview_reason
+
+# G-18: the joint acceleration limit of the joint command (appended; types only grow at the end,
+# and only one-byte fields here: the string before them makes any wider field's alignment vary,
+# which earlier recordings could not be padded for).
+# True when the limit shaped this cycle's joint command, while engaged or during a stop ramp.
+bool joint_acceleration_limited
+# A stop ramp runs: no target since the release, gate fault or disarm; the joint command is
+# being brought to zero at the acceleration limit (at most 0.2 s).
+bool stopping

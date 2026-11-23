@@ -383,3 +383,57 @@ def test_non_finite_inputs_are_refused(arm):
                           ([np.nan] * 6, good, None)):
         with pytest.raises(ValueError, match='not finite'):
             sv.solve(arm, q, target, PARAMS, ff)
+
+
+# ---- G-18: the joint speed cap and an approach to a bound the limited command can stop from ----
+
+def test_the_joint_speed_cap_bounds_every_joint_and_is_reported(arm):
+    params = sv.SolverParams(0.25, 1.0, joint_speed_cap=0.4)
+    rng = np.random.default_rng(18)
+    for _ in range(200):
+        q = _random_posture(rng, arm)
+        s = sv.solve(arm, q, _offset(sv.tool_pose(arm, q), rng), params)
+        assert np.max(np.abs(s.qdot)) <= 0.4 + 1e-9
+        if np.isclose(np.max(np.abs(s.qdot)), 0.4) and s.limit == sv.LIMIT_JOINT_VELOCITY:
+            break
+    else:
+        pytest.fail('the cap never bound in 200 random targets')
+
+
+def test_without_the_g18_values_the_solver_is_unchanged(arm):
+    rng = np.random.default_rng(19)
+    infinite = sv.SolverParams(0.25, 1.0)
+    for _ in range(50):
+        q = _random_posture(rng, arm)
+        target = _offset(sv.tool_pose(arm, q), rng)
+        assert np.array_equal(sv.solve(arm, q, target, PARAMS).qdot,
+                              sv.solve(arm, q, target, infinite).qdot)
+
+
+def test_the_cap_at_the_velocity_fraction_changes_nothing(arm):
+    """Simulation keeps today's 1.9 rad/s: 0.95 x the 2.0 rad/s limit, the same command."""
+    rng = np.random.default_rng(20)
+    capped = sv.SolverParams(0.25, 1.0, joint_speed_cap=1.9)
+    for _ in range(50):
+        q = _random_posture(rng, arm)
+        target = _offset(sv.tool_pose(arm, q), rng)
+        assert np.allclose(sv.solve(arm, q, target, PARAMS).qdot,
+                           sv.solve(arm, q, target, capped).qdot, atol=1e-12)
+
+
+@pytest.mark.parametrize('acceleration', [1.0, 2.0, 10.0])
+def test_the_speed_toward_a_bound_is_one_the_limited_command_can_stop_from(arm, acceleration):
+    params = sv.SolverParams(0.25, 1.0, joint_acceleration_limit=acceleration)
+    q = np.array(READY, dtype=float)
+    for room in (0.0, 0.001, 0.01, 0.05, 0.2):
+        q[2] = arm.upper[2] - params.limit_margin - room
+        _, high = sv.position_bounds(arm, q, params)
+        assert high[2] <= math.sqrt(2.0 * acceleration * room) + 1e-12
+        assert high[2] <= sv.position_bounds(arm, q, PARAMS)[1][2] + 1e-12
+
+
+def test_g18_values_must_be_positive():
+    for name in ('joint_speed_cap', 'joint_acceleration_limit'):
+        for bad in (0.0, -1.0, math.nan):
+            with pytest.raises(ValueError):
+                sv.SolverParams(0.25, 1.0, **{name: bad})

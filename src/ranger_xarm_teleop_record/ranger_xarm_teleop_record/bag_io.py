@@ -44,7 +44,8 @@ KIND_FIELDS = {
         ('input_seq', int), ('calibration_heading', float), ('input_age', float),
         ('damping', float), ('lead_translation', float), ('lead_rotation', float),
         ('translation_scale', float), ('gripper_command', float),
-        ('gripper_measured', float)),
+        ('gripper_measured', float), ('joint_acceleration_limited', bool),
+        ('stopping', bool)),
     'gripper_command': (('position', float), ('request', int), ('reference_source', int)),
     'input_status': (('session_id', int), ('seq', int), ('reset_count', int),
                      ('xr_time_ms', float), ('client_time_ms', float)),
@@ -62,9 +63,22 @@ KIND_FIELDS = {
 LEGACY = {
     'ranger_xarm_teleop_interfaces/msg/TeleopState': {
         # Before measured_tool_pose_stamp (builtin_interfaces/Time, 8 bytes, 4-aligned at the
-        # end of the old message).
+        # end of the old message), and so also before preview_reason (an empty string: length
+        # 1 and its NUL, 4-aligned after the stamp) and the G-18 bools (one byte each, no
+        # alignment).
         'RIHS01_362d040e8f527f2257cfe2363217cb2d0268490374e587d0f44664650025149f':
-            (b'\0' * 8, ('measured_tool_pose_stamp',)),
+            (b'\0' * 8 + b'\x01\0\0\0\0' + b'\0\0',
+             ('measured_tool_pose_stamp', 'preview_reason', 'joint_acceleration_limited',
+              'stopping')),
+        # With measured_tool_pose_stamp but before preview_reason (an empty string after the
+        # 4-aligned end of the stamp: length 1 and its NUL) and the G-18 bools.
+        'RIHS01_a0c5779108d4e2ea6dac62d355f177fc7091652daea24c08d535bec5a1e21565':
+            (b'\x01\0\0\0\0' + b'\0\0',
+             ('preview_reason', 'joint_acceleration_limited', 'stopping')),
+        # Before the G-18 bools joint_acceleration_limited and stopping (one byte each, after
+        # the preview_reason string: no alignment).
+        'RIHS01_62c8052500962ebf0f9bdb7fdacd986e4cb56a91cee592a03daa4a52dc26e053':
+            (b'\0\0', ('joint_acceleration_limited', 'stopping')),
     },
     'ranger_xarm_teleop_interfaces/msg/OperatorStatus': {
         # Before the reset part (reset_valid bool, reset_age float64, reset_state uint8,

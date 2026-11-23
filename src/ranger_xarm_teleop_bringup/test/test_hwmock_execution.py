@@ -251,7 +251,13 @@ def test_one_short_armed_stroke_with_the_teleop_check(stage3):
         code, verdicts, report, output = check_report(process, data_dir, 90.0)
     assert verdicts.get('stale repeats while moving') == 'PASS', output[-4000:]
     assert verdicts.get('target lead (largest, translation)') == 'PASS', output[-4000:]
-    assert verdicts.get('peak joint acceleration') in ('PASS', 'FAIL'), output[-4000:]
+    # G-18: the stage-4 stop rules are on MoveIt Servo's output against the limits file; the
+    # joint-state acceleration is information only (a 20 ms window, MoveIt's value shown).
+    assert verdicts.get('commanded joint acceleration (MoveIt Servo output)') == 'PASS', \
+        output[-4000:]
+    assert verdicts.get('stop time after a release') in ('PASS', 'NOT JUDGED'), output[-4000:]
+    assert verdicts.get('joint-state acceleration (20 ms, INFO)') == 'INFO', output[-4000:]
+    assert 'peak joint acceleration' not in verdicts
     # The gripper proxy's own joint states (10 Hz, gripper only) never took the arm's
     # measured pose away while engaged.
     engaged = [s for s in probe.states_since(start) if s.clutch_engaged]

@@ -24,6 +24,7 @@ from dataclasses import dataclass, replace
 import math
 from typing import Any, Mapping, Sequence, Tuple
 
+from . import joint_accel
 from .rotations import Vec3
 
 # PENDING in the gate document: required, no default (INV-10).
@@ -44,7 +45,14 @@ REQUIRED = (
 # simulation) these must also come from the limits file: the link keep-out margin (PENDING in
 # the gate document) and the joint-state age limit, which on a real arm depends on how often
 # its driver reports and is chosen from the stage 2 check, not taken from simulation.
-HARDWARE_REQUIRED = REQUIRED + ('link_keepout_margin_m', 'tool_pose_timeout_s')
+HARDWARE_REQUIRED = REQUIRED + ('link_keepout_margin_m', 'tool_pose_timeout_s',
+                                *joint_accel.NAMES)
+
+# The joint speed cap and the joint acceleration limit of the joint command (G-18): required on
+# every path, simulation included, with no default. They are not gate values, so they are not
+# in REQUIRED and not in GateParams; the teleop node reads them and refuses to start without
+# them (and when a stop from the cap would take longer than joint_accel.STOP_TIME_LIMIT_S).
+MOTION_REQUIRED = joint_accel.NAMES
 
 # Set in the gate document.
 INPUT_TIMEOUT_S = 0.1

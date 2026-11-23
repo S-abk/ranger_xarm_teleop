@@ -65,6 +65,24 @@ def test_snapshot_fields_are_the_message_fields():
     assert list(st.Snapshot.__dataclass_fields__) == msg_fields
 
 
+def test_the_no_answer_status_matches_the_message():
+    assert constants('ArmOwner.msg', 'STATUS_')[st.MUX_NO_ANSWER] == 'NO_ANSWER'
+
+
+def test_waiting_for_the_arm_says_when_the_request_is_repeated():
+    """Contract, service calls: an unanswered request for the arm is asked again; say so."""
+    assert st.hold_text(3) == 'Waiting for the arm (MoveIt owns it)'
+    assert st.hold_text(3, st.MUX_NO_ANSWER) == st.NOT_OWNER_NO_ANSWER_TEXT
+    assert 'asking for the arm again' in st.NOT_OWNER_NO_ANSWER_TEXT
+    assert '_' not in st.NOT_OWNER_NO_ANSWER_TEXT
+    assert st.hold_text(5, st.MUX_NO_ANSWER) == st.HOLD_TEXT['CLUTCH_RELEASED']
+    tracker = StatusTracker()
+    tracker.on_teleop(teleop(hold_reason=3, mux_status=st.MUX_NO_ANSWER), 1.0)
+    assert tracker.snapshot(1.1, 100.0).hold_text == st.NOT_OWNER_NO_ANSWER_TEXT
+    tracker.on_teleop(teleop(hold_reason=3, mux_status=0), 1.2)
+    assert tracker.snapshot(1.3, 100.0).hold_text == 'Waiting for the arm (MoveIt owns it)'
+
+
 def test_servo_halted_says_what_to_do_first():
     assert st.hold_text(19) == ('Arm halted near a collision or joint limit: disarm (B), '
                                 'then use the retreat tool')

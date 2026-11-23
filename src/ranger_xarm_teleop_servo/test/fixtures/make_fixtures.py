@@ -216,6 +216,11 @@ def clutch_release_moving() -> List[str]:
     return record(4.0, line_motion, held_until(TRIGGER_AT))
 
 
+def clutch_engage_moving() -> List[str]:
+    """As clutch_line, but the grip closes at 2.3 s, with the hand already moving (G-18)."""
+    return record(4.2, line_motion, lambda t: 2.3 <= t < 3.8)
+
+
 def clutch_into_body() -> List[str]:
     """Grip 1.2-6.0 s; the hand pulls 0.28 m straight back (the tool toward the arm base)."""
     def motion(t: float) -> Tuple[Vec, Quat]:
@@ -686,7 +691,7 @@ def generate() -> Dict[str, List[str]]:
               clutch_stall, clutch_release_moving, clutch_into_body, clutch_singularity,
               clutch_shoulder, clutch_fast, clutch_step, clutch_joint_limit, clutch_reach,
               clutch_scale_switch, clutch_keepout_slide, clutch_keepout_reverse,
-              clutch_into_body_slow, arm_only,
+              clutch_into_body_slow, clutch_engage_moving, arm_only,
               gate_absent,
               gate_emulated, gate_out_of_view, gate_head_emulated, gate_reset, gate_session,
               gate_seq_backwards, gripper_clutch_strokes, gripper_dropout, gripper_stall,

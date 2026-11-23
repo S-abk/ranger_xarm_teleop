@@ -108,6 +108,12 @@ class SolverParams:
     limit_margin: float = 0.15          # rad: no motion toward a position limit closer than this
     limit_zone: float = 0.35            # rad: the damper starts slowing a joint from here
     velocity_fraction: float = 0.95     # share of each joint velocity limit that is used
+    # G-18 (limits file): rad/s, no joint is commanded faster (besides velocity_fraction of its
+    # limit, whichever is smaller); rad/s^2, the joint command's acceleration limit, which
+    # makes the approach to a joint position bound one the limited command can stop from.
+    # Infinite (not applied) unless given.
+    joint_speed_cap: float = math.inf
+    joint_acceleration_limit: float = math.inf
     # s: the link keep-out lets a clearance d fall at most at (d - margin) / keepout_time.
     # Like the gain, period / keepout_time <= 27/256: no ringing at the boundary with the
     # reference three cycles old.
@@ -126,6 +132,10 @@ class SolverParams:
             raise ValueError('velocity_fraction: expected a value in (0, 1]')
         if self.period / self.keepout_time > STABLE_GAIN_PERIOD:
             raise ValueError(f'period / keepout_time must be at most {STABLE_GAIN_PERIOD:.4f}')
+        for name in ('joint_speed_cap', 'joint_acceleration_limit'):
+            value = getattr(self, name)
+            if not (isinstance(value, (int, float)) and not math.isnan(value) and value > 0.0):
+                raise ValueError(f'{name}: expected a positive number, got {value!r}')
         if self.gain * self.period > STABLE_GAIN_PERIOD:
             raise ValueError(f'gain * period must be at most {STABLE_GAIN_PERIOD:.4f}: no '
                              'ringing with the reference up to three cycles old')
@@ -283,6 +293,21 @@ def _normalised(arm: Arm, jac: np.ndarray, params: SolverParams) -> np.ndarray:
     return rows[:, None] * jac * arm.velocity[None, :]
 
 
+def stoppable_speed(room, params: SolverParams):
+    """
+    Return the speed (rad/s) toward a bound from which the limited command stops in ``room``.
+
+    Discrete: the reference may be one cycle old (one step ``v T`` already on its way), then
+    the command slows by ``a T`` per period ``T``, which covers ``v^2 / (2 a) + v T / 2``. So
+    ``v T + v^2 / (2 a) + v T / 2 <= room``, that is
+    ``v = a (-1.5 T + sqrt(2.25 T^2 + 2 room / a))``: about ``sqrt(2 a room)``, and zero at
+    zero room, so the joint still reaches the margin.
+    """
+    a, period = params.joint_acceleration_limit, params.period
+    room = np.maximum(np.asarray(room, dtype=float), 0.0)
+    return a * (-1.5 * period + np.sqrt(2.25 * period * period + 2.0 * room / a))
+
+
 def position_bounds(arm: Arm, q: Sequence[float],
                     params: SolverParams) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -292,13 +317,23 @@ def position_bounds(arm: Arm, q: Sequence[float],
     pushed away by the solver). These are position bounds only; they exceed the velocity
     limit outside ``limit_zone``. Velocity is limited afterwards by one factor for the
     whole vector, so a joint that is merely fast is never held on its own.
+
+    With a joint acceleration limit ``a`` (G-18) the speed toward a limit is also at most the
+    speed from which the acceleration-limited command can still stop at the margin, in steps
+    of one period from a reference that may be one cycle old (``stoppable_speed``): about
+    ``sqrt(2 a (distance - margin))``.
     """
     q = np.asarray(q, dtype=float)
     # At least one cycle, so one step never covers more than the remaining distance.
     tau = np.maximum((params.limit_zone - params.limit_margin) / arm.velocity, params.period)
     with np.errstate(invalid='ignore'):
-        up = np.maximum((arm.upper - q - params.limit_margin) / tau, 0.0)
-        down = np.maximum((q - arm.lower - params.limit_margin) / tau, 0.0)
+        room_up = np.maximum(arm.upper - q - params.limit_margin, 0.0)
+        room_down = np.maximum(q - arm.lower - params.limit_margin, 0.0)
+        up = room_up / tau
+        down = room_down / tau
+        if math.isfinite(params.joint_acceleration_limit):
+            up = np.minimum(up, stoppable_speed(room_up, params))
+            down = np.minimum(down, stoppable_speed(room_down, params))
     up = np.where(np.isfinite(arm.upper), up, np.inf)
     down = np.where(np.isfinite(arm.lower), down, np.inf)
     return -down, up
@@ -538,9 +573,12 @@ def _scaled(arm: Arm, q: np.ndarray, jac: np.ndarray, current: np.ndarray, z: np
         LIMIT_LINK_KEEPOUT if bound else (LIMIT_TOOL_SPEED if capped else LIMIT_NONE))
     qdot = z * arm.velocity
     scale = 1.0
+    # G-8 and G-18: each joint within velocity_fraction of its limit and within the joint
+    # speed cap, whichever is smaller.
+    joint_limit = np.minimum(arm.velocity * params.velocity_fraction, params.joint_speed_cap)
     joint_scale = float(np.min(np.where(np.abs(qdot) > 1e-12,
-                                        arm.velocity * params.velocity_fraction
-                                        / np.maximum(np.abs(qdot), 1e-12), np.inf)))
+                                        joint_limit / np.maximum(np.abs(qdot), 1e-12),
+                                        np.inf)))
     twist = jac @ qdot
     linear, angular = float(np.linalg.norm(twist[:3])), float(np.linalg.norm(twist[3:]))
     tool_scale = min(params.linear_speed_cap / linear if linear > 1e-12 else math.inf,

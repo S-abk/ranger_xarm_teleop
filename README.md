@@ -410,8 +410,19 @@ Each cycle the solver turns the target into joint velocities:
 - **Limits.** A joint slows toward a position limit from 0.35 rad and stops 0.15 rad short
   (`joint_limit_zone`, `joint_limit_margin`); the rest of the motion is solved again without
   it. One factor then scales the whole command, so its direction is kept, to stay within the
-  joint velocity limits (the smaller of the URDF's and MoveIt's `joint_limits.yaml`, x 0.95)
-  and the tool speed caps.
+  joint velocity limits (the smaller of the URDF's and MoveIt's `joint_limits.yaml`, x 0.95),
+  the joint speed cap `joint_speed_cap_rad_s` (G-18; required, no default) and the tool speed
+  caps. With the joint acceleration limit the approach to a position limit is also slow
+  enough for the limited command to stop at the margin.
+- **Joint acceleration limit (G-18).** The joint command never changes by more than
+  `joint_acceleration_limit_rad_s2` x 20 ms on any joint from one cycle to the next: the
+  change the solver asks for is scaled down, all joints by one factor, so the limited change is
+  parallel to the requested one and no joint is clipped on its own (`active_limit` 10,
+  `joint_acceleration_limited`). Nothing undelivered is kept: the next cycle starts from what
+  was sent, and the mapping is never moved because of the limit (only the lead clamp absorbs,
+  as before). Both values are required with no default; a joint speed cap divided by the
+  acceleration limit above 0.2 s is refused at start-up, with one line naming the value to
+  change.
 - **Reference.** The error is taken against MoveIt Servo's own commanded state (its output on
   the teleop controller's command topic), seeded from the measured joints at engagement. If
   that output stops following the commands for 0.1 s, the clutch releases.
@@ -419,7 +430,15 @@ Each cycle the solver turns the target into joint velocities:
   `max_lead_translation_m` / `max_lead_rotation_deg` (required, no default). The excess is
   absorbed into the mapping, so after a hand motion faster than the arm the arm does not catch
   up once the hand stops; it follows the hand again from where it is.
-- **Stop.** The cycle that releases the clutch sends a zero joint command.
+- **Stop (G-18).** A release, every gate fault and a disarm (button or service) ramp the last
+  joint command to zero at the acceleration limit, all joints scaled together so the tool keeps
+  its direction, starting in the cycle that releases; MoveIt Servo stays active until the zero
+  has been sent (`stopping`, `hold_reason` 21 if the grip closes again meanwhile: the new
+  engagement waits for the ramp, at most 0.2 s). The extra tool travel is at most
+  v q / (2 a) on top of the points already on their way. The stop is at once only where this
+  node cannot command the arm through Servo: teleop no longer owns the arm (G-17), MoveIt Servo
+  has halted (also its collision slow-down holding the arm still), or Servo is not running.
+  Servo's and the controller's command timeouts and the emergency stop are not this node's.
 - **Stuck near a collision.** MoveIt Servo slows every joint command by one factor that
   depends only on the distance to the nearest collision (down to 0.001 at contact), so near
   contact no direction leads away. When Servo reports collision deceleration (`servo_status`

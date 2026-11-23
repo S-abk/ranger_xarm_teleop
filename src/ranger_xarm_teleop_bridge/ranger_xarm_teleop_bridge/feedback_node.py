@@ -132,7 +132,8 @@ class FeedbackNode(Node):
         self.tracker.on_teleop(TeleopSample(
             m.motion_enabled, m.armed, m.clutch_engaged, m.calibrated, m.translation_scale,
             m.hold_reason, m.active_limit, m.gripper_enabled, m.gripper_active, m.gripper_hold,
-            m.gripper_request, m.gripper_measured_valid, m.gripper_measured), time.monotonic())
+            m.gripper_request, m.gripper_measured_valid, m.gripper_measured, m.mux_status),
+            time.monotonic())
 
     def on_episode(self, m: EpisodeState) -> None:
         now, wall = time.monotonic(), time.time()

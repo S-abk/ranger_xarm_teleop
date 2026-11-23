@@ -326,6 +326,21 @@ def test_engagement_captures_the_measured_tool_pose_not_the_last_target():
     assert output.engaged and output.target == elsewhere
 
 
+def test_a_grip_during_a_stop_ramp_waits_for_it_and_then_engages_afresh():
+    """G-18 with G-10: no engagement while the node ramps the last command to zero."""
+    p = params()
+    state = ready_state()
+    for k in range(3):
+        state = on_frame(state, frame(k), p)
+    state, output = tick(state, Env(0.03, True, TOOL_START, 0.0, True, stopping=True), p)
+    assert not output.engaged and output.target is None
+    assert output.hold == Hold.STOPPING and output.want_servo_active
+    assert state.latched == Hold.NONE                  # not a fault: nothing latched
+    elsewhere = Pose((0.1, 0.2, 0.5), q_from_yaw(1.0))
+    state, output = tick(state, Env(0.05, True, elsewhere, 0.0, True), p)
+    assert output.engaged and output.target == elsewhere    # engagement state is fresh
+
+
 # ---- G-13 (INV-9) ----
 
 def test_no_target_without_a_calibration_for_this_session_and_reset_count():

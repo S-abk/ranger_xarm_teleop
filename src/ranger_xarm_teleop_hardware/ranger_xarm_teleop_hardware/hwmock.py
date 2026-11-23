@@ -16,7 +16,7 @@ Pure helpers of the hardware-shaped mock bring-up (launch/hwmock.launch.py).
 
 No launch, rclpy or ROS imports here, so every decision is testable without a ROS graph:
 the xacro arguments and spawner lists of each stage, the refusal rules, and the gripper
-stand-in's clamp and step.
+stand-in's clamp and step, and the fields of the arm-state stand-in's message.
 """
 
 STAGES = ('check', 'execution')
@@ -130,6 +130,39 @@ def refusal_reason(node_names, robot_description_publishers):
     if CONTROLLER_MANAGER_NODE in node_names or robot_description_publishers > 0:
         return REFUSAL
     return None
+
+
+ROBOT_STATES_TOPIC = '/xarm/robot_states'
+ROBOT_STATES_RATE_HZ = 5.0
+# One bit per axis, joint 1 the lowest: all six set.
+ALL_AXES = 0b111111
+# xarm_msgs/RobotMsg: state 2 is ready (sleeping), mode 1 is servo.
+READY_STATE = 2
+SERVO_MODE = 1
+
+
+def arm_angles(names, positions):
+    """
+    Return the six arm joint positions (rad) in joint order from a joint state, or [].
+
+    A message that lacks any of the six (the gripper stand-in's, which carries only the
+    gripper joint) gives [].
+    """
+    by_name = dict(zip(names, positions))
+    if not all(joint in by_name for joint in ARM_JOINTS):
+        return []
+    return [float(by_name[joint]) for joint in ARM_JOINTS]
+
+
+def robot_state_fields(err=0, mode=SERVO_MODE, state=READY_STATE, angles=()):
+    """
+    Return the fields of the arm-state stand-in's xarm_msgs/RobotMsg as a dict.
+
+    err, mode and state as given (parameters of the stand-in); warn 0; every axis braked and
+    enabled (mt_brake and mt_able 63); angle the given joint angles, empty when none are known.
+    """
+    return {'err': int(err), 'warn': 0, 'mode': int(mode), 'state': int(state),
+            'mt_brake': ALL_AXES, 'mt_able': ALL_AXES, 'angle': [float(a) for a in angles]}
 
 
 def clamp_position(value, low=GRIPPER_MIN, high=GRIPPER_MAX):
