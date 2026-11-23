@@ -13,11 +13,12 @@
 # limitations under the License.
 """The teleop stage's rules on MoveIt Servo's output (G-18): synthetic trajectory messages."""
 
+import datetime
 import json
 
 import numpy as np
 
-from ranger_xarm_teleop_check import rules, stats
+from ranger_xarm_teleop_check import report as rep, rules, stats
 from ranger_xarm_teleop_check.rules import FAIL, INFO, NOT_JUDGED, Options, PASS
 from test_hw_check_rules import _teleop_data, motion_data
 
@@ -325,6 +326,31 @@ def test_a_stream_that_ends_while_still_moving_is_reported_not_passed():
     assert accel.verdict == PASS                      # no rest assumed at the open end
 
 
+def test_a_stall_of_the_output_inside_a_stop_counts_into_it():
+    peak = 0.36
+    pre = commands(up(peak), [peak] * 10)
+    cmds = commands(up(peak), [peak] * 10, down(peak, 9), [0.0] * 3)
+    data = servo_data(cmds, release_at=len(pre))
+    # Servo's output stalls for 0.15 s four cycles into the ramp, then goes on.
+    cut = len(pre) + 4
+    data['command'] = [(a + (0.15 if k > cut else 0.0), s + (150_000_000 if k > cut else 0), n, p)
+                       for k, (a, s, n, p) in enumerate(data['command'])]
+    cm, accel, stop = judge(data)
+    assert cm['runs'] == 2
+    assert abs(cm['stops'][0]['duration_s'] - 0.31) < 1e-6
+    assert stop.verdict == FAIL and not cm['stops'][0]['unfinished']
+
+
+def test_a_release_at_the_very_end_of_a_moving_stream_is_unfinished():
+    peak = 0.36
+    cmds = commands(up(peak), [peak] * 10)
+    end = 10.0 + (len(cmds) + 1) * PERIOD + 0.01
+    cm, _, stop = judge(servo_data(cmds, release_at=len(cmds), capture=(0.0, end)))
+    assert cm['stops'] and cm['stops'][0]['unfinished']
+    assert cm['stops'][0]['duration_s'] == 0.0
+    assert stop.verdict == NOT_JUDGED and '1 stops where' in stop.measured
+
+
 def test_an_unfinished_stop_already_too_long_fails():
     peak = 0.36
     pre = commands(up(peak), [peak] * 10)
@@ -382,7 +408,7 @@ def test_the_motion_stage_keeps_its_rule_and_has_no_servo_rules():
         PASS, FAIL)
 
 
-def test_the_teleop_stage_judges_the_servo_output_end_to_end():
+def test_the_teleop_stage_judges_the_servo_output_end_to_end(tmp_path):
     data = _teleop_data()
     data.update(release_run(9))
     opts = Options(limits_given=True, tool_pose_timeout_s=1.0, max_lead_translation_m=0.05,
@@ -391,5 +417,14 @@ def test_the_teleop_stage_judges_the_servo_output_end_to_end():
     by = {r.rule: r for r in results}
     assert by[NAME].verdict == PASS and by[STOP].verdict == PASS
     assert measures['servo_command']['stops'][0]['unfinished'] is False
-    text = json.dumps(measures, allow_nan=False, default=float)
-    assert 'servo_command' in text
+    start = datetime.datetime(2026, 1, 2, 3, 4, 5).astimezone()
+    doc = rep.build_report('teleop', start, start, measures, results, {}, ['x'], [], 'abc',
+                           rules.exit_status(results))
+    path = rep.write_report(rep.report_path(str(tmp_path), 'teleop', start), doc)
+    back = json.loads(open(path).read(), parse_constant=_reject)
+    assert back['measures']['servo_command']['stops'][0]['unfinished'] is False
+    assert back['measures']['joint_state_acceleration_20ms']['window_s'] == 0.02
+
+
+def _reject(constant):
+    raise ValueError('not JSON: ' + constant)

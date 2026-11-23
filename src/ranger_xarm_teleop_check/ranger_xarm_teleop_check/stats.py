@@ -542,7 +542,8 @@ def stop_durations(t: Sequence[float], analysis: dict,
 
     ``releases`` and ``engages`` are times (s, the clock of ``t``). A release's window ends at
     the next engage. The stop lasts from the first point at or after the release to the last
-    point whose segment speed (any joint) is above ``SERVO_REST_SPEED``, plus that segment;
+    point whose segment speed (any joint) is above ``SERVO_REST_SPEED``, plus that segment (all
+    runs are scanned: a stall of Servo's output inside a stop counts into it);
     0 when only the segment before the first point was moving. A release has motion when the
     segment into that point or any later segment in the window moves; the others are left out.
     ``unfinished`` is True when the stream ended (``open_end``) while the last segment still
@@ -559,19 +560,24 @@ def stop_durations(t: Sequence[float], analysis: dict,
         first = int(np.searchsorted(t, release, side='left'))
         if first >= len(t) or t[first] >= end:
             continue
-        a, b = next(r for r in runs if r[0] <= first < r[1])
+        a = next(r[0] for r in runs if r[0] <= first < r[1])
         into = first > a and speed[first - 1] > SERVO_REST_SPEED
         last = None
-        for j in range(first, b - 1):
+        for j in range(first, len(t) - 1):
             if t[j] >= end:
                 break
-            if speed[j] > SERVO_REST_SPEED:
+            if speed[j] > SERVO_REST_SPEED:      # NaN (the last point of a run) is not
                 last = j
         if not into and last is None:
             continue
         duration = float(t[last + 1] - t[first]) if last is not None else 0.0
-        unfinished = bool(open_end and last is not None and last == b - 2
-                          and b == len(t) and t[last + 1] < end)
+        # The stream ended while the arm still moved: the capture cut it at a moving segment,
+        # either the last one in the window or the one into the final point.
+        if last is not None:
+            unfinished = open_end and last == len(t) - 2 and t[last + 1] < end
+        else:
+            unfinished = open_end and first == len(t) - 1
+        unfinished = bool(unfinished)
         out.append({'release_s': float(release), 'first_point_s': float(t[first]),
                     'duration_s': duration, 'unfinished': unfinished})
     return out
