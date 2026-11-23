@@ -70,6 +70,9 @@ def parser() -> argparse.ArgumentParser:
                        ('cameras', "the simulator's cameras"), ('rviz', 'RViz (mock)')):
         st.add_argument(f'--no-{name}', dest=name, action='store_false', default=None,
                         help=f'switch off {text}')
+    st.add_argument('--base', action='store_true', default=None,
+                    help='drive the simulated base from the headset (left grip; simulation '
+                         'only, off by default)')
     st.add_argument('--headless', action='store_true', default=None,
                     help='simulator without its window')
     st.add_argument('--gpu', default=None, choices=pl.GPU_CHOICES,
@@ -96,8 +99,9 @@ def options_from(args) -> pl.Options:
     """Return the Options for the parsed ``start`` arguments, noting which were typed."""
     opts = pl.Options()
     explicit = []
-    for name in ('profile', 'role', 'record', 'feedback', 'reset', 'headless', 'cameras',
-                 'gpu', 'rviz', 'relay_url', 'listen', 'port', 'data_dir', 'sim_check_seconds'):
+    for name in ('profile', 'role', 'record', 'feedback', 'reset', 'base', 'headless',
+                 'cameras', 'gpu', 'rviz', 'relay_url', 'listen', 'port', 'data_dir',
+                 'sim_check_seconds'):
         value = getattr(args, name)
         if value is None:
             continue
@@ -182,7 +186,7 @@ def start_command(args, checkout: Optional[str], state_file: str, argv) -> int:
             print(f'refused: {err}')
             return sv.EXIT_REFUSED
     else:
-        for name in ('record', 'feedback', 'reset'):
+        for name in ('record', 'feedback', 'reset', 'base'):
             setattr(opts, name, False)
     try:
         warnings = pl.check_options(opts, record_profile)

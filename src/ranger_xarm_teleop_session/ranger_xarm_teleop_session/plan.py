@@ -77,6 +77,7 @@ class Options:
     record: bool = True
     feedback: bool = True
     reset: bool = True
+    base: bool = False                         # drive the simulated base from the headset
     headless: bool = False
     cameras: bool = True
     gpu: str = 'auto'
@@ -194,6 +195,9 @@ def check_options(opts: Options, record_profile: Optional[dict]) -> List[str]:
         raise PlanError(f'--profile {opts.profile!r}: one of {", ".join(sorted(PROFILES))}. '
                         'A hardware profile is not part of this launcher yet: the hardware '
                         'bring-up is started by hand, and the teleop stack with it')
+    if opts.base and (record_profile is None or record_profile.get('simulation') is not True):
+        raise PlanError('--base is for a simulated base only; this launcher never drives the '
+                        'base of a hardware deployment')
     if record_profile is None or record_profile.get('simulation') is not True:
         raise PlanError(f'profile {opts.profile}: its deployment profile is not marked '
                         '"simulation: true". This launcher starts simulation profiles only; '
@@ -207,6 +211,9 @@ def check_options(opts: Options, record_profile: Optional[dict]) -> List[str]:
             raise PlanError('--listen and --port are for a relay started here; with --relay '
                             'the relay runs elsewhere')
     profile = PROFILES[opts.profile]
+    if opts.base and profile.simulator is None:
+        raise PlanError(f'--base needs a simulator with a base to drive; profile '
+                        f'{opts.profile} starts none')
     if profile.simulator is None:
         for name in ('headless', 'cameras', 'gpu'):
             if name in opts.explicit:
@@ -257,6 +264,8 @@ def build_plan(opts: Options, *, checkout: str, bringup_share: str = '', session
             argv.append('sensors:=true')
         if gpu:
             argv.append(f'gpu:={gpu}')
+        if opts.base:
+            argv.append('drive_base:=true')
         steps.append(Step('simulator', tuple(argv)))
         steps.append(Step('sim_check', (
             'ros2', 'run', 'ranger_xarm_teleop_record', 'record_commission', '--simulator',
@@ -268,6 +277,8 @@ def build_plan(opts: Options, *, checkout: str, bringup_share: str = '', session
         argv.append('record:=true')
     if opts.reset:
         argv.append('reset:=true')
+    if opts.base:
+        argv.append('base:=true')
     if not opts.feedback:
         argv.append('feedback:=false')
     if profile.rviz and not opts.rviz:
