@@ -38,7 +38,8 @@ def test_an_old_operator_status_reads_with_the_reset_part_not_recorded():
     assert msg.episode_index == 5 and msg.disk_minutes_left == 49.4883412249289
     assert not msg.reset_valid and msg.reset_text == ''
     assert set(missing) == {'reset_valid', 'reset_age', 'reset_state', 'reset_reason',
-                            'reset_text', 'reset_event_age'}
+                            'reset_text', 'reset_event_age', 'base_valid', 'base_age',
+                            'base_state', 'base_reason', 'base_text', 'base_event_age'}
 
 
 def test_without_the_padding_an_old_operator_status_does_not_read():

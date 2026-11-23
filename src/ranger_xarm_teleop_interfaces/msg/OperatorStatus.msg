@@ -60,3 +60,13 @@ uint8 reset_state                   # ResetState.STATE_*
 uint8 reset_reason                  # ResetState.REASON_*
 string reset_text                   # the panel line, plain words
 float64 reset_event_age             # s since the newest reset event (host wall clock); NaN when none
+
+# ---- base (BaseState), appended: driving the base from the headset (G-19) ----
+# base_valid is False when no base node runs (the feature is off) or its state is too old; the
+# base fields then keep their defaults and the panel shows no base line.
+bool base_valid
+float64 base_age
+uint8 base_state                    # BaseState.STATE_*
+uint8 base_reason                   # BaseState.REASON_*
+string base_text                    # the panel line, plain words
+float64 base_event_age              # s since the newest base event (host wall clock); NaN when none

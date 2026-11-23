@@ -10,6 +10,7 @@ find_package(trajectory_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ArmOwner.msg"
+  "msg/BaseState.msg"
   "msg/EpisodeState.msg"
   "msg/GripperCommand.msg"
   "msg/Haptic.msg"

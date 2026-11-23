@@ -32,6 +32,7 @@ uint8 REASON_PLAN_FAILED = 11           # MoveIt found no plan to the posture; n
 uint8 REASON_START_IN_COLLISION = 12    # MoveIt considers the posture in collision; nothing moved
 uint8 REASON_BUSY = 13                  # the previous goal is still being stopped
 uint8 REASON_JOINTS_UNKNOWN = 14        # no fresh joint state of the arm
+uint8 REASON_BASE_DRIVE = 15            # the left grip (hold to drive the base) is held (G-19)
 # Arrival:
 uint8 REASON_REACHED = 20               # the plan was executed to the posture
 uint8 REASON_ALREADY_THERE = 21         # the arm was already at the posture; nothing was sent

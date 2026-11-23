@@ -42,7 +42,7 @@ HOLD_NAMES = {
     9: 'OUT_OF_VIEW', 10: 'HEAD_ABSENT', 11: 'HEAD_EMULATED', 12: 'RESET_CHANGED',
     13: 'SESSION_CHANGED', 14: 'SEQ_BACKWARDS', 15: 'INPUT_JUMP', 16: 'STEP_REJECTED',
     17: 'TOOL_POSE_STALE', 18: 'SERVO_NOT_READY', 19: 'SERVO_HALTED', 20: 'SOLVER',
-    21: 'STOPPING',
+    21: 'STOPPING', 22: 'BASE_DRIVE', 23: 'BASE_MOVING', 24: 'BASE_ODOM', 25: 'BASE_TURNED',
 }
 HOLD_TEXT = {
     'NONE': '',
@@ -68,6 +68,10 @@ HOLD_TEXT = {
                     'retreat tool',
     'SOLVER': 'Arm state disagrees with command: release, check arm',
     'STOPPING': 'Arm stopping: wait',
+    'BASE_DRIVE': 'Driving the base: release left grip to move the arm',
+    'BASE_MOVING': 'Base still moving: arm waits for it to stop',
+    'BASE_ODOM': 'Base odometry missing: arm held',
+    'BASE_TURNED': 'Base turned since calibration: recalibrate (A)',
 }
 # ArmOwner.STATUS_NO_ANSWER in TeleopState.mux_status (checked against the message by the unit
 # tests): teleop's last request for the arm had no answer in time; it is being asked again.
@@ -75,7 +79,8 @@ MUX_NO_ANSWER = 6
 NOT_OWNER_NO_ANSWER_TEXT = 'No answer from the command mux: asking for the arm again'
 # Holds that are the system's state, not a fault; every other hold is a fault and is latched.
 STATE_HOLDS = frozenset({'NONE', 'MOTION_DISABLED', 'NOT_ARMED', 'NOT_OWNER',
-                         'NOT_CALIBRATED', 'CLUTCH_RELEASED', 'STOPPING'})
+                         'NOT_CALIBRATED', 'CLUTCH_RELEASED', 'STOPPING', 'BASE_DRIVE',
+                         'BASE_MOVING', 'BASE_TURNED'})
 
 # TeleopState.LIMIT_*.
 LIMIT_NAMES = {
@@ -296,6 +301,12 @@ class Snapshot:
     reset_reason: int = 0
     reset_text: str = ''
     reset_event_age: float = NAN
+    base_valid: bool = False
+    base_age: float = NAN
+    base_state: int = 0
+    base_reason: int = 0
+    base_text: str = ''
+    base_event_age: float = NAN
 
 
 @dataclass

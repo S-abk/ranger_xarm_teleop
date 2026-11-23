@@ -71,7 +71,7 @@ STATE_NAMES = ('IDLE', 'WAITING', 'REFUSED', 'PLANNING', 'MOVING', 'STOPPING', '
 NONE = 0
 OFF, NOT_SIMULATION, ARMED, NOT_MOVEIT_OWNER, ARMED_UNKNOWN = 1, 2, 3, 4, 5
 RECORDING, REVIEW, EPISODE_UNKNOWN, WATCHDOG_ABSENT, MOVEIT_NOT_READY = 6, 7, 8, 9, 10
-PLAN_FAILED, START_IN_COLLISION, BUSY, JOINTS_UNKNOWN = 11, 12, 13, 14
+PLAN_FAILED, START_IN_COLLISION, BUSY, JOINTS_UNKNOWN, BASE_DRIVE = 11, 12, 13, 14, 15
 REACHED, ALREADY_THERE = 20, 21
 RELEASED, INPUT_STALE, CONTROLLER_MISSING, SESSION_CHANGED, SEQ_BACKWARDS = 30, 31, 32, 33, 34
 TELEOP_ARMED, OWNER_CHANGED, EPISODE_STARTED, WATCHDOG_LOST, HEARTBEAT_LATE = 35, 36, 37, 38, 39
@@ -94,6 +94,7 @@ REASON_TEXT = {
                          'move: disarm and free the arm with tools/retreat_arm.py'),
     BUSY: 'the previous goal is still being stopped',
     JOINTS_UNKNOWN: 'no fresh joint state of the arm',
+    BASE_DRIVE: 'the left grip (hold to drive the base) is held: release it first',
     REACHED: 'the arm reached the posture',
     ALREADY_THERE: 'the arm was already at the posture; no goal was sent',
     RELEASED: 'the control was released',
