@@ -739,7 +739,7 @@ only**: refused outside simulation, and no figure for a description that is not 
 **Information only**: the stability node publishes its own state and nothing reads it to decide
 a command, a hold or a refusal; stopped, killed or never started, it changes nothing else. It
 starts with the stack, before arming; do not start it on its own mid-session: a process joining
-the running graph stalled the teleop node's cycle for up to 390 ms in simulation. It
+the running graph stalled the teleop node's cycle for up to 414 ms in simulation. It
 **does not see a force on the tool** (the arm or the tool caught on something while the base
 drives): the arm reports no joint effort. Nor does it see the ground: it puts every wheel's
 contact under the wheel on a plane. Driving over a 2 cm bar in simulation, with the rear wheels

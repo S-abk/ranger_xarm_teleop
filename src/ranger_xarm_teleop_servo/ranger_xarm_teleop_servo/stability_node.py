@@ -35,10 +35,11 @@ Published
 The mass file (``mass_file``) is read once at start; unreadable or refused, the state says so.
 """
 
+from collections import deque
 import math
 import sys
 import time
-from typing import List, Optional
+from typing import Deque, List, Optional
 
 from control_msgs.msg import DynamicJointState
 from nav_msgs.msg import Odometry
@@ -125,7 +126,7 @@ class StabilityNode(Node):
 
         self.timing: List[float] = []
         self.logged_reason: Optional[tuple] = None      # (reason, text) last written to the log
-        self.reason_log: List[str] = []                     # every such line (tests read it)
+        self.reason_log: Deque[str] = deque(maxlen=50)      # the latest such lines (tests read)
         self.timing_logged = time.monotonic()
         self.imu_frame_looked = -1e9
         self.imu_header_frame = ''
