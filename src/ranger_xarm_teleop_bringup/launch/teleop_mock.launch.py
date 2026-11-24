@@ -59,6 +59,15 @@ def generate_launch_description():
             'base', default_value='false',
             description='Base driving from the headset (G-19, simulation only).'),
         DeclareLaunchArgument(
+            'stability', default_value='false',
+            description='The stability monitor (information only; simulation only).'),
+        DeclareLaunchArgument(
+            'stability_params_file',
+            default_value=os.path.join(share, 'config', 'stability_SIMULATION_ONLY.yaml')),
+        DeclareLaunchArgument(
+            'stability_mass_file',
+            default_value=os.path.join(share, 'config', 'stability_mass_SIMULATION_ONLY.yaml')),
+        DeclareLaunchArgument(
             'reset', default_value='false',
             description='Hold the right thumbstick pulled back (disarmed) to return the arm to '
                         'the ready posture (G-16).'),
@@ -96,6 +105,9 @@ def generate_launch_description():
                 'gripper_enabled': LaunchConfiguration('gripper_enabled'),
                 'reset': LaunchConfiguration('reset'),
                 'base': LaunchConfiguration('base'),
+                'stability': LaunchConfiguration('stability'),
+                'stability_params_file': LaunchConfiguration('stability_params_file'),
+                'stability_mass_file': LaunchConfiguration('stability_mass_file'),
                 'feedback': LaunchConfiguration('feedback'),
                 'moveit_gripper_controller': MOCK_MOVEIT_GRIPPER_CONTROLLER,
             }.items()),
