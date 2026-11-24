@@ -30,7 +30,7 @@ import yaml
 
 KINDS = ('teleop_state', 'pose', 'gripper_command', 'joint_command', 'joint_states', 'image',
          'camera_info', 'input_status', 'joy', 'episode_state', 'odometry', 'twist', 'owner',
-         'twist_stamped', 'base_state', 'other')
+         'twist_stamped', 'base_state', 'other', 'stability_state')
 CLOCKS = ('robot', 'host_wall', 'none')
 GATES = (None, 'engaged', 'gripper_active')
 # Streams every profile must define: the action timeline, the action, the robot state and
