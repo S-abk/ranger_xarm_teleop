@@ -318,8 +318,17 @@ def test_without_the_base_nodes_state_the_overlap_is_not_judged():
     report = checker.check_episode(ep, CHECKS)
     assert flags(report, 'BASE_DURING_CLUTCH') == []
     overlap = report['base']['clutch_overlap']
-    assert overlap == {'checked': False, 'why': 'no base state recorded: base driving was off'}
+    assert overlap == {'checked': False,
+                       'why': 'no base state or base command recorded: base driving was off'}
 
 
 def test_the_flag_fails_an_episode_with_the_shipped_tolerances():
     assert 'BASE_DURING_CLUTCH' in CHECKS['flags']['fail_flags']
+
+
+def test_a_lost_base_state_stream_does_not_skip_the_check():
+    """The base command recorded without the base state: still judged."""
+    ep = with_drive(2.0, 2.5)                  # base_cmd during the clutch, no base_state
+    report = checker.check_episode(ep, CHECKS)
+    assert report['base']['clutch_overlap']['checked']
+    assert flags(report, 'BASE_DURING_CLUTCH')

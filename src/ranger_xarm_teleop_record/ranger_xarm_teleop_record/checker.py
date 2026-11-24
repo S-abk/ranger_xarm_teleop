@@ -569,20 +569,22 @@ def _base_during_clutch(ep: Episode, tol: dict, flags: List[dict], by_command: L
     """
     Flag BASE_DURING_CLUTCH: the base commanded or moving while the arm's clutch was engaged.
 
-    Only for an episode with the base node's state recorded (base driving on); otherwise the
-    report says it was not checked.
+    Only for an episode with the base node's state or its command recorded (base driving on);
+    otherwise the report says it was not checked.
 
     The clutch is the ``state`` stream's ``clutch_engaged`` (a cycle holds until the next).
     The base is commanded for ``base_clutch_cmd_window_s`` after each nonzero command of the
     base command streams (``base_cmd``, ``/cmd_vel``) and moving while the ``odom`` stream's
     twist is above ``base_clutch_linear_mps`` or ``base_clutch_turn_rps``.
     """
-    base_state = ep.get('base_state')
-    if base_state is None or len(base_state) == 0:
-        # Checked for episodes recorded with base driving on (the base node's state recorded):
-        # the exclusion it checks is the base node's and the teleop gate's (G-19).
+    # Checked for episodes recorded with base driving on: the base node's state or its own
+    # command (/teleop/base/cmd_vel) recorded, either of them, so that a lost state stream
+    # does not skip the check. The exclusion it checks is the base node's and the gate's (G-19).
+    if not any(ep.get(name) is not None and len(ep.get(name)) > 0
+               for name in ('base_state', 'base_cmd')):
         report['clutch_overlap'] = {'checked': False,
-                                    'why': 'no base state recorded: base driving was off'}
+                                    'why': 'no base state or base command recorded: base '
+                                           'driving was off'}
         return
     state = ep.get('state')
     if state is None or len(state) == 0 or 'clutch_engaged' not in state.fields:
