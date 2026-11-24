@@ -26,16 +26,17 @@ or adds bodies (``stability_mass.py``).
   contact is the wheel centre moved down by that radius along the base frame's z axis, at the
   measured steering angles (so an offset steering axis moves the contact, a centred one does
   not). The contacts lie on the design plane: suspension deflection is not an input.
-* **Joint values.** Every moving joint whose motion moves a mass must be measured
-  (``required_joints``): not a fixed joint, a mimic joint (it follows its source), a continuous
-  joint (a spinning wheel does not move its centre) or a sprung joint (the suspension stays at
-  its design position).
+* **Joint values.** Every moving joint must be measured (``required_joints``) except a fixed
+  joint, a mimic joint (it follows its source), a sprung joint (the suspension stays at its
+  design position) and a wheel's spin (a continuous joint on the path to a wheel: a spinning
+  wheel does not move its centre).
 * **Suspension.** A prismatic joint carrying a gz spring (``springStiffness`` and
   ``springReference`` in its ``<gazebo reference>``) is a spring; its ``<dynamics damping>`` is
   the damper. Roll and pitch stiffness follow from the springs' positions.
 """
 
 from dataclasses import dataclass
+import hashlib
 import math
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ElementTree
@@ -134,6 +135,7 @@ class RobotModel:
         except ElementTree.ParseError as err:
             raise DescriptionError(f'the robot description is not valid XML: {err}') from err
         self.base_frame = base_frame
+        self.description_sha256 = hashlib.sha256(urdf.encode('utf-8')).hexdigest()
         self.links = {link.get('name'): link for link in root.findall('link')}
         if base_frame not in self.links:
             raise DescriptionError(f'base frame {base_frame!r} is not a link of the description')
@@ -201,6 +203,13 @@ class RobotModel:
             raise DescriptionError('fewer than three wheel links are configured: no support '
                                    'polygon')
         self._order = self._topological()
+        self.wheel_path_joints = set()       # the joints between the base and each wheel
+        for w in self.wheel_links:
+            link = w
+            while link in self._child_joint:
+                jn = self._child_joint[link]
+                self.wheel_path_joints.add(jn)
+                link = self.joints[jn].parent
 
     @staticmethod
     def _radius(link, name: str) -> float:
@@ -230,8 +239,11 @@ class RobotModel:
     def required_joints(self) -> List[str]:
         """Return the joints whose measured value the figure needs (see the module text)."""
         return sorted(j.name for j in self.joints.values()
-                      if j.kind in ('revolute', 'prismatic') and j.mimic is None
-                      and j.name not in self.springs)
+                      if j.kind in ('revolute', 'prismatic', 'continuous') and j.mimic is None
+                      and j.name not in self.springs and not self._is_wheel_spin(j))
+
+    def _is_wheel_spin(self, joint: Joint) -> bool:
+        return joint.kind == 'continuous' and joint.name in self.wheel_path_joints
 
     def _value(self, joint: Joint, q: Mapping[str, float]) -> float:
         if joint.kind == 'fixed':
@@ -241,7 +253,7 @@ class RobotModel:
         if joint.mimic is not None:
             src, mult, off = joint.mimic
             return q.get(src, 0.0) * mult + off
-        if joint.kind == 'continuous':
+        if self._is_wheel_spin(joint):
             return 0.0                      # a wheel's spin does not move its centre
         return q.get(joint.name, 0.0)
 

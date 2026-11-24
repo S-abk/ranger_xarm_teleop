@@ -230,11 +230,18 @@ def parse(data, model: RobotModel, simulation: bool) -> MassModel:
         if 'damping' in sus:
             damping = _bound(sus['damping'], 'suspension.damping', damping.value, False)
     return MassModel(tuple(bodies), stiffness, damping,
-                     fingerprint(bodies, stiffness, damping), simulation_only)
+                     fingerprint(bodies, stiffness, damping, model.description_sha256),
+                     simulation_only)
 
 
-def fingerprint(bodies, stiffness: Optional[Bound], damping: Optional[Bound]) -> str:
-    """Return the sha256 of the model in force (every body, its bounds, the springs' bounds)."""
+def fingerprint(bodies, stiffness: Optional[Bound], damping: Optional[Bound],
+                description_sha256: str = '') -> str:
+    """
+    Return the sha256 of the model in force.
+
+    Every body with its bounds, the springs' bounds, and the description itself (its geometry:
+    contacts, joints, spring positions).
+    """
     def r(x):
         return [round(float(v), 9) for v in np.ravel(x)]
     canon = {
@@ -244,6 +251,7 @@ def fingerprint(bodies, stiffness: Optional[Bound], damping: Optional[Bound]) ->
         'stiffness': None if stiffness is None else r([stiffness.value, stiffness.plus,
                                                        stiffness.minus]),
         'damping': None if damping is None else r([damping.value, damping.plus, damping.minus]),
+        'description_sha256': description_sha256,
     }
     return hashlib.sha256(json.dumps(canon, sort_keys=True).encode()).hexdigest()
 

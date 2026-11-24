@@ -200,3 +200,20 @@ def test_the_fingerprint_changes_with_every_value_and_only_then():
         'mass value="2.0"', 'mass value="2.5"'), 'base_link', WHEELS), True)
     assert other.fingerprint != base
     assert np.isfinite(sm.summary(parse(MASS_FILE))['mass_kg'])
+
+
+def test_a_continuous_joint_that_carries_mass_is_measured_and_posed():
+    urdf = make_urdf().replace('<joint name="arm_joint1" type="revolute">',
+                               '<joint name="arm_joint1" type="continuous">')
+    m = RobotModel(urdf, 'base_link', WHEELS)
+    assert 'arm_joint1' in m.required_joints()
+    assert not any(j.endswith('_wheel_joint') for j in m.required_joints())
+    posed = m.pose({'arm_joint1': math.pi / 2})
+    link2 = posed.positions[posed.names.index('arm_link2')]
+    assert link2 == pytest.approx([0.0, 0.2, 0.6], abs=1e-9)
+
+
+def test_the_fingerprint_covers_the_geometry():
+    narrow = make_urdf().replace('0.25 0.2 -0.2', '0.25 0.18 -0.2')
+    assert (sm.parse(MASS_FILE, RobotModel(narrow, 'base_link', WHEELS), True).fingerprint
+            != parse(MASS_FILE).fingerprint)

@@ -145,6 +145,7 @@ class Monitor:
     """The stability monitor's state."""
 
     def __init__(self, config: Config, simulation: bool):
+        """Start with nothing received."""
         config.check()
         self.config = config
         self.simulation = simulation
@@ -156,6 +157,7 @@ class Monitor:
         self._mass_given = False
         self.joints: Dict[str, Tuple[float, float]] = {}     # name -> (value, arrival)
         self.arm: Optional[JointAcceleration] = None
+        self.arm_arrival: Optional[float] = None             # the arm filter's last sample
         self.rest = RestWatch(config.rest)
         self.odometry: Optional[Tuple[float, float, float, float]] = None  # vx, vy, wz, arrival
         self.f_filter = Cascade(config.cutoff_hz)
@@ -163,15 +165,21 @@ class Monitor:
         self.alpha = Derivative(config.cutoff_hz)
         self.tilt = ComplementaryTilt(config.tilt_tau_s)
         self.imu_arrival: Optional[float] = None
+        self.imu_first_stamp: Optional[float] = None
+        self.imu_stamp: Optional[float] = None
         self.imu_rotation: Optional[np.ndarray] = None       # IMU axes -> base axes
         self.imu_position: Optional[np.ndarray] = None       # in the base frame
         self.imu_error: Optional[str] = None
         self._derived = None
         self._period = math.inf
         self._recent = deque()                               # (now, margin, edge, pess, edge)
+        # The filters need this much of their input before their output counts (five time
+        # constants of one stage: the first sample's step has died down to under 1 %).
+        self.settle_s = 5.0 / (2.0 * math.pi * config.cutoff_hz)
 
     # ---------------------------------------------------------------- inputs
     def set_description(self, urdf: str) -> None:
+        """Take the robot description."""
         try:
             self.model = RobotModel(urdf, self.config.base_frame, self.config.wheel_links)
             self.model_error = None
@@ -187,7 +195,7 @@ class Monitor:
         self._apply_mass()
 
     def _apply_mass(self) -> None:
-        self.mass, self._derived = None, None
+        self.mass, self._derived, self.arm, self.arm_arrival = None, None, None, None
         self._recent.clear()
         if self.model is None or not self._mass_given or self._mass_data is None:
             return
@@ -197,49 +205,59 @@ class Monitor:
         except sm.MassFileError as err:
             self.mass_error = str(err)
             return
-        required = self.model.required_joints()
-        moving = [n for n in required if not self._is_steering(n)]
+        moving = [n for n in self.model.required_joints()
+                  if n not in self.model.wheel_path_joints]
         self.arm = JointAcceleration(self.config.cutoff_hz, moving)
         self._derived = self._derive()
 
-    def _is_steering(self, joint: str) -> bool:
-        """Return whether ``joint`` lies on the path from the base to a wheel."""
-        wheel_joints = set()
-        for w in self.model.wheel_links:
-            link = w
-            while link in self.model._child_joint:
-                jn = self.model._child_joint[link]
-                wheel_joints.add(jn)
-                link = self.model.joints[jn].parent
-        return joint in wheel_joints
-
     def _derive(self):
-        """Return what depends only on the model: the sprung bodies, stiffness, damping."""
+        """Return what depends only on the model: the sprung bodies and the springs' corners."""
         model, mass = self.model, self.mass
         unsprung = set(model.unsprung_links())
         sprung = np.array([b.body.link not in unsprung for b in mass.bodies])
-        k_roll, k_pitch = model.suspension_stiffness()
-        scale = {}
-        for label, k_bound, c_bound in (('nominal', 'value', 'value'), ('low', 'low', 'low')):
-            if mass.stiffness is None:
-                scale[label] = (1.0, 1.0)
-                continue
-            k_nom = mass.stiffness.value
-            kf = getattr(mass.stiffness, k_bound) / k_nom if k_nom > 0 else 1.0
-            cf = (getattr(mass.damping, c_bound) / mass.damping.value
-                  if mass.damping is not None and mass.damping.value > 0 else 1.0)
-            scale[label] = (kf, cf)
-        return {'sprung': sprung, 'k_roll': k_roll, 'k_pitch': k_pitch, 'scale': scale}
+        k_roll, k_pitch = model.suspension_stiffness()      # at the description's stiffness
+        corners = {'nominal': [(1.0, 1.0)], 'stiff_low': [(1.0, 1.0)], 'all': [(1.0, 1.0)]}
+        if mass.stiffness is not None:
+            k_desc = next(iter(model.springs.values())).stiffness
+            c_desc = next(iter(model.springs.values())).damping
+
+            def kf(v):
+                return v / k_desc
+
+            def cf(v):
+                return v / c_desc if c_desc > 0 else 1.0
+            k, c = mass.stiffness, mass.damping
+            corners = {
+                'nominal': [(kf(k.value), cf(c.value))],
+                'stiff_low': [(kf(k.low), cf(c.value))],
+                # A softer spring leans more, a stiffer one rings with less damping; less damping
+                # always rings more. The worst stop: the least damping, at the stiffness's
+                # lower end, value and upper end.
+                'all': [(kf(kk), cf(c.low)) for kk in (k.low, k.value, k.high)],
+            }
+        tf = model.link_transforms({})
+        springs = list(model.springs.values())
+        coords = np.array([tf[model.joints[sp.joint].child][:3, 3]
+                           for sp in springs]).reshape(-1, 3)
+        damping = np.array([sp.damping for sp in springs])
+        return {'sprung': sprung, 'k_roll': k_roll, 'k_pitch': k_pitch, 'corners': corners,
+                'spring_xyz': coords, 'spring_damping': damping}
 
     def on_joint_states(self, arrival: float, stamp: float, names: Sequence[str],
                         positions: Sequence[float], source_is_arm: bool = True) -> None:
+        """Take joint values (both the arm's and the steering's sources)."""
+        given = {}
         for n, p in zip(names, positions):
             self.joints[n] = (float(p), arrival)
-        if self.arm is not None and source_is_arm:
-            if all(n in self.joints for n in self.arm.names):
-                self.arm.update(stamp, {n: self.joints[n][0] for n in self.arm.names})
+            given[n] = float(p)
+        # The filter takes only a message that carries every one of its joints, so a message of
+        # other joints never refreshes it with stored values.
+        if self.arm is not None and self.arm.names and all(n in given for n in self.arm.names):
+            if self.arm.update(stamp, {n: given[n] for n in self.arm.names}):
+                self.arm_arrival = arrival
 
     def on_odometry(self, arrival: float, vx: float, vy: float, wz: float) -> None:
+        """Take one odometry sample (body twist)."""
         self.rest.add(arrival, vx, vy, wz)
         self.odometry = (vx, vy, wz, arrival)
 
@@ -256,12 +274,21 @@ class Monitor:
         w = self.imu_rotation @ np.asarray(rate, dtype=float)
         if not (np.all(np.isfinite(f)) and np.all(np.isfinite(w))):
             return
-        if self.f_filter.update(stamp, f) is None:
-            return
+        old = self.imu_stamp is not None and not stamp > self.imu_stamp
+        if float(np.linalg.norm(f)) < 1e-6 or old:
+            return                      # no direction of gravity in it, or not newer
+        self.f_filter.update(stamp, f)
         self.w_filter.update(stamp, w)
         self.alpha.update(stamp, w)
         self.tilt.update(stamp, f, w)
+        if self.imu_first_stamp is None:
+            self.imu_first_stamp = stamp
+        self.imu_stamp = stamp
         self.imu_arrival = arrival
+
+    def _imu_settled(self) -> bool:
+        return (self.tilt.down is not None and self.alpha.value is not None
+                and self.imu_stamp - self.imu_first_stamp >= self.settle_s)
 
     # ---------------------------------------------------------------- the cycle
     def cycle(self, now: float) -> Result:
@@ -281,9 +308,15 @@ class Monitor:
         if missing:
             return unavailable(NO_JOINT_STATES, f'no value for joint(s) {missing}', fp)
         stale = [n for n in required if now - self.joints[n][1] > c.joint_timeout_s]
+        if self.arm.names and (self.arm_arrival is None
+                               or now - self.arm_arrival > c.joint_timeout_s):
+            stale += [f'{len(self.arm.names)} filtered joint(s) (no newer, finite sample)']
         if stale:
             return unavailable(JOINT_STATES_STALE,
                                f'joint value(s) older than {c.joint_timeout_s:g} s: {stale}', fp)
+        if self.arm.names and not self.arm.settled(self.settle_s):
+            return unavailable(NO_JOINT_STATES, "the joints' accelerations are still settling",
+                               fp)
         if self.odometry is None:
             return unavailable(NO_ODOMETRY, 'no odometry received', fp)
         vx, vy, wz, arrival = self.odometry
@@ -303,6 +336,9 @@ class Monitor:
             if now - self.imu_arrival > c.imu_timeout_s:
                 return unavailable(NO_TILT, f'no tilt: the IMU is older than '
                                    f'{c.imu_timeout_s:g} s{c.tilt_hint}', fp, **motion)
+            if not self._imu_settled():
+                return unavailable(NO_TILT, 'no tilt: the IMU filters are still settling', fp,
+                                   **motion)
         elif not at_rest:
             return unavailable(MOVING_WITHOUT_TILT, 'moving without a tilt source: a figure '
                                'only at rest (level floor assumed)', fp, **motion)
@@ -311,44 +347,56 @@ class Monitor:
         except (ValueError, FloatingPointError) as err:
             return unavailable(NOT_FINITE, f'no figure: {err}', fp, **motion)
 
-    def _arm_accelerations(self, q: Mapping[str, float], qd: Mapping[str, float],
+    def _arm_accelerations(self, values: Mapping[str, float], qd: Mapping[str, float],
                            qdd: Mapping[str, float], posed) -> np.ndarray:
+        """Return each body's acceleration from the arm's own motion (base frame)."""
         h = 0.01
-        plus = {n: q[n] + qd[n] * h + 0.5 * qdd[n] * h * h for n in q}
-        minus = {n: q[n] - qd[n] * h + 0.5 * qdd[n] * h * h for n in q}
+        plus = dict(values)
+        minus = dict(values)
+        for n in qd:
+            plus[n] = values[n] + qd[n] * h + 0.5 * qdd[n] * h * h
+            minus[n] = values[n] - qd[n] * h + 0.5 * qdd[n] * h * h
         bodies = self.mass.nominal_bodies
-        steer = {n: v for n, (v, _) in self.joints.items()}
-        pp = self.model.pose({**steer, **plus}, bodies).positions
-        pm = self.model.pose({**steer, **minus}, bodies).positions
+        pp = self.model.pose(plus, bodies).positions
+        pm = self.model.pose(minus, bodies).positions
         return (pp - 2.0 * posed.positions + pm) / (h * h)
 
+    def _sprung(self, posed, masses):
+        """Return the sprung mass and the height of its centre of mass above the contacts."""
+        sprung = self._derived['sprung']
+        ms = float(masses[sprung].sum())
+        if ms <= 0.0:
+            return 0.0, 0.0
+        hs = float((masses[sprung] * (posed.positions[sprung, 2] - posed.plane_z)).sum() / ms)
+        return ms, hs
+
     def _figures(self, now, vx, vy, wz, at_rest, fp) -> Result:
-        c, d = self.config, self._derived
-        values = {n: v for n, (v, _) in self.joints.items()}
-        arm_state = self.arm.state() if self.arm is not None else None
-        if arm_state is not None:
-            values.update(arm_state[0])
+        c = self.config
+        values = {n: v for n, (v, _) in self.joints.items()}     # measured: no filter lag
         posed = self.model.pose(values, self.mass.nominal_bodies)
         arrays = sm.as_arrays(self.mass)
         edges = st.support_polygon(list(posed.contacts.values()))
         a_arm = np.zeros_like(posed.positions)
-        if arm_state is not None:
-            a_arm = self._arm_accelerations(arm_state[0], arm_state[1], arm_state[2], posed)
-        sprung = d['sprung']
-        ms = float(arrays['mass'][sprung].sum())
-        hs = float((arrays['mass'][sprung] * (posed.positions[sprung, 2] - posed.plane_z)).sum()
-                   / ms) if ms > 0 else 0.0
+        arm_state = self.arm.state()
+        if self.arm.names and arm_state is not None:
+            a_arm = self._arm_accelerations(values, arm_state[1], arm_state[2], posed)
+        nominal_sprung = self._sprung(posed, arrays['mass'])
+        worst_sprung = (self._sprung(posed, arrays['mass_high'])[0],
+                        nominal_sprung[1] + float(arrays['com_bound'].max(initial=0.0)))
         velocity = np.array([vx, vy])
         if c.tilt_configured:
             f = self.f_filter.value
             omega = self.w_filter.value
-            alpha = self.alpha.value if self.alpha.value is not None else np.zeros(3)
+            alpha = self.alpha.value
             w = st.imu_transfer(posed.positions, self.imu_position, f, omega, alpha) - a_arm
             hdot = st.angular_momentum_rate(posed.inertias, omega, alpha)
             g_body = st.G * self.tilt.down
             tilt_source = TILT_MEASURED
         else:
-            g_body = np.array([0.0, 0.0, -st.G])
+            lean = self._static_lean(posed, arrays['mass'], 'nominal', nominal_sprung)
+            g_body = st.G * np.array([math.sin(lean[0]), math.sin(lean[1]),
+                                      -math.sqrt(max(0.0, 1.0 - math.sin(lean[0]) ** 2
+                                                     - math.sin(lean[1]) ** 2))])
             w = st.gravity_vectors(len(posed.masses), g_body) - a_arm
             hdot = None
             tilt_source = TILT_LEVEL_ASSUMED
@@ -356,67 +404,65 @@ class Monitor:
             raise ValueError('an input is not finite')
         nominal = st.figure(posed.positions, posed.masses, w, posed.plane_z, edges, hdot)
         if c.tilt_configured:
-            pess, pess_edge = st.pessimistic_margin(
+            pess = st.pessimistic_margin(
                 posed.positions, posed.masses, arrays['mass_low'], arrays['mass_high'],
                 arrays['com_bound'], w, posed.plane_z, edges, hdot)
         else:
-            pess, pess_edge = self._level_pessimistic(posed, arrays, edges, ms, hs)
+            pess = self._level_pessimistic(posed, arrays, edges, a_arm, worst_sprung)
+        pess = min(pess, (nominal.margin, nominal.edge), key=lambda x: x[0])
         # If the base stopped now: the measured tilt, the stop deceleration, the suspension.
-        stop_nom = self._stop(posed, arrays, edges, g_body, velocity, wz, ms, hs, 'nominal')
-        stop_pess = self._stop(posed, arrays, edges, g_body, velocity, wz, ms, hs, 'low',
+        stop_nom = self._stop(posed, arrays, edges, g_body, velocity, wz, nominal_sprung,
+                              'nominal')
+        stop_pess = self._stop(posed, arrays, edges, g_body, velocity, wz, worst_sprung, 'all',
                                pessimistic=True)
         # A stop does not undo what is already under way: a body still rocking (from a bump, a
         # start, an earlier stop) swings back to its recent extremes, damped. The figure through
         # the stop is never above the present figure's minimum over the last period of the
         # body's slowest mode (at the softest springs).
-        memory = self.ring_period(posed, ms, hs)
-        self._recent.append((now, nominal.margin, nominal.edge, pess, pess_edge))
+        memory = self.ring_period(posed, worst_sprung)
+        self._recent.append((now, nominal.margin, nominal.edge, pess[0], pess[1]))
         while self._recent and self._recent[0][0] < now - memory:
             self._recent.popleft()
         low_nom = min(self._recent, key=lambda r: r[1])
         low_pess = min(self._recent, key=lambda r: r[3])
-        if low_nom[1] < stop_nom[0]:
-            stop_nom = (low_nom[1], low_nom[2])
-        if low_pess[3] < stop_pess[0]:
-            stop_pess = (low_pess[3], low_pess[4])
+        stop_nom = min(stop_nom, (low_nom[1], low_nom[2]), key=lambda x: x[0])
+        stop_pess = min(stop_pess, (low_pess[3], low_pess[4]), stop_nom, key=lambda x: x[0])
         shift = st.combined_com_bound(arrays['mass'], arrays['com_bound'])
         reserve, reserve_edge = st.energy_reserve(posed.positions, posed.masses, posed.inertias,
                                                   posed.plane_z, edges, g_body, velocity, wz,
                                                   com_shift=shift)
+        # Every term of the reserve scales with the total mass: take the end of its bound that
+        # lowers it.
+        total = float(arrays['mass'].sum())
+        reserve *= (float(arrays['mass_low'].sum()) if reserve > 0.0
+                    else float(arrays['mass_high'].sum())) / total
         down = g_body / np.linalg.norm(g_body)
         roll = math.degrees(math.atan2(-down[1], -down[2]))
         pitch = math.degrees(math.atan2(down[0], math.hypot(down[1], down[2])))
-        values_out = (nominal.margin, pess, stop_nom[0], stop_pess[0], reserve)
+        values_out = (nominal.margin, pess[0], stop_nom[0], stop_pess[0], reserve)
         if not st.finite(values_out, nominal.cop):
             raise ValueError('a figure is not finite')
         return Result(
             available=True, reason=OK, reason_text='', tilt_source=tilt_source,
             margin=nominal.margin, edge=nominal.edge.code,
-            margin_pessimistic=min(pess, nominal.margin), edge_pessimistic=pess_edge.code,
-            stop_margin=stop_nom[0], stop_margin_pessimistic=min(stop_pess[0], stop_nom[0]),
+            margin_pessimistic=pess[0], edge_pessimistic=pess[1].code,
+            stop_margin=stop_nom[0], stop_margin_pessimistic=stop_pess[0],
             stop_edge=stop_nom[1].code, stop_decel=c.stop_decel_m_s2,
             energy_reserve=reserve, energy_edge=reserve_edge.code,
             cop=(float(nominal.cop[0]), float(nominal.cop[1])), roll_deg=roll, pitch_deg=pitch,
             speed=float(np.hypot(vx, vy)), turn_rate=float(wz), at_rest=at_rest, fingerprint=fp)
 
-    def _factors(self, posed, ms, hs, label) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-        """
-        Return the suspension's (amplification, overshoot) along x (pitch) and y (roll).
-
-        A stop moves the load toward the direction of motion by the quasi-static shift times
-        the amplification, then the body rings: first past it by the overshoot, then back
-        past the resting position by about the same overshoot (measured in stage 1: the loads'
-        minimum after a stop is often on the opposite edge).
-        """
+    def _modes(self, posed, sprung_mh, kf, cf):
+        """Return [(amplification, overshoot, period)] for pitch (x) and roll (y)."""
         d = self._derived
-        kf, cf = d['scale'][label]
+        ms, hs = sprung_mh
         out = []
         for k_axis, axis in ((d['k_pitch'], 0), (d['k_roll'], 1)):
             k = k_axis * kf
             amp = st.lean_amplification(k, ms, hs)
             zeta = self._zeta(posed, axis, k, cf, ms, hs)
-            out.append((amp, st.overshoot(zeta)))
-        return out[0], out[1]
+            out.append((amp, st.overshoot(zeta), self._period))
+        return out
 
     def _zeta(self, posed, axis, k, cf, ms, hs) -> float:
         """
@@ -426,11 +472,10 @@ class Monitor:
         C / (2 sqrt((K - m g h) I)); the mode's period is kept in ``_period``.
         """
         if math.isinf(k):
+            self._period = 0.0
             return 1.0
-        springs = list(self.model.springs.values())
-        tf = self.model.link_transforms({})
-        coords = np.array([tf[self.model.joints[s.joint].child][:3, 3] for s in springs])
-        damp = np.array([s.damping for s in springs]) * cf
+        coords = self._derived['spring_xyz']
+        damp = self._derived['spring_damping'] * cf
         centre = coords[:, axis].mean()
         c_mode = float((damp * (coords[:, axis] - centre) ** 2).sum())
         sprung = self._derived['sprung']
@@ -446,56 +491,84 @@ class Monitor:
         self._period = 2.0 * math.pi / math.sqrt(k_eff / inertia)
         return c_mode / (2.0 * math.sqrt(k_eff * inertia))
 
-    def ring_period(self, posed, ms, hs) -> float:
+    def ring_period(self, posed, sprung_mh) -> float:
         """Return the longest period of the body's roll and pitch modes at the softest springs."""
-        d = self._derived
-        if math.isinf(d['k_roll']):
-            return 0.0
-        kf, cf = d['scale']['low']
-        periods = []
-        for k_axis, axis in ((d['k_pitch'], 0), (d['k_roll'], 1)):
-            self._zeta(posed, axis, k_axis * kf, cf, ms, hs)
-            periods.append(self._period)
+        kf, cf = self._derived['corners']['stiff_low'][0]
+        periods = [m[2] for m in self._modes(posed, sprung_mh, kf, cf)]
         return min(max(periods), MAX_RING_MEMORY_S)
 
-    def _stop(self, posed, arrays, edges, g_body, velocity, wz, ms, hs, label,
+    def _stop(self, posed, arrays, edges, g_body, velocity, wz, sprung_mh, corners,
               pessimistic=False):
         """
         Return the smallest figure through a stop from the present motion, and its edge.
 
         Two phases: the load thrown toward the motion (amplification x (1 + overshoot)), and
-        the swing back past rest (amplification x overshoot, the other way).
+        the swing back past rest (amplification x overshoot, the other way). Pessimistic: the
+        worst over every corner of the springs' bounds and over the mass bounds.
         """
-        (ax, ox), (ay, oy) = self._factors(posed, ms, hs, label)
         best = None
-        for fx, fy in ((ax * (1.0 + ox), ay * (1.0 + oy)), (-ax * ox, -ay * oy)):
-            w = st.stop_vectors(posed.positions, g_body, velocity, wz,
-                                self.config.stop_decel_m_s2, self.config.stop_turn_decel_rad_s2,
-                                fx, fy)
-            if pessimistic:
-                m, e = st.pessimistic_margin(posed.positions, posed.masses, arrays['mass_low'],
-                                             arrays['mass_high'], arrays['com_bound'], w,
-                                             posed.plane_z, edges)
-            else:
-                fig = st.figure(posed.positions, posed.masses, w, posed.plane_z, edges)
-                m, e = fig.margin, fig.edge
-            if best is None or m < best[0]:
-                best = (m, e)
+        for kf, cf in self._derived['corners'][corners]:
+            (ax, ox, _), (ay, oy, _) = self._modes(posed, sprung_mh, kf, cf)
+            for fx, fy in ((ax * (1.0 + ox), ay * (1.0 + oy)), (-ax * ox, -ay * oy)):
+                w = st.stop_vectors(posed.positions, g_body, velocity, wz,
+                                    self.config.stop_decel_m_s2,
+                                    self.config.stop_turn_decel_rad_s2, fx, fy)
+                if pessimistic:
+                    m, e = st.pessimistic_margin(posed.positions, posed.masses,
+                                                 arrays['mass_low'], arrays['mass_high'],
+                                                 arrays['com_bound'], w, posed.plane_z, edges)
+                else:
+                    fig = st.figure(posed.positions, posed.masses, w, posed.plane_z, edges)
+                    m, e = fig.margin, fig.edge
+                if best is None or m < best[0]:
+                    best = (m, e)
         return best
 
-    def _level_pessimistic(self, posed, arrays, edges, ms, hs):
-        """Return the smallest figure, the floor tilted toward each edge by the assumed bound."""
+    def _static_lean(self, posed, masses, corners, sprung_mh) -> Tuple[float, float]:
+        """
+        Return the body's static lean on its springs (rad, toward +x and +y) on a level floor.
+
+        The sprung centre of mass off the springs' centre leans the body toward it until the
+        springs' moment balances: angle = m g offset / (K - m g h). Rigid: none.
+        """
         d = self._derived
-        kf, _ = d['scale']['low']
+        if not self.model.springs or math.isinf(d['k_roll']):
+            return 0.0, 0.0
+        kf, _ = d['corners'][corners][0]
+        ms, hs = sprung_mh
+        sprung = d['sprung']
+        coords = d['spring_xyz']
+        c = (masses[sprung][:, None] * posed.positions[sprung]).sum(axis=0) / masses[sprung].sum()
+        out = []
+        for k_axis, axis in ((d['k_pitch'], 0), (d['k_roll'], 1)):
+            k_eff = k_axis * kf - ms * st.G * hs
+            if k_eff <= 0.0:
+                raise ValueError('the springs cannot hold the body up (no stiffness left)')
+            out.append(ms * st.G * (c[axis] - coords[:, axis].mean()) / k_eff)
+        return out[0], out[1]
+
+    def _level_pessimistic(self, posed, arrays, edges, a_arm, worst_sprung):
+        """
+        Return the smallest figure on an assumed slope toward each edge, and its edge.
+
+        The floor is tilted toward each edge by the assumed bound, amplified by the lean on the
+        softest springs, plus the static lean from the centre of mass (softest springs, heaviest
+        sprung mass); the arm's own acceleration counts; the mass bounds as everywhere.
+        """
+        d = self._derived
+        kf, _ = d['corners']['stiff_low'][0]
+        ms, hs = worst_sprung
+        lean = self._static_lean(posed, arrays['mass_high'], 'stiff_low', worst_sprung)
         best = None
         for e in edges:
             out = np.array([-e.inward[0], -e.inward[1]])
             k_axis = d['k_pitch'] if abs(out[0]) >= abs(out[1]) else d['k_roll']
             amp = st.lean_amplification(k_axis * kf, ms, hs)
             theta = math.radians(self.config.assumed_slope_deg) * amp
-            g = st.G * np.array([math.sin(theta) * out[0], math.sin(theta) * out[1],
-                                 -math.cos(theta)])
-            w = st.gravity_vectors(len(posed.masses), g)
+            gx = math.sin(theta) * out[0] + math.sin(lean[0])
+            gy = math.sin(theta) * out[1] + math.sin(lean[1])
+            g = st.G * np.array([gx, gy, -math.sqrt(max(0.0, 1.0 - gx * gx - gy * gy))])
+            w = st.gravity_vectors(len(posed.masses), g) - a_arm
             m, edge = st.pessimistic_margin(posed.positions, posed.masses, arrays['mass_low'],
                                             arrays['mass_high'], arrays['com_bound'], w,
                                             posed.plane_z, [e])
@@ -505,4 +578,5 @@ class Monitor:
 
 
 def reason_name(code: int) -> str:
+    """Return the name of a reason code."""
     return REASON_NAMES[code] if 0 <= code < len(REASON_NAMES) else str(code)

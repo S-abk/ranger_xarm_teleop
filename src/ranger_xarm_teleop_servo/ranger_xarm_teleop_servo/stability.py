@@ -196,13 +196,13 @@ def pessimistic_margin(positions: np.ndarray, masses: np.ndarray, mass_low: np.n
         n = e.inward
         slope = (w[:, :2] @ n) / wz
         s = (q - e.point) @ n - com_bound * np.sqrt(1.0 + slope ** 2)
-        if hdot is not None:
-            wz_total = float((masses * wz).sum())
-            s = s + float(np.dot(np.array([hdot[1], -hdot[0]]) / wz_total, n))
-        lam = float(np.sum(masses * unit * s) / np.sum(masses * unit))
-        for _ in range(50):
+        # The angular-momentum term adds (h_y, -h_x) / sum(m w_z) to the centre of pressure:
+        # a constant c over the weights' sum, so the figure is (sum m u s + c) / sum m u.
+        c = 0.0 if hdot is None else -float(np.dot(np.array([hdot[1], -hdot[0]]), n))
+        lam = float((np.sum(masses * unit * s) + c) / np.sum(masses * unit))
+        for _ in range(100):
             m = np.where(s < lam, mass_high, mass_low)
-            new = float(np.sum(m * unit * s) / np.sum(m * unit))
+            new = float((np.sum(m * unit * s) + c) / np.sum(m * unit))
             if abs(new - lam) < 1e-12:
                 break
             lam = new

@@ -229,3 +229,33 @@ def test_the_energy_reserve_takes_the_edges_the_motion_heads_toward_and_the_kine
     assert still <= tip
     names = {x.name for x in st.edges_toward(edges(), np.array([0.3, 0.3]))}
     assert names == {'front', 'left'}
+
+
+def test_the_pessimistic_figure_with_angular_momentum_is_the_worst_corner():
+    rng = np.random.default_rng(11)
+    for _ in range(20):
+        n = 5
+        p = np.column_stack([rng.uniform(-0.15, 0.15, n), rng.uniform(-0.15, 0.15, n),
+                             rng.uniform(0.1, 1.2, n)])
+        m = rng.uniform(1.0, 30.0, n)
+        lo, hi = m * rng.uniform(0.6, 1.0, n), m * rng.uniform(1.0, 1.4, n)
+        w = st.gravity_vectors(n, np.array([0.0, 0.0, -G]))
+        hdot = np.array([rng.uniform(-30, 30), rng.uniform(-30, 30), 0.0])
+        pess, _ = st.pessimistic_margin(p, m, lo, hi, np.zeros(n), w, 0.0, edges(), hdot)
+        best = math.inf
+        for e in edges():
+            for corner in itertools.product(*zip(lo, hi)):
+                cop = st.centre_of_pressure(p, np.array(corner), w, 0.0, hdot)
+                best = min(best, st.distance(cop, e))
+        assert pess == pytest.approx(best, abs=1e-9)
+
+
+def test_a_turn_seen_by_an_imu_off_the_axis_gives_each_body_its_own_centripetal_load():
+    p, m = bodies()
+    r_imu = np.array([-0.3, 0.0, 1.1])
+    omega = np.array([0.0, 0.0, 1.0])
+    g = np.array([0.0, 0.0, -G])
+    a_imu = -1.0 * np.array([r_imu[0], r_imu[1], 0.0])          # w^2 r toward the axis
+    w = st.imu_transfer(p, r_imu, a_imu - g, omega, np.zeros(3))
+    direct = g[None, :] + np.column_stack([p[:, 0], p[:, 1], np.zeros(3)])
+    assert w == pytest.approx(direct)

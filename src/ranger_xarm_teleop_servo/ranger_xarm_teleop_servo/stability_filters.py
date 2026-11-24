@@ -24,7 +24,8 @@ Causal filters of the stability monitor's inputs, for irregular sample times (nu
 * ``ComplementaryTilt``: the direction of gravity in the body, from the gyro (fast) corrected
   toward the accelerometer (slow, time constant tau). It never reads an orientation published
   by the IMU.
-* ``JointAcceleration``: low-passed joint values with their first and second derivatives.
+* ``JointAcceleration``: low-passed joint values with their first and second differences,
+  low-passed once more (the same two-stage lag as the IMU's terms).
 
 A sample older than the last one, or at the same stamp, is ignored (``accept`` says so).
 """
@@ -129,35 +130,59 @@ class ComplementaryTilt:
 
 
 class JointAcceleration:
-    """Filtered joint values, speeds and accelerations, keyed by joint name."""
+    """
+    Filtered joint values, speeds and accelerations, keyed by joint name.
+
+    The same lag as the IMU's terms (two first-order stages): the values are low-passed once;
+    their first and second differences are low-passed once more. A sample that is not finite
+    or not newer than the last one is not taken (``update`` returns False).
+    """
 
     def __init__(self, cutoff_hz: float, names: Sequence[str]):
+        """Filter ``names`` at ``cutoff_hz``."""
         self.names = list(names)
         self.position = LowPass(cutoff_hz)
-        self.speed = Derivative(cutoff_hz)
-        self.acceleration = Derivative(cutoff_hz)
+        self.speed = LowPass(cutoff_hz)
+        self.acceleration = LowPass(cutoff_hz)
         self.stamp: Optional[float] = None
+        self.first_stamp: Optional[float] = None
+        self._history = []                  # the last two (stamp, filtered values)
 
     def accept(self, stamp: float) -> bool:
+        """Return whether a sample at ``stamp`` would be taken."""
         return self.stamp is None or stamp > self.stamp
 
     def update(self, stamp: float, values: Dict[str, float]) -> bool:
+        """Take one sample of every joint; return whether it was taken."""
         if not self.accept(stamp):
             return False
         x = np.array([values[n] for n in self.names], dtype=float)
-        self.position.update(stamp, x)
-        v = self.speed.update(stamp, x)
-        if v is not None:
-            self.acceleration.update(stamp, v)
+        if not np.all(np.isfinite(x)):
+            return False
+        y = self.position.update(stamp, x).copy()
+        self._history.append((stamp, y))
+        self._history = self._history[-3:]
+        if len(self._history) >= 2:
+            (t1, y1), (t2, y2) = self._history[-2], self._history[-1]
+            self.speed.update(stamp, (y2 - y1) / (t2 - t1))
+        if len(self._history) == 3:
+            (t0, y0), (t1, y1), (t2, y2) = self._history
+            a = 2.0 * ((y2 - y1) / (t2 - t1) - (y1 - y0) / (t1 - t0)) / (t2 - t0)
+            self.acceleration.update(stamp, a)
+        if self.first_stamp is None:
+            self.first_stamp = stamp
         self.stamp = stamp
         return True
 
+    def settled(self, span_s: float) -> bool:
+        """Return whether accelerations exist and the samples span at least ``span_s``."""
+        return (self.acceleration.value is not None and self.stamp is not None
+                and self.stamp - self.first_stamp >= span_s)
+
     def state(self):
-        """Return (q, qdot, qddot) as dicts; speeds and accelerations are 0 until known."""
-        q = self.position.value
-        if q is None:
+        """Return (q, qdot, qddot) as dicts, or None until the accelerations exist."""
+        if self.acceleration.value is None:
             return None
-        v = self.speed.value if self.speed.value is not None else np.zeros_like(q)
-        a = (self.acceleration.value if self.acceleration.value is not None
-             else np.zeros_like(q))
-        return (dict(zip(self.names, q)), dict(zip(self.names, v)), dict(zip(self.names, a)))
+        return (dict(zip(self.names, self.position.value)),
+                dict(zip(self.names, self.speed.value)),
+                dict(zip(self.names, self.acceleration.value)))
