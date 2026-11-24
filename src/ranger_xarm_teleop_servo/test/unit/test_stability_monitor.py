@@ -30,6 +30,7 @@ G = st.G
 JOINTS = ['arm_joint1', 'arm_joint2']
 STEER = [f'{c}_steer_joint' for c in ('front_left', 'front_right', 'rear_left', 'rear_right')]
 IMU_POS = np.array([-0.3, 0.0, 1.1])
+WARM = 3.5                  # the tilt filter settles in its tau (3 s) after the IMU starts
 
 
 def config(tilt=True, **kw):
@@ -161,7 +162,7 @@ def test_a_missing_joint_and_a_stale_one():
     mon.on_joint_states(t, t, JOINTS, [0.0, 0.0])
     r = mon.cycle(t)
     assert r.reason == sm.NO_JOINT_STATES and 'steer' in r.reason_text
-    t = feed(mon, t, 1.0)
+    t = feed(mon, t, WARM)
     assert mon.cycle(t).available
     t2 = feed(mon, t, 0.6, joints=False)
     r = mon.cycle(t2)
@@ -182,14 +183,14 @@ def test_a_configured_tilt_source_missing_or_stale_is_no_tilt_naming_the_launch_
     mon.set_description(make_urdf())
     mon.set_mass_data(copy.deepcopy(MASS_FILE))
     mon.set_imu_frame(None, None, error='no transform from base_link to imu_link')
-    t = feed(mon, 0.0, 1.0)
+    t = feed(mon, 0.0, WARM)
     r = mon.cycle(t)
     assert r.reason == sm.NO_TILT and 'imu_link' in r.reason_text
     mon = ready()
     t = feed(mon, 0.0, 1.0, imu=False)
     r = mon.cycle(t)
     assert r.reason == sm.NO_TILT and 'sensors:=true' in r.reason_text
-    t = feed(mon, t, 1.0)
+    t = feed(mon, t, WARM)
     assert mon.cycle(t).available
     t = feed(mon, t, 0.6, imu=False)
     r = mon.cycle(t)
@@ -198,13 +199,13 @@ def test_a_configured_tilt_source_missing_or_stale_is_no_tilt_naming_the_launch_
 
 def test_a_non_finite_input_never_becomes_a_figure():
     mon = ready()
-    t = feed(mon, 0.0, 1.0)
+    t = feed(mon, 0.0, WARM)
     mon.on_joint_states(t, t + 0.001, JOINTS, [float('nan'), 0.0])
     r = mon.cycle(t + 0.002)
     assert not r.available and math.isnan(r.margin)
     # An IMU sample that is not finite is dropped, not filtered in.
     mon = ready()
-    t = feed(mon, 0.0, 1.0)
+    t = feed(mon, 0.0, WARM)
     before = mon.f_filter.value.copy()
     mon.on_imu(t, t + 0.001, [float('nan'), 0.0, G], [0.0, 0.0, 0.0])
     assert mon.f_filter.value == pytest.approx(before)
@@ -230,7 +231,7 @@ def test_the_imu_is_read_for_acceleration_and_rate_only():
 # ----------------------------------------------------------------------------- the figures
 def test_at_rest_on_a_level_floor_the_figure_is_the_static_distance():
     mon = ready()
-    t = feed(mon, 0.0, 2.0)
+    t = feed(mon, 0.0, WARM)
     r = mon.cycle(t)
     assert r.available and r.tilt_source == sm.TILT_MEASURED and r.reason == sm.OK
     posed = mon.model.pose({'arm_joint1': math.pi / 2}, mon.mass.nominal_bodies)
@@ -245,7 +246,7 @@ def test_at_rest_on_a_level_floor_the_figure_is_the_static_distance():
 
 def test_a_sideways_acceleration_measured_by_the_imu_lowers_the_figure():
     mon = ready()
-    t = feed(mon, 0.0, 2.0)
+    t = feed(mon, 0.0, WARM)
     still = mon.cycle(t).margin
     # Accelerating right (-y) at 1 m/s2: the accelerometer reads f = a - g.
     t = feed(mon, t, 1.0, f=(0.0, -1.0, G), v=(0.0, -0.3, 0.0))
@@ -255,7 +256,7 @@ def test_a_sideways_acceleration_measured_by_the_imu_lowers_the_figure():
 
 def test_the_stop_figure_reads_lower_while_moving_and_carries_its_deceleration():
     mon = ready(stop_decel_m_s2=2.0)
-    t = feed(mon, 0.0, 2.0)
+    t = feed(mon, 0.0, WARM)
     still = mon.cycle(t)
     t = feed(mon, t, 1.0, v=(0.0, 0.25, 0.0))
     r = mon.cycle(t)
@@ -267,7 +268,7 @@ def test_the_stop_figure_reads_lower_while_moving_and_carries_its_deceleration()
 
 def test_a_rocking_body_holds_the_stop_figure_down_for_one_period():
     mon = ready()
-    t = feed(mon, 0.0, 2.0)
+    t = feed(mon, 0.0, WARM)
     still = mon.cycle(t)
     t = feed(mon, t, 0.15, f=(0.0, -3.0, G))
     dip = mon.cycle(t)
@@ -303,7 +304,7 @@ def test_no_figure_until_the_filters_have_settled():
 
 def test_joint_values_whose_stamps_go_backwards_are_stale_not_a_figure():
     mon = ready()
-    t = feed(mon, 0.0, 1.0)
+    t = feed(mon, 0.0, WARM)
     assert mon.cycle(t).available
     # Fresh arrivals, old stamps: the filter takes none of them.
     for i in range(70):
@@ -317,7 +318,7 @@ def test_joint_values_whose_stamps_go_backwards_are_stale_not_a_figure():
 
 def test_a_nan_joint_sample_is_not_a_figure_and_does_not_stick():
     mon = ready()
-    t = feed(mon, 0.0, 1.0)
+    t = feed(mon, 0.0, WARM)
     mon.on_joint_states(t, t + 0.001, JOINTS, [float('nan'), 0.0])
     assert not mon.cycle(t + 0.002).available
     t = feed(mon, t + 0.01, 1.0)
@@ -339,7 +340,7 @@ def test_the_mass_files_stiffness_value_is_used():
     stiff = ready()
     results = []
     for mon in (by_file, by_description, stiff):
-        t = feed(mon, 0.0, 2.0, v=(0.0, 0.25, 0.0))
+        t = feed(mon, 0.0, WARM, v=(0.0, 0.25, 0.0))
         results.append(mon.cycle(t))
     assert results[0].stop_margin == pytest.approx(results[1].stop_margin, abs=1e-9)
     assert abs(results[0].stop_margin - results[2].stop_margin) > 1e-3
@@ -347,7 +348,7 @@ def test_the_mass_files_stiffness_value_is_used():
 
 def test_the_pessimistic_stop_is_the_worst_corner_of_the_springs():
     mon = ready()
-    t = feed(mon, 0.0, 2.0, v=(0.0, 0.25, 0.0))
+    t = feed(mon, 0.0, WARM, v=(0.0, 0.25, 0.0))
     r = mon.cycle(t)
     posed = mon.model.pose({n: v for n, (v, _) in mon.joints.items()}, mon.mass.nominal_bodies)
     edges = st.support_polygon(list(posed.contacts.values()))
@@ -365,7 +366,7 @@ def test_the_pessimistic_stop_is_the_worst_corner_of_the_springs():
 
 def test_damping_ratio_and_period_of_the_roll_mode():
     mon = ready()
-    t = feed(mon, 0.0, 2.0)
+    t = feed(mon, 0.0, WARM)
     mon.cycle(t)
     posed = mon.model.pose({n: v for n, (v, _) in mon.joints.items()}, mon.mass.nominal_bodies)
     ms, hs = mon._sprung(posed, posed.masses)
@@ -385,8 +386,8 @@ def test_an_imu_mounted_turned_gives_the_same_figure():
     turned = ready()
     rot = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])   # IMU x = base y
     turned.set_imu_frame(rot, IMU_POS)
-    t = feed(aligned, 0.0, 2.0, f=(0.3, -0.8, G))
-    feed(turned, 0.0, 2.0, f=tuple(rot.T @ np.array([0.3, -0.8, G])))
+    t = feed(aligned, 0.0, WARM, f=(0.3, -0.8, G))
+    feed(turned, 0.0, WARM, f=tuple(rot.T @ np.array([0.3, -0.8, G])))
     assert turned.cycle(t).margin == pytest.approx(aligned.cycle(t).margin, abs=1e-9)
 
 
@@ -395,7 +396,7 @@ def test_a_steady_turn_measured_by_an_imu_off_the_axis():
     omega = 1.0
     a_imu = -omega ** 2 * np.array([IMU_POS[0], IMU_POS[1], 0.0])
     f = tuple(a_imu + np.array([0.0, 0.0, G]))
-    t = feed(mon, 0.0, 2.0, f=f, rate=(0.0, 0.0, omega), v=(0.0, 0.0, omega))
+    t = feed(mon, 0.0, WARM, f=f, rate=(0.0, 0.0, omega), v=(0.0, 0.0, omega))
     r = mon.cycle(t)
     posed = mon.model.pose({n: v for n, (v, _) in mon.joints.items()}, mon.mass.nominal_bodies)
     g = np.array([0.0, 0.0, -G])
@@ -415,3 +416,54 @@ def test_without_a_tilt_source_the_static_lean_toward_the_centre_of_mass_counts(
     posed = rigid_model.model.pose({'arm_joint1': math.pi / 2}, rigid_model.mass.nominal_bodies)
     c = (posed.masses[:, None] * posed.positions).sum(axis=0) / posed.masses.sum()
     assert r.available and r.margin < 0.2 - c[1] - 1e-4      # leaning toward the arm's side
+
+
+def test_after_an_imu_outage_the_filters_start_again_and_settle_before_a_figure():
+    mon = ready()
+    t = feed(mon, 0.0, WARM)
+    assert mon.cycle(t).available
+    t = feed(mon, t, 0.6, imu=False)                      # a stall: 0.6 s without the IMU
+    assert mon.cycle(t).reason == sm.NO_TILT
+    t = feed(mon, t, 0.1, rate=(0.0, 0.0, 0.2))
+    r = mon.cycle(t)
+    assert r.reason == sm.NO_TILT and 'settling' in r.reason_text
+    assert mon.imu_restarts == 1
+    t = feed(mon, t, WARM, rate=(0.0, 0.0, 0.2))
+    assert mon.cycle(t).available
+
+
+def test_a_short_gap_in_the_joints_restarts_their_filter():
+    mon = ready()
+    t = feed(mon, 0.0, WARM)
+    assert mon.cycle(t).available
+    t = feed(mon, t, 0.3, joints=False)                   # under the 0.5 s timeout
+    t = feed(mon, t, 0.02)
+    r = mon.cycle(t)
+    assert not r.available and 'settling' in r.reason_text and mon.arm.restarts == 1
+    t = feed(mon, t, 0.5)
+    assert mon.cycle(t).available
+
+
+def test_the_energy_reserve_is_taken_on_the_pessimistic_mass_model():
+    mon = ready()
+    t = feed(mon, 0.0, WARM, v=(0.0, 0.25, 0.0))
+    r = mon.cycle(t)
+    posed = mon.model.pose({n: v for n, (v, _) in mon.joints.items()}, mon.mass.nominal_bodies)
+    edges = st.support_polygon(list(posed.contacts.values()))
+    nominal, _ = st.energy_reserve(posed.positions, posed.masses, posed.inertias,
+                                   posed.plane_z, edges, st.G * mon.tilt.down,
+                                   np.array([0.0, 0.25]), 0.0)
+    assert r.energy_reserve < nominal - 0.5
+
+
+def test_without_a_tilt_source_the_centre_of_mass_bound_lowers_the_pessimistic_figure():
+    figures = []
+    for com in (0.0, 0.03):
+        mon = ready(tilt=False)
+        data = copy.deepcopy(MASS_FILE)
+        data['default_uncertainty']['com_m'] = com
+        data['bodies']['chassis']['com']['bound'] = com
+        mon.set_mass_data(data)
+        t = feed(mon, 0.0, 1.0, imu=False)
+        figures.append(mon.cycle(t).margin_pessimistic)
+    assert figures[1] < figures[0] - 0.03                 # the bound itself, and the lean it adds

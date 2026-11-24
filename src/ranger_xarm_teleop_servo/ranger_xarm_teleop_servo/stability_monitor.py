@@ -70,6 +70,10 @@ TILT_NONE, TILT_MEASURED, TILT_LEVEL_ASSUMED = 0, 1, 2
 
 NOTE = 'does not see a force on the tool'
 
+# A gap longer than this between two samples of the IMU or of the joints restarts their filters,
+# which then settle again before a figure is published: differences across a gap are not rates.
+GAP_S = 0.1
+
 # The stop figure's memory of the present figure never spans more than this (a body with no
 # spring stiffness left would otherwise remember for ever).
 MAX_RING_MEMORY_S = 3.0
@@ -160,12 +164,9 @@ class Monitor:
         self.arm_arrival: Optional[float] = None             # the arm filter's last sample
         self.rest = RestWatch(config.rest)
         self.odometry: Optional[Tuple[float, float, float, float]] = None  # vx, vy, wz, arrival
-        self.f_filter = Cascade(config.cutoff_hz)
-        self.w_filter = Cascade(config.cutoff_hz)
-        self.alpha = Derivative(config.cutoff_hz)
-        self.tilt = ComplementaryTilt(config.tilt_tau_s)
+        self._start_imu()
+        self.imu_restarts = 0
         self.imu_arrival: Optional[float] = None
-        self.imu_first_stamp: Optional[float] = None
         self.imu_stamp: Optional[float] = None
         self.imu_rotation: Optional[np.ndarray] = None       # IMU axes -> base axes
         self.imu_position: Optional[np.ndarray] = None       # in the base frame
@@ -176,6 +177,14 @@ class Monitor:
         # The filters need this much of their input before their output counts (five time
         # constants of one stage: the first sample's step has died down to under 1 %).
         self.settle_s = 5.0 / (2.0 * math.pi * config.cutoff_hz)
+
+    def _start_imu(self) -> None:
+        c = self.config
+        self.f_filter = Cascade(c.cutoff_hz)
+        self.w_filter = Cascade(c.cutoff_hz)
+        self.alpha = Derivative(c.cutoff_hz)
+        self.tilt = ComplementaryTilt(c.tilt_tau_s)
+        self.imu_first_stamp: Optional[float] = None
 
     # ---------------------------------------------------------------- inputs
     def set_description(self, urdf: str) -> None:
@@ -207,7 +216,7 @@ class Monitor:
             return
         moving = [n for n in self.model.required_joints()
                   if n not in self.model.wheel_path_joints]
-        self.arm = JointAcceleration(self.config.cutoff_hz, moving)
+        self.arm = JointAcceleration(self.config.cutoff_hz, moving, gap_s=GAP_S)
         self._derived = self._derive()
 
     def _derive(self):
@@ -231,9 +240,10 @@ class Monitor:
                 'nominal': [(kf(k.value), cf(c.value))],
                 'stiff_low': [(kf(k.low), cf(c.value))],
                 # A softer spring leans more, a stiffer one rings with less damping; less damping
-                # always rings more. The worst stop: the least damping, at the stiffness's
-                # lower end, value and upper end.
-                'all': [(kf(kk), cf(c.low)) for kk in (k.low, k.value, k.high)],
+                # always rings more. The worst stop: the least damping, at five stiffnesses from
+                # the lower end to the upper end (the worst can lie between them; sampled).
+                'all': [(kf(kk), cf(c.low)) for kk in (
+                    k.low, (k.low + k.value) / 2, k.value, (k.value + k.high) / 2, k.high)],
             }
         tf = model.link_transforms({})
         springs = list(model.springs.values())
@@ -277,6 +287,11 @@ class Monitor:
         old = self.imu_stamp is not None and not stamp > self.imu_stamp
         if float(np.linalg.norm(f)) < 1e-6 or old:
             return                      # no direction of gravity in it, or not newer
+        if self.imu_stamp is not None and stamp - self.imu_stamp > GAP_S:
+            # The gyro's rate is not known across a gap: every IMU filter starts again, the
+            # tilt from the accelerometer, and settles again.
+            self._start_imu()
+            self.imu_restarts += 1
         self.f_filter.update(stamp, f)
         self.w_filter.update(stamp, w)
         self.alpha.update(stamp, w)
@@ -287,8 +302,11 @@ class Monitor:
         self.imu_arrival = arrival
 
     def _imu_settled(self) -> bool:
+        # The rates settle in a few of their time constants; the tilt filter, started from the
+        # accelerometer alone, in its own time constant.
         return (self.tilt.down is not None and self.alpha.value is not None
-                and self.imu_stamp - self.imu_first_stamp >= self.settle_s)
+                and self.imu_stamp - self.imu_first_stamp >= max(self.settle_s,
+                                                                 self.config.tilt_tau_s))
 
     # ---------------------------------------------------------------- the cycle
     def cycle(self, now: float) -> Result:
@@ -427,15 +445,7 @@ class Monitor:
         low_pess = min(self._recent, key=lambda r: r[3])
         stop_nom = min(stop_nom, (low_nom[1], low_nom[2]), key=lambda x: x[0])
         stop_pess = min(stop_pess, (low_pess[3], low_pess[4]), stop_nom, key=lambda x: x[0])
-        shift = st.combined_com_bound(arrays['mass'], arrays['com_bound'])
-        reserve, reserve_edge = st.energy_reserve(posed.positions, posed.masses, posed.inertias,
-                                                  posed.plane_z, edges, g_body, velocity, wz,
-                                                  com_shift=shift)
-        # Every term of the reserve scales with the total mass: take the end of its bound that
-        # lowers it.
-        total = float(arrays['mass'].sum())
-        reserve *= (float(arrays['mass_low'].sum()) if reserve > 0.0
-                    else float(arrays['mass_high'].sum())) / total
+        reserve, reserve_edge = self._energy_reserve(posed, arrays, edges, g_body, velocity, wz)
         down = g_body / np.linalg.norm(g_body)
         roll = math.degrees(math.atan2(-down[1], -down[2]))
         pitch = math.degrees(math.atan2(down[0], math.hypot(down[1], down[2])))
@@ -452,7 +462,33 @@ class Monitor:
             cop=(float(nominal.cop[0]), float(nominal.cop[1])), roll_deg=roll, pitch_deg=pitch,
             speed=float(np.hypot(vx, vy)), turn_rate=float(wz), at_rest=at_rest, fingerprint=fp)
 
-    def _modes(self, posed, sprung_mh, kf, cf):
+    def _energy_reserve(self, posed, arrays, edges, g_body, velocity, wz):
+        """
+        Return the smallest energy reserve (J) over the edges the motion heads toward.
+
+        The pessimistic mass model throughout: the centre of mass's foot at the worst of the
+        mass and centre-of-mass bounds for each edge (geometry: gravity along the body), its
+        height raised by the largest bound, the energy to tip at the lightest total mass and
+        the kinetic energy at the heaviest.
+        """
+        down_body = st.gravity_vectors(len(posed.masses), np.array([0.0, 0.0, -st.G]))
+        heaviest, lightest = float(arrays['mass_high'].sum()), float(arrays['mass_low'].sum())
+        c = (posed.masses[:, None] * posed.positions).sum(axis=0) / posed.masses.sum()
+        height = c[2] - posed.plane_z + float(arrays['com_bound'].max(initial=0.0))
+        yaw = st.yaw_inertia(posed.positions, posed.masses, posed.inertias)
+        ke = st.kinetic_energy(heaviest, velocity, wz, yaw * heaviest / posed.masses.sum())
+        best = None
+        for e in st.edges_toward(edges, velocity):
+            d0, _ = st.pessimistic_margin(posed.positions, posed.masses, arrays['mass_low'],
+                                          arrays['mass_high'], arrays['com_bound'], down_body,
+                                          posed.plane_z, [e])
+            foot = e.point + d0 * e.inward                  # on the edge's normal, d0 inside
+            tip = st.energy_to_tip(foot, height, lightest, e, st.tilt_toward(g_body, e.outward))
+            if best is None or tip - ke < best[0]:
+                best = (tip - ke, e)
+        return best
+
+    def _modes(self, posed, sprung_mh, kf, cf, masses=None):
         """Return [(amplification, overshoot, period)] for pitch (x) and roll (y)."""
         d = self._derived
         ms, hs = sprung_mh
@@ -460,16 +496,17 @@ class Monitor:
         for k_axis, axis in ((d['k_pitch'], 0), (d['k_roll'], 1)):
             k = k_axis * kf
             amp = st.lean_amplification(k, ms, hs)
-            zeta = self._zeta(posed, axis, k, cf, ms, hs)
+            zeta = self._zeta(posed, axis, k, cf, ms, hs, masses)
             out.append((amp, st.overshoot(zeta), self._period))
         return out
 
-    def _zeta(self, posed, axis, k, cf, ms, hs) -> float:
+    def _zeta(self, posed, axis, k, cf, ms, hs, masses=None) -> float:
         """
         Return the damping ratio of the body's pitch or roll mode.
 
         ``axis`` 0: pitch (motion along x); 1: roll (motion along y). The ratio is
-        C / (2 sqrt((K - m g h) I)); the mode's period is kept in ``_period``.
+        C / (2 sqrt((K - m g h) I)); the mode's period is kept in ``_period``. ``masses``
+        (default nominal) scales the bodies and their own inertias.
         """
         if math.isinf(k):
             self._period = 0.0
@@ -480,10 +517,12 @@ class Monitor:
         c_mode = float((damp * (coords[:, axis] - centre) ** 2).sum())
         sprung = self._derived['sprung']
         p = posed.positions[sprung]
-        m = posed.masses[sprung]
+        scale = (np.ones(len(posed.masses)) if masses is None
+                 else np.asarray(masses) / posed.masses)[sprung]
+        m = posed.masses[sprung] * scale
         about = 1 - axis                    # pitch turns about y, roll about x
         inertia = float((m * ((p[:, axis] - centre) ** 2 + (p[:, 2] - posed.plane_z) ** 2)).sum()
-                        + posed.inertias[sprung][:, about, about].sum())
+                        + (posed.inertias[sprung][:, about, about] * scale).sum())
         k_eff = k - ms * st.G * hs
         if k_eff <= 0.0 or inertia <= 0.0:
             self._period = math.inf
@@ -494,7 +533,8 @@ class Monitor:
     def ring_period(self, posed, sprung_mh) -> float:
         """Return the longest period of the body's roll and pitch modes at the softest springs."""
         kf, cf = self._derived['corners']['stiff_low'][0]
-        periods = [m[2] for m in self._modes(posed, sprung_mh, kf, cf)]
+        periods = [m[2] for m in self._modes(posed, sprung_mh, kf, cf,
+                                             sm.as_arrays(self.mass)['mass_high'])]
         return min(max(periods), MAX_RING_MEMORY_S)
 
     def _stop(self, posed, arrays, edges, g_body, velocity, wz, sprung_mh, corners,
@@ -507,8 +547,9 @@ class Monitor:
         worst over every corner of the springs' bounds and over the mass bounds.
         """
         best = None
+        masses = arrays['mass_high'] if pessimistic else None
         for kf, cf in self._derived['corners'][corners]:
-            (ax, ox, _), (ay, oy, _) = self._modes(posed, sprung_mh, kf, cf)
+            (ax, ox, _), (ay, oy, _) = self._modes(posed, sprung_mh, kf, cf, masses)
             for fx, fy in ((ax * (1.0 + ox), ay * (1.0 + oy)), (-ax * ox, -ay * oy)):
                 w = st.stop_vectors(posed.positions, g_body, velocity, wz,
                                     self.config.stop_decel_m_s2,
@@ -524,12 +565,14 @@ class Monitor:
                     best = (m, e)
         return best
 
-    def _static_lean(self, posed, masses, corners, sprung_mh) -> Tuple[float, float]:
+    def _static_lean(self, posed, masses, corners, sprung_mh,
+                     shift=(0.0, 0.0)) -> Tuple[float, float]:
         """
         Return the body's static lean on its springs (rad, toward +x and +y) on a level floor.
 
         The sprung centre of mass off the springs' centre leans the body toward it until the
-        springs' moment balances: angle = m g offset / (K - m g h). Rigid: none.
+        springs' moment balances: angle = m g offset / (K - m g h). Rigid: none. ``shift``
+        moves the sprung centre of mass (x, y) first (a bound).
         """
         d = self._derived
         if not self.model.springs or math.isinf(d['k_roll']):
@@ -539,6 +582,7 @@ class Monitor:
         sprung = d['sprung']
         coords = d['spring_xyz']
         c = (masses[sprung][:, None] * posed.positions[sprung]).sum(axis=0) / masses[sprung].sum()
+        c = c + np.array([shift[0], shift[1], 0.0])
         out = []
         for k_axis, axis in ((d['k_pitch'], 0), (d['k_roll'], 1)):
             k_eff = k_axis * kf - ms * st.G * hs
@@ -558,10 +602,13 @@ class Monitor:
         d = self._derived
         kf, _ = d['corners']['stiff_low'][0]
         ms, hs = worst_sprung
-        lean = self._static_lean(posed, arrays['mass_high'], 'stiff_low', worst_sprung)
+        bound = st.combined_com_bound(arrays['mass'], arrays['com_bound'])
         best = None
         for e in edges:
             out = np.array([-e.inward[0], -e.inward[1]])
+            # The centre of mass toward this edge by its bound leans the body further that way.
+            lean = self._static_lean(posed, arrays['mass_high'], 'stiff_low', worst_sprung,
+                                     shift=bound * out)
             k_axis = d['k_pitch'] if abs(out[0]) >= abs(out[1]) else d['k_roll']
             amp = st.lean_amplification(k_axis * kf, ms, hs)
             theta = math.radians(self.config.assumed_slope_deg) * amp

@@ -138,12 +138,18 @@ class JointAcceleration:
     or not newer than the last one is not taken (``update`` returns False).
     """
 
-    def __init__(self, cutoff_hz: float, names: Sequence[str]):
-        """Filter ``names`` at ``cutoff_hz``."""
+    def __init__(self, cutoff_hz: float, names: Sequence[str], gap_s: float = math.inf):
+        """Filter ``names`` at ``cutoff_hz``; start again after a gap longer than ``gap_s``."""
         self.names = list(names)
-        self.position = LowPass(cutoff_hz)
-        self.speed = LowPass(cutoff_hz)
-        self.acceleration = LowPass(cutoff_hz)
+        self.cutoff_hz = cutoff_hz
+        self.gap_s = gap_s
+        self.restarts = 0
+        self._start()
+
+    def _start(self) -> None:
+        self.position = LowPass(self.cutoff_hz)
+        self.speed = LowPass(self.cutoff_hz)
+        self.acceleration = LowPass(self.cutoff_hz)
         self.stamp: Optional[float] = None
         self.first_stamp: Optional[float] = None
         self._history = []                  # the last two (stamp, filtered values)
@@ -159,6 +165,10 @@ class JointAcceleration:
         x = np.array([values[n] for n in self.names], dtype=float)
         if not np.all(np.isfinite(x)):
             return False
+        if self.stamp is not None and stamp - self.stamp > self.gap_s:
+            # Differences across a gap are not speeds: start again and settle again.
+            self._start()
+            self.restarts += 1
         y = self.position.update(stamp, x).copy()
         self._history.append((stamp, y))
         self._history = self._history[-3:]
