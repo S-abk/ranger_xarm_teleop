@@ -38,7 +38,8 @@ REASON_NAMES = {
     0: 'NONE', 1: 'OFF', 2: 'NOT_SIMULATION', 3: 'ARMED', 4: 'NOT_MOVEIT_OWNER',
     5: 'ARMED_UNKNOWN', 6: 'RECORDING', 7: 'REVIEW', 8: 'EPISODE_UNKNOWN',
     9: 'WATCHDOG_ABSENT', 10: 'MOVEIT_NOT_READY', 11: 'PLAN_FAILED', 12: 'START_IN_COLLISION',
-    13: 'BUSY', 14: 'JOINTS_UNKNOWN', 20: 'REACHED', 21: 'ALREADY_THERE', 30: 'RELEASED',
+    13: 'BUSY', 14: 'JOINTS_UNKNOWN', 15: 'BASE_DRIVE', 20: 'REACHED', 21: 'ALREADY_THERE',
+    30: 'RELEASED',
     31: 'INPUT_STALE', 32: 'CONTROLLER_MISSING', 33: 'SESSION_CHANGED', 34: 'SEQ_BACKWARDS',
     35: 'TELEOP_ARMED', 36: 'OWNER_CHANGED', 37: 'EPISODE_STARTED', 38: 'WATCHDOG_LOST',
     39: 'HEARTBEAT_LATE', 40: 'CANCELLED_ELSEWHERE', 41: 'MOVEIT_FAILED', 42: 'NO_ANSWER',
@@ -102,6 +103,10 @@ REFUSED_TEXT = {
     'BUSY': 'Reset refused: still stopping, wait',
     'JOINTS_UNKNOWN': 'Reset refused: arm position unknown',
 }
+# A refusal that exists only with base driving on (G-19): the left grip drives the base.
+BASE_REFUSED_TEXT = {
+    'BASE_DRIVE': 'Reset refused: release the left grip (base drive) first',
+}
 
 
 def _posture_name(posture: str) -> str:
@@ -127,7 +132,7 @@ def reset_text(state: int, reason: int, posture: str, moveit_error_code: int,
         return ''
     if state_name in MOVING_TEXT:
         return MOVING_TEXT[state_name].format(posture=name)
-    table = {'REFUSED': REFUSED_TEXT, 'STOPPED': STOPPED_TEXT,
+    table = {'REFUSED': {**REFUSED_TEXT, **BASE_REFUSED_TEXT}, 'STOPPED': STOPPED_TEXT,
              'ARRIVED': ARRIVED_TEXT}.get(state_name)
     if table is None:
         return f'Reset: state {int(state)}, reason {int(reason)}'

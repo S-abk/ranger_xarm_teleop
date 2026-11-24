@@ -30,10 +30,13 @@ from dataclasses import dataclass, field
 import math
 from typing import Dict, Optional
 
+from .base_feedback import base_text
 from .episode_feedback import EVENT_NAMES
 from .reset_feedback import reset_text
 
 NAN = float('nan')
+# BaseState.EVENT_AT_REST: the base came to rest after a drive (not what the line shows).
+BASE_EVENT_AT_REST = 5
 
 # TeleopState.HOLD_* (checked against the message definition by the unit tests).
 HOLD_NAMES = {
@@ -42,7 +45,7 @@ HOLD_NAMES = {
     9: 'OUT_OF_VIEW', 10: 'HEAD_ABSENT', 11: 'HEAD_EMULATED', 12: 'RESET_CHANGED',
     13: 'SESSION_CHANGED', 14: 'SEQ_BACKWARDS', 15: 'INPUT_JUMP', 16: 'STEP_REJECTED',
     17: 'TOOL_POSE_STALE', 18: 'SERVO_NOT_READY', 19: 'SERVO_HALTED', 20: 'SOLVER',
-    21: 'STOPPING',
+    21: 'STOPPING', 22: 'BASE_DRIVE', 23: 'BASE_MOVING', 24: 'BASE_ODOM', 25: 'BASE_TURNED',
 }
 HOLD_TEXT = {
     'NONE': '',
@@ -68,6 +71,10 @@ HOLD_TEXT = {
                     'retreat tool',
     'SOLVER': 'Arm state disagrees with command: release, check arm',
     'STOPPING': 'Arm stopping: wait',
+    'BASE_DRIVE': 'Driving the base: release left grip to move the arm',
+    'BASE_MOVING': 'Base still moving: arm waits for it to stop',
+    'BASE_ODOM': 'Base odometry missing: arm held',
+    'BASE_TURNED': 'Base turned since calibration: recalibrate (A)',
 }
 # ArmOwner.STATUS_NO_ANSWER in TeleopState.mux_status (checked against the message by the unit
 # tests): teleop's last request for the arm had no answer in time; it is being asked again.
@@ -75,7 +82,8 @@ MUX_NO_ANSWER = 6
 NOT_OWNER_NO_ANSWER_TEXT = 'No answer from the command mux: asking for the arm again'
 # Holds that are the system's state, not a fault; every other hold is a fault and is latched.
 STATE_HOLDS = frozenset({'NONE', 'MOTION_DISABLED', 'NOT_ARMED', 'NOT_OWNER',
-                         'NOT_CALIBRATED', 'CLUTCH_RELEASED', 'STOPPING'})
+                         'NOT_CALIBRATED', 'CLUTCH_RELEASED', 'STOPPING', 'BASE_DRIVE',
+                         'BASE_MOVING', 'BASE_TURNED'})
 
 # TeleopState.LIMIT_*.
 LIMIT_NAMES = {
@@ -252,6 +260,20 @@ class ResetView:
     event_wall_time: float      # host wall clock of the newest event; NaN when none
 
 
+@dataclass(frozen=True)
+class BaseView:
+    """The fields of one BaseState message the panel shows."""
+
+    state: int
+    reason: int
+    mode: int
+    turn_ignored: bool
+    active_limit: int
+    reason_text: str            # names what else publishes the base command (OTHER_PUBLISHER)
+    last_event: int
+    event_wall_time: float      # host wall clock of the newest event; NaN when none
+
+
 @dataclass
 class Snapshot:
     """The fields of one OperatorStatus message (same names)."""
@@ -296,6 +318,12 @@ class Snapshot:
     reset_reason: int = 0
     reset_text: str = ''
     reset_event_age: float = NAN
+    base_valid: bool = False
+    base_age: float = NAN
+    base_state: int = 0
+    base_reason: int = 0
+    base_text: str = ''
+    base_event_age: float = NAN
 
 
 @dataclass
@@ -307,6 +335,7 @@ class StatusTracker:
     fault_latch_s: float = 10.0
     limit_hold_s: float = 1.0
     reset_stale_s: float = 0.5
+    base_stale_s: float = 0.5
     gripper_open: float = NAN
     gripper_closed: float = NAN
     _teleop: Optional[TeleopSample] = None
@@ -322,6 +351,9 @@ class StatusTracker:
     _refusal_count: int = -1
     _reset: Optional[ResetView] = None
     _reset_at: float = NAN
+    _base: Optional[BaseView] = None
+    _base_at: float = NAN
+    _base_line_wall: float = NAN     # wall time of the event the base line shows
     events_missed: int = 0
     counts: Dict[str, int] = field(default_factory=lambda: {'teleop': 0, 'episode': 0})
 
@@ -352,6 +384,17 @@ class StatusTracker:
     def on_reset(self, r: ResetView, now: float) -> None:
         """Take one ResetState (``now``: monotonic arrival time, s)."""
         self._reset, self._reset_at = r, now
+
+    def on_base(self, b: BaseView, now: float) -> None:
+        """
+        Take one BaseState (``now``: monotonic arrival time, s).
+
+        The panel line is aged from the event that made it (a start, refusal or stop): the
+        base coming to rest afterwards (AT_REST) is a later event that does not restart it.
+        """
+        if int(b.last_event) not in (0, BASE_EVENT_AT_REST):
+            self._base_line_wall = b.event_wall_time
+        self._base, self._base_at = b, now
 
     @staticmethod
     def _severity(code: int) -> int:
@@ -439,6 +482,21 @@ class StatusTracker:
                 out.reset_event_age = max(0.0, wall_now - r.event_wall_time)
             out.reset_text = reset_text(r.state, r.reason, r.posture, r.moveit_error_code,
                                         out.reset_event_age)
+        b = self._base
+        if b is not None:
+            out.base_age = now - self._base_at
+        if b is not None and out.base_age <= self.base_stale_s:
+            out.base_valid = True
+            out.base_state = int(b.state)
+            out.base_reason = int(b.reason)
+            if int(b.last_event) != 0 and math.isfinite(b.event_wall_time):
+                out.base_event_age = max(0.0, wall_now - b.event_wall_time)
+            line_age = NAN
+            if math.isfinite(self._base_line_wall):
+                line_age = max(0.0, wall_now - self._base_line_wall)
+            other = b.reason_text.split(': ', 1)[1] if ': ' in b.reason_text else ''
+            out.base_text = base_text(b.state, b.reason, b.mode, b.turn_ignored, b.active_limit,
+                                      line_age, other)
         return out
 
 

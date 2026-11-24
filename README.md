@@ -61,6 +61,8 @@ The stack role needs ROS sourced, as for the manual sequence.
 **Options.**
 - Recording, operator feedback and the reset are on for the simulation profiles; switch them
   off with `--no-record`, `--no-feedback` and `--no-reset`.
+- `--base` (off by default) drives the simulated base from the headset; simulator profiles
+  only, refused for hardware and for a profile with no simulator.
 - For the simulator: `--headless`, `--no-cameras`, and `--gpu auto|nvidia|default` (`auto`
   renders on the NVIDIA card when the machine has one and says when it has not).
 - `--no-rviz` (mock) and `--data-dir`.
@@ -102,7 +104,7 @@ as ok. The items:
 - the recorder, the operator feedback node, and the reset node with its watchdog;
 - the headset connected and sending input;
 - the page version, which is ok only when this launcher started the relay; otherwise the panel
-  footer must say `client feedback-6`.
+  footer must say `client feedback-7`.
 
 Once the headset is on, the panel shows the session's live state as before.
 
@@ -112,7 +114,7 @@ A correct start ends with (each line begins with the time):
 STACK READY: the probe has left; nothing joins the ROS graph from here.
 Put on the headset now.
 [     ok] Headset connected and sending input: 72 frames/s reach the bridge
-[     ok] Headset page version: client feedback-6: the page sending frames was loaded from this relay after it started
+[     ok] Headset page version: client feedback-7: the page sending frames was loaded from this relay after it started
 SESSION READY
 ```
 
@@ -670,6 +672,64 @@ started from the headset is hold-to-run.
 ```bash
 ros2 launch ranger_xarm_teleop_bringup teleop_mock.launch.py reset:=true
 ros2 topic echo /teleop/reset/state --field reason_text     # what it does and why
+```
+
+### Driving the base (base)
+
+Off unless the stack is launched with `base:=true` (default false: the base node does not start
+and nothing reads the left grip or the base), and **simulation only**: refused outside
+simulation, and the base node commands nothing unless every ros2_control hardware plugin in
+`/robot_description` is a simulator. The simulated base must be drivable
+(`sim.launch.py drive_base:=true`; the session launcher's `--base` passes both). Rule G-19 of
+the safety gate: driving the base is hold-to-drive.
+
+- **The controls:** hold the **left grip**. Then the **left thumbstick** moves the robot in its
+  own axes (not your view): up = robot forward, right = robot right, a diagonal = sideways
+  travel along the stick, in one crab motion. The **right thumbstick** left or right turns the
+  robot in place (left = counter-clockwise), taken only while the left stick is centred and
+  only while its sideways deflection dominates its pull. The base runs one motion mode per
+  command: with both sticks deflected the left stick wins and the panel says the turn is
+  ignored. Dead zone 0.15, quadratic response, a 10 degree snap to the pure axes.
+- **Speed:** capped by the base node (`base_linear_cap` for forward and sideways together,
+  `base_turn_cap`), and changing no faster than `base_linear_accel` and `base_turn_accel`, also
+  when the stick returns to centre with the grip held. All four are required, no default; the
+  simulation-only limits file sets 0.2 m/s, 0.4 rad/s, 0.4 m/s^2, 0.8 rad/s^2.
+  `base_tool_speed_cap` (optional, unset by default) scales the whole command down, direction
+  kept, so that the tool moves no faster than that in the room (a turn with the arm stretched
+  out moves the tool faster than the base itself).
+- **The stop:** releasing the grip, stale input (100 ms; also a relay disconnect), a missing
+  left controller, a change of XR session or a sequence going backwards, no fresh odometry,
+  the arm's clutch engaged, another publisher of the base command, a reset starting, and the
+  base node stopping (SIGINT, SIGTERM) each send one zero command at once, then nothing; the
+  base's own controller brakes, and its own command timeout backs this up (a killed node sends
+  nothing). After any stop the grip must be released and pressed again. Looking away and an
+  emulated pose do not stop the base: the controls are not a pose.
+- **The arm and the base exclude each other:** the first grip held wins. A drive is refused
+  while the right grip (the arm's clutch) is held or engaged; the arm's clutch is refused while
+  the left grip is held or odometry is missing, and waits (up to 2 s) while the base is
+  commanded or still moving by odometry. Teleop need not be armed to drive.
+- **Calibrate again after a turn:** the arm's calibration is a heading relative to the arm,
+  which rides on the base. Once the base has turned more than `base_turn_recalibrate_deg`
+  (simulation file: 5) since the calibration, by odometry, the clutch is refused until you
+  press A again; a turn commanded while odometry was missing does the same. Driving straight
+  or sideways keeps the calibration.
+- **The reset and the base:** the return to the ready posture is refused while the left grip
+  is held, and a pull back on the right stick never turns the base.
+- **State:** `/teleop/base/state` (`BaseState`, 10 Hz and on change): state, mode, the reason,
+  the command, whether odometry says the base is at rest, the caps and the limit acting. The
+  commands are `/cmd_vel` (`base_cmd_topic`, what the simulated base takes) and
+  `/teleop/base/cmd_vel` (`TwistStamped`, the recorded action), 50 Hz while the grip is held.
+  The panel shows one base line; the left controller buzzes when a drive starts and gives the
+  refused pattern for a refusal or a stop by a fault (a release is silent); the right
+  controller buzzes once when the base has come to rest after a drive: the arm is yours again.
+- **Recording:** episodes record both commands, the base state, odometry and ground truth; the
+  checker reports how far the base moved and fails an episode recorded with base driving on
+  if the clutch was engaged while the base was commanded or moving (`BASE_DURING_CLUTCH`).
+
+```bash
+ros2 launch ranger_xarm_gazebo sim.launch.py drive_base:=true
+ros2 launch ranger_xarm_teleop_bringup teleop_sim.launch.py base:=true
+ros2 topic echo /teleop/base/state --field reason_text     # what it does and why
 ```
 
 ### Measuring a run

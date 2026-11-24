@@ -20,6 +20,13 @@ fixed-precision rounding, so regeneration is byte-identical.
 
 All positions are metres in WebXR axes; quaternions are xyzw; time is the
 headset rate of 72 Hz.
+
+``generate()`` holds the fixtures the bridge tests use. ``generate_base()`` holds the
+base-driving fixtures (``base_*``): a session that calibrates (A) and arms (B) as the servo
+package's clutch fixtures do, then drives with the left grip and thumbstick, and one fixture
+per fault that must stop a drive. Their frames are valid; the faults are in what the
+stream does (a stall, a session change, a sequence step back, a missing hand). ``main()``
+writes both sets.
 """
 
 import json
@@ -409,6 +416,199 @@ def expected() -> List[str]:
     return [case[2] for case in _malformed_cases()]
 
 
+# ---- Base-driving fixtures ---------------------------------------------------------------
+#
+# Every fixture opens as the servo package's clutch fixtures do: the calibration button (A,
+# xr-standard slot 4) is pressed on the right controller at 0.3 s while it points
+# ``BASE_CAL_YAW_DEG`` to the left, the arm button (B, slot 5) at 0.7 s. The left controller is
+# present throughout, at rest, with its trigger at 0.0. Left grip is slot 1, the thumbsticks
+# are ``axes[2:4]`` (x right, y down: pushed up, forward, is negative).
+
+BASE_CAL_YAW_DEG = 20.0
+BASE_START = (0.15, 1.35, -0.5)
+BASE_FORWARD = (-math.sin(math.radians(BASE_CAL_YAW_DEG)), 0.0,
+                -math.cos(math.radians(BASE_CAL_YAW_DEG)))
+BASE_TILT = (math.sin(math.radians(-25.0)), 0.0, 0.0, math.cos(math.radians(-25.0)))
+BASE_HELD = _qmul(_yaw(math.radians(BASE_CAL_YAW_DEG)), BASE_TILT)
+STICK_FORWARD = (0.0, -1.0)
+STICK_RIGHT = (1.0, 0.0)
+STICK_CENTRE = (0.0, 0.0)
+
+Stick = Tuple[float, float]
+
+
+def _smooth(t: float, start: float, duration: float) -> float:
+    """Minimum-jerk ramp from 0 to 1 over ``duration`` starting at ``start``."""
+    s = min(max((t - start) / duration, 0.0), 1.0)
+    return s * s * s * (10.0 - 15.0 * s + 6.0 * s * s)
+
+
+def _along(distance: float) -> Vec:
+    return tuple(BASE_START[k] + distance * BASE_FORWARD[k] for k in range(3))
+
+
+def _window(i: int, start: float, end: float) -> bool:
+    """Return True for frame ``i`` from ``start`` s up to (not including) ``end`` s."""
+    return _idx(start) <= i < _idx(end)
+
+
+def _arm_hand(i: int, grip: bool, stick: Stick, reach: float) -> Dict[str, Any]:
+    """Return the right controller: calibrate and arm, then held at ``reach`` m forward."""
+    t = i / RATE_HZ
+    if t < 1.0:
+        pressed = {4: _window(i, 0.3, 0.5), 5: _window(i, 0.7, 0.9)}
+        position, orientation = BASE_START, _yaw(math.radians(BASE_CAL_YAW_DEG))
+    else:
+        pressed = {}
+        position, orientation = _along(reach), BASE_HELD
+    buttons = []
+    for k in range(NUM_BUTTONS):
+        down = grip if k == 1 else pressed.get(k, False)
+        buttons.append({'p': down, 't': down, 'v': 1.0 if down else 0.0})
+    return {'position': _r(position, 6), 'orientation': _r(orientation, 8),
+            'emulated_position': False, 'buttons': buttons,
+            'axes': [0.0, 0.0, stick[0], stick[1]]}
+
+
+def _stroke(i: int, start: float, back: float) -> float:
+    """Return a stroke: 0.12 m out over 1.2 s from ``start``, back over 0.6 s from ``back``."""
+    t = i / RATE_HZ
+    return 0.12 * (_smooth(t, start, 1.2) - _smooth(t, back, 0.6))
+
+
+def _base_lines(duration: float, left_grip=None, left_stick=None, right_grip=None,
+                right_stick=None, reach=None, left_present=None, session=None, seq=None,
+                dropped=None) -> List[str]:
+    """
+    Return a recording of ``duration`` s. Each argument is a function of the frame index.
+
+    ``left_grip``, ``right_grip``: pressed; ``left_stick``, ``right_stick``: (x, y);
+    ``reach``: the right hand's distance forward (m); ``left_present``: the left controller is
+    in the frame; ``session``: the session id; ``seq``: the sequence number; ``dropped``: the
+    frame is not sent at all (its index is skipped, as a stall does).
+    """
+    lines = []
+    for i in range(_idx(duration)):
+        if dropped is not None and dropped(i):
+            continue
+        left = None
+        if left_present is None or left_present(i):
+            left = _hand(LEFT_STILL, LEFT_QUAT, grip=bool(left_grip and left_grip(i)),
+                         trigger=0.0, stick=left_stick(i) if left_stick else STICK_CENTRE)
+        right = _arm_hand(i, bool(right_grip and right_grip(i)),
+                          right_stick(i) if right_stick else STICK_CENTRE,
+                          reach(i) if reach else 0.0)
+        frame = _frame(i, left, right, _static_viewer(),
+                       seq=seq(i) if seq else None,
+                       session_id=session(i) if session else SESSION_ID)
+        lines.append(_line(i, frame))
+    return lines
+
+
+def _forward_until(end: float, start: float = 1.5):
+    """Return a left stick function: forward from ``start`` s to ``end`` s, else centred."""
+    return lambda i: STICK_FORWARD if _window(i, start, end) else STICK_CENTRE
+
+
+def base_drive_between_strokes() -> List[str]:
+    """
+    Drive forward, arm stroke, drive sideways, turn, arm stroke: 15 s.
+
+    Left grip with the left stick forward 1.5-3.0 s; right grip stroke 4.0-6.0 s (0.12 m
+    forward, hand back 6.2-6.8 s); left grip with the stick right 7.0-8.5 s; left grip with the
+    left stick centred and the right stick x at -1.0 (turn left) 9.5-11.0 s; right grip stroke
+    12.0-14.0 s (hand back 14.2-14.8 s).
+    """
+    def left_grip(i):
+        return any(_window(i, a, b) for a, b in ((1.5, 3.0), (7.0, 8.5), (9.5, 11.0)))
+
+    def left_stick(i):
+        return STICK_FORWARD if _window(i, 1.5, 3.0) else (
+            STICK_RIGHT if _window(i, 7.0, 8.5) else STICK_CENTRE)
+
+    def right_grip(i):
+        return _window(i, 4.0, 6.0) or _window(i, 12.0, 14.0)
+
+    def reach(i):
+        return _stroke(i, 4.3, 6.2) + _stroke(i, 12.3, 14.2)
+
+    def right_stick(i):
+        return (-1.0, 0.0) if _window(i, 9.5, 11.0) else STICK_CENTRE
+    return _base_lines(15.0, left_grip, left_stick, right_grip, right_stick, reach)
+
+
+def base_fault_release() -> List[str]:
+    """Drive forward 1.5-3.0 s; the left grip is released at 3.0 s, the stick centres 3.3 s."""
+    return _base_lines(4.5, lambda i: _window(i, 1.5, 3.0), _forward_until(3.3))
+
+
+def base_fault_stale() -> List[str]:
+    """Drive forward 1.5-4.0 s; no frame at all arrives 3.0-3.5 s; the grip stays held."""
+    return _base_lines(4.5, lambda i: _window(i, 1.5, 4.0), _forward_until(4.0),
+                       dropped=lambda i: _window(i, 3.0, 3.5))
+
+
+def base_fault_left_missing() -> List[str]:
+    """Drive forward 1.5-4.0 s; the left controller is absent from 3.0 to 3.5 s, then back."""
+    return _base_lines(4.5, lambda i: _window(i, 1.5, 4.0), _forward_until(4.0),
+                       left_present=lambda i: not _window(i, 3.0, 3.5))
+
+
+def base_fault_session() -> List[str]:
+    """Drive forward 1.5-4.0 s; the session id changes at 3.0 s (seq and poses continue)."""
+    return _base_lines(4.5, lambda i: _window(i, 1.5, 4.0), _forward_until(4.0),
+                       session=lambda i: SESSION_ID_2 if i >= _idx(3.0) else SESSION_ID)
+
+
+def base_fault_seq_backwards() -> List[str]:
+    """Drive forward 1.5-4.0 s; at 3.0 s the sequence number steps back by 50 and counts on."""
+    return _base_lines(4.5, lambda i: _window(i, 1.5, 4.0), _forward_until(4.0),
+                       seq=lambda i: i - 50 if i >= _idx(3.0) else i)
+
+
+def base_both_grips_same_frame() -> List[str]:
+    """Both grips pressed in the same frame at 1.5 s, left stick forward, held to 4.0 s."""
+    return _base_lines(4.5, lambda i: _window(i, 1.5, 4.0), _forward_until(4.0),
+                       lambda i: _window(i, 1.5, 4.0))
+
+
+def base_right_grip_during_drive() -> List[str]:
+    """Drive forward 1.5-4.0 s; the right grip is pressed at 3.0 s while the left is held."""
+    return _base_lines(4.5, lambda i: _window(i, 1.5, 4.0), _forward_until(4.0),
+                       lambda i: _window(i, 3.0, 4.0))
+
+
+def base_left_grip_during_stroke() -> List[str]:
+    """Right grip 1.5-4.0 s (hand 0.12 m out 1.8-3.0 s); left grip and stick forward 3.0-4.0 s."""
+    return _base_lines(4.5, lambda i: _window(i, 3.0, 4.0), _forward_until(4.0, 3.0),
+                       lambda i: _window(i, 1.5, 4.0),
+                       reach=lambda i: 0.12 * _smooth(i / RATE_HZ, 1.8, 1.2))
+
+
+def base_reset_pull_while_driving() -> List[str]:
+    """Drive forward 1.5-4.0 s; the right stick is pulled fully back (y +1.0) 2.5-3.5 s."""
+    return _base_lines(4.5, lambda i: _window(i, 1.5, 4.0), _forward_until(4.0),
+                       right_stick=lambda i: (0.0, 1.0) if _window(i, 2.5, 3.5)
+                       else STICK_CENTRE)
+
+
+def base_turn_diagonal() -> List[str]:
+    """Left grip, left stick centred, right stick (-0.9, 0.7), a turn not a pull, 1.5-4.0 s."""
+    return _base_lines(4.5, lambda i: _window(i, 1.5, 4.0),
+                       right_stick=lambda i: (-0.9, 0.7) if _window(i, 1.5, 4.0)
+                       else STICK_CENTRE)
+
+
+def generate_base() -> Dict[str, List[str]]:
+    """Return the base-driving fixture name -> exact file lines (without newlines)."""
+    makers = [base_drive_between_strokes, base_fault_release, base_fault_stale,
+              base_fault_left_missing, base_fault_session, base_fault_seq_backwards,
+              base_both_grips_same_frame, base_right_grip_during_drive,
+              base_left_grip_during_stroke, base_reset_pull_while_driving,
+              base_turn_diagonal]
+    return {maker.__name__: maker() for maker in makers}
+
+
 def generate() -> Dict[str, List[str]]:
     """Return fixture name -> exact file lines (without newlines)."""
     return {
@@ -425,7 +625,7 @@ def main() -> None:
     """Write every fixture as ``<name>.jsonl`` next to this script or into argv[1]."""
     out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
     os.makedirs(out_dir, exist_ok=True)
-    for name, lines in generate().items():
+    for name, lines in {**generate(), **generate_base()}.items():
         path = os.path.join(out_dir, f'{name}.jsonl')
         with open(path, 'w', encoding='utf-8', newline='\n') as handle:
             for line in lines:

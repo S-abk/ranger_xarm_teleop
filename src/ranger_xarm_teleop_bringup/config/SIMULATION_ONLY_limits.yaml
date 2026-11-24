@@ -53,3 +53,17 @@
     # a named posture from the headset (reset:=true). PENDING in the safety gate; chosen for
     # the simulated arm only, as the recovery tools' default speed doubled.
     reset_speed_scaling: 0.2
+    # G-19: base driving from the headset (base:=true, simulation only). PENDING in the safety
+    # gate; chosen for the simulated base only, below the real base bring-up's own caps
+    # (0.25 m/s forward and sideways, 0.5 rad/s turning) and, for the acceleration, below the
+    # simulated base's own wheel limit (1.0 m/s^2), so that this limit is the one acting.
+    # The linear cap bounds forward and sideways together.
+    base_linear_cap: 0.2
+    base_turn_cap: 0.4
+    base_linear_accel: 0.4
+    base_turn_accel: 0.8
+    # The base's turn since the arm's calibration after which the clutch is refused until the
+    # operator calibrates again (A).
+    base_turn_recalibrate_deg: 5.0
+    # base_tool_speed_cap (m/s of the tool in the room while the base is commanded) is
+    # optional and not set here: no such limit unless a deployment sets one.

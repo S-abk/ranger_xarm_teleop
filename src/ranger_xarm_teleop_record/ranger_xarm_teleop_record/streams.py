@@ -63,6 +63,11 @@ Pixels are not held here; ``Episode.images[name]`` loads one frame by row index.
 ``odometry`` (Odometry): pose ``pose``; float ``twist`` ``(n, 6)``.
 ``twist`` (Twist, no header): float ``twist`` ``(n, 6)``.
 ``owner`` (ArmOwner): int ``owner``, ``status``.
+``twist_stamped`` (TwistStamped): float ``twist`` ``(n, 6)``; the stamp is the header's.
+``base_state`` (BaseState): int ``state``, ``mode``, ``reason``, ``active_limit``,
+``event_count``; bool ``driving``, ``at_rest``, ``enabled``; float ``odom_age`` (NaN when no
+odometry), ``tool_speed_scale`` (NaN when no such limit), ``command`` ``(n, 6)`` (the last
+command published, as a twist); the stamp is the header's.
 Kinds not listed (tf, strings, logs) carry no fields; only their times are used.
 
 Absent fields

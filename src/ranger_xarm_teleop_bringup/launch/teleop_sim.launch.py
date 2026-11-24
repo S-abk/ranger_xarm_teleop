@@ -33,11 +33,15 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 
 SIM_DESCRIPTION_ARGS = (
     'add_gripper:=true xarm_load_gazebo_plugin:=false '
     'xarm_ros2_control_plugin:=gz_ros2_control/GazeboSimSystem')
+# With base:=true the simulator runs the base on its wheels (sim.launch.py drive_base:=true):
+# MoveIt Servo's description must then be that robot too, or the teleop node refuses to arm
+# (its link keep-out model is built from the running robot's description).
+DRIVABLE_BASE_ARGS = ' use_wheels:=true fix_base_to_world:=false'
 
 
 def generate_launch_description():
@@ -52,6 +56,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'record', default_value='false',
             description='Start the demonstration recorder and episode node (paused until X).'),
+        DeclareLaunchArgument(
+            'base', default_value='false',
+            description='Base driving from the headset (G-19, simulation only).'),
         DeclareLaunchArgument(
             'reset', default_value='false',
             description='Hold the right thumbstick pulled back (disarmed) to return the arm to '
@@ -75,12 +82,15 @@ def generate_launch_description():
                 'simulation': 'true',
                 'motion_enabled': LaunchConfiguration('motion_enabled'),
                 'use_sim_time': 'true',
-                'description_args': SIM_DESCRIPTION_ARGS,
+                'description_args': PythonExpression([
+                    repr(SIM_DESCRIPTION_ARGS), ' + (', repr(DRIVABLE_BASE_ARGS), " if '",
+                    LaunchConfiguration('base'), "'.lower() in ('true', '1', 'yes') else '')"]),
                 'moveit_controller': 'xarm_xarm6_traj_controller',
                 'tool_frame': LaunchConfiguration('tool_frame'),
                 'teleop_params_file': LaunchConfiguration('teleop_params_file'),
                 'gripper_enabled': LaunchConfiguration('gripper_enabled'),
                 'reset': LaunchConfiguration('reset'),
+                'base': LaunchConfiguration('base'),
                 'feedback': LaunchConfiguration('feedback'),
                 'moveit_gripper_controller': 'xarm_xarm_gripper_traj_controller',
             }.items()),

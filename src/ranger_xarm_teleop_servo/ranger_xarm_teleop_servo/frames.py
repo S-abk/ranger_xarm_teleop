@@ -38,6 +38,7 @@ CALIBRATE_BUTTON = BUTTON_NAMES.index('right_primary')
 ARM_BUTTON = BUTTON_NAMES.index('right_secondary')
 SCALE_BUTTON = BUTTON_NAMES.index('right_thumbstick')    # click: fine <-> coarse translation
 TRIGGER_AXIS = AXIS_NAMES.index('right_trigger')          # analog 0..1: the gripper
+LEFT_GRIP_BUTTON = BUTTON_NAMES.index('left_grip')        # G-19: hold to drive the base
 
 
 def frame_from_parsed(parsed: ParsedFrame, arrival: float) -> Frame:
@@ -67,6 +68,7 @@ def frame_from_parsed(parsed: ParsedFrame, arrival: float) -> Frame:
         arm=bool(buttons[ARM_BUTTON]),
         scale_toggle=bool(buttons[SCALE_BUTTON]),
         trigger=float(axes[TRIGGER_AXIS]),
+        left_grip=bool(buttons[LEFT_GRIP_BUTTON]),
     )
 
 

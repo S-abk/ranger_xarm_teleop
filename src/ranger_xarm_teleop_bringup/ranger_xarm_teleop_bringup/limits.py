@@ -65,9 +65,18 @@ RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translat
             'reset_speed_scaling',
             # The joint command's speed cap and acceleration limit (G-18).
             'joint_speed_cap_rad_s', 'joint_acceleration_limit_rad_s2',
+            # Base driving (G-19): its switch and its values.
+            'base_driving', 'base_linear_cap', 'base_turn_cap', 'base_linear_accel',
+            'base_turn_accel', 'base_turn_recalibrate_deg', 'base_tool_speed_cap',
             # The hardware path's guards: the node's check of the hardware values, and the
             # mux's refusal of teleop while motion is disabled.
             'hardware_limits', 'refuse_teleop')
+
+# Required in the limits file with base:=true (G-19, no default); base_tool_speed_cap is optional
+# (unset: no such limit).
+BASE_REQUIRED = ('base_linear_cap', 'base_turn_cap', 'base_linear_accel', 'base_turn_accel',
+                 'base_turn_recalibrate_deg')
+BASE_VALUES = BASE_REQUIRED + ('base_tool_speed_cap',)
 
 # Required in the limits file when gripper teleop is enabled (no default).
 GRIPPER_REQUIRED = ('gripper_open_position', 'gripper_closed_position', 'gripper_max_speed')
@@ -231,6 +240,29 @@ def check_hardware_limits_file(path: str) -> dict:
     if 'reset_speed_scaling' in values:
         problems.append(f'{path}: reset_speed_scaling is set: reset is simulation only; '
                         'remove it from the file')
+    base = sorted(name for name in BASE_VALUES + ('base_driving',) if name in values)
+    if base:
+        problems.append(f'{path}: {", ".join(base)} set: base driving (G-19) is simulation '
+                        'only; remove them from the file')
     if problems:
         raise HardwareLimitsRefused('\n'.join(problems))
     return values
+
+
+def check_base_limits(path: str, values: dict) -> dict:
+    """
+    Return the base node's values from the limits file; raise ValueError naming what is missing.
+
+    Every value of ``BASE_REQUIRED`` must be a positive number (no default, G-19);
+    ``base_tool_speed_cap`` is optional and, when set, positive.
+    """
+    missing = [name for name in BASE_REQUIRED if not _positive_number(values.get(name))]
+    if missing:
+        raise ValueError(f'{path}: ' + ', '.join(missing) + ' required with base:=true (G-19), '
+                         'no default: set a positive number')
+    out = {name: float(values[name]) for name in BASE_REQUIRED}
+    if 'base_tool_speed_cap' in values:
+        if not _positive_number(values['base_tool_speed_cap']):
+            raise ValueError(f'{path}: base_tool_speed_cap must be a positive number when set')
+        out['base_tool_speed_cap'] = float(values['base_tool_speed_cap'])
+    return out

@@ -621,7 +621,7 @@ test('config: defaults, limits and bad values', () => {
 });
 
 test('version is exported', () => {
-  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-6');
+  assert.strictEqual(FB.FEEDBACK_VERSION, 'feedback-7');
 });
 
 test('lines: a section older than the staleness limit shows no data, never its old state', () => {
@@ -640,4 +640,92 @@ test('lines: a section older than the staleness limit shows no data, never its o
   const unknown = accepted({ teleop_age_s: null, episode_age_s: null, episode: episode({}) });
   const u = texts(FB.panelLines(unknown, NOW));
   assert.ok(u.includes('Teleop: no data') && u.includes('Recording: no data'), u);
+});
+
+// ---- the base line (driving the base with the left grip): only with a base section ----
+
+const baseSection = (over) => Object.assign({
+  valid: true, state: 'DRIVING', reason: 'NONE',
+  text: 'Base: driving, release left grip to stop (stick up = robot front)', event_age_s: 1.0,
+}, over);
+const baseLines = (section, over = {}) =>
+  FB.panelLines(accepted(Object.assign({ base: section }, over)), NOW).lines;
+
+test('base: without a base section nothing is drawn for it', () => {
+  const plain = FB.panelLines(accepted({}), NOW).lines;
+  assert.ok(!plain.some((l) => l.text.startsWith('Base')), plain);
+  assert.deepStrictEqual(FB.panelLines(accepted({ base: undefined }), NOW).lines, plain);
+  assert.deepStrictEqual(FB.panelLines(accepted({ base: null }), NOW).lines, plain);
+});
+
+test('base: a valid state is lines with its text, after the others', () => {
+  const plain = FB.panelLines(accepted({}), NOW).lines;
+  const got = baseLines(baseSection());
+  assert.deepStrictEqual(got.slice(0, plain.length), plain);
+  assert.strictEqual(got.slice(plain.length).map((l) => l.text).join(' '),
+    'Base: driving, release left grip to stop (stick up = robot front)');
+  assert.strictEqual(got[got.length - 1].tone, 'text');
+});
+
+test('base: the line follows the reset line when both are present', () => {
+  const reset = { valid: true, state: 'MOVING', reason: 'NONE', text: 'Reset: moving to ready; release to stop', event_age_s: 1 };
+  const got = texts({ lines: baseLines(baseSection(), { reset }) });
+  assert.ok(got.indexOf('Reset: moving to ready; release to stop') < got.findIndex((t) => t.startsWith('Base')), got);
+});
+
+test('base: tone is bad for a refusal and a stop by a fault, not for a release', () => {
+  const tone = (s) => baseLines(baseSection(s)).pop().tone;
+  assert.strictEqual(tone({ state: 'REFUSED', reason: 'ODOM_MISSING', text: 'Base refused: base odometry missing (2 s ago)' }), 'bad');
+  assert.strictEqual(tone({ state: 'STOPPED', reason: 'INPUT_STALE', text: 'Base stopped: headset input late or lost (2 s ago)' }), 'bad');
+  assert.strictEqual(tone({ state: 'STOPPED', reason: 'RELEASED', text: 'Base stopped: released (2 s ago)' }), 'text');
+  assert.strictEqual(tone({ state: 'STOPPING', reason: 'RELEASED', text: 'Base: stopping…' }), 'text');
+});
+
+test('base: a section that is not valid says no data, never its old text', () => {
+  const got = baseLines({ valid: false, state: null, reason: null, text: '', event_age_s: null });
+  const last = got[got.length - 1];
+  assert.strictEqual(last.text, 'Base: no data');
+  assert.strictEqual(last.tone, 'warn');
+  assert.strictEqual(got.filter((l) => l.text.startsWith('Base')).length, 1);
+});
+
+test('base: an empty text draws nothing', () => {
+  const plain = FB.panelLines(accepted({}), NOW).lines;
+  assert.deepStrictEqual(baseLines(baseSection({ state: 'IDLE', text: '' })), plain);
+  assert.deepStrictEqual(baseLines(baseSection({ state: 'REFUSED', reason: 'OFF', text: '' })), plain);
+});
+
+test('base: the longest texts are wrapped whole, never cut', () => {
+  const longest = [
+    'Base: driving, release left grip to stop (stick up = robot front) (slowed: tool speed)',
+    'Base: driving; turn ignored, centre the left stick to turn (slowed: tool speed)',
+    'Base refused: another node publishes the base command: /xxxxxxxxxxxxxxxxxxxxxxxx… (29 s ago)',
+    'Base refused: another node publishes the base command: /a_node, /b_node, /c_node… (29 s ago)',
+    'Base refused: release the right grip (arm clutch) first (29 s ago)',
+  ];
+  for (const text of longest) {
+    const got = baseLines(baseSection({ state: 'REFUSED', reason: 'OTHER_PUBLISHER', text }))
+      .filter((l) => l.tone === 'bad').map((l) => l.text);
+    assert.strictEqual(got.join(' '), text);
+  }
+});
+
+test('base: a stale status shows NO DATA only, whatever it carried', () => {
+  const res = FB.panelLines(accepted({ base: baseSection() }), NOW + 5000);
+  assert.deepStrictEqual(texts(res), ['NO DATA']);
+});
+
+test('base: the picture changes when the base line does', () => {
+  const key = (s) => FB.panelLines(accepted({ base: s }), NOW).key;
+  assert.notStrictEqual(key(baseSection()), key(baseSection({ text: 'Base: stopping…' })));
+  assert.notStrictEqual(FB.panelLines(accepted({}), NOW).key, key(baseSection()));
+});
+
+test('base: a base vibration on the right hand does not disturb a left one of the same source', () => {
+  const h = FB.createHaptics();
+  const base = (over) => haptic(Object.assign({ source: 'base', event: 'REFUSED', hand: 'left', priority: 3 }, over));
+  assert.strictEqual(h.offer(base({ id: 1 }), NOW, SESSION, true), 'played');
+  assert.strictEqual(h.offer(base({ id: 2, hand: 'right', event: 'AT_REST', priority: 2,
+    pulses: [[0.5, 60, 0]] }), NOW, SESSION, true), 'played');
+  assert.deepStrictEqual(h.tick(NOW).map((p) => p.hand).sort(), ['left', 'right']);
 });

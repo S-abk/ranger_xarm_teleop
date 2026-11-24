@@ -50,6 +50,28 @@ operator_feedback:
       REFUSED: 3
       STOPPED: 3
 
+# Base events (driving the base with the left grip): vibration from the base node's
+# /teleop/base/state, source "base". Same format as above, and a hand per event: the drive's own
+# events on the left controller, the arrival at rest (the arm may be used) on the right. A
+# release (the operator let go) has no vibration; STOPPED is a stop by a fault and feels like
+# REFUSED. With the feature off no base state is published and none of this is used.
+    base_stale_s: 0.5             # the base line shows "no data" when its source is older
+    base_haptic:
+      START: [0.6, 100.0, 0.0]                                 # one short pulse
+      REFUSED: [1.0, 350.0, 200.0, 1.0, 350.0, 0.0]                # two long, strong
+      STOPPED: [1.0, 350.0, 200.0, 1.0, 350.0, 0.0]                # two long, strong
+      AT_REST: [0.5, 60.0, 0.0]                                # a tick
+    base_haptic_priority:
+      START: 2
+      REFUSED: 3
+      STOPPED: 3
+      AT_REST: 2
+    base_hand:
+      START: left
+      REFUSED: left
+      STOPPED: left
+      AT_REST: right
+
 # The panel: information only, hidden and shown with the left thumbstick click.
 # anchor left_controller: offset from the left grip in a frame facing the head (x right, y up,
 # z toward the head), metres. anchor head: offset in the head frame (x right, y up, -z ahead).

@@ -37,6 +37,11 @@ uint8 HOLD_SERVO_NOT_READY = 18    # MoveIt Servo not verified, not in joint-jog
 uint8 HOLD_SERVO_HALTED = 19       # MoveIt Servo halted (collision or joint bound), see servo_status
 uint8 HOLD_SOLVER = 20             # no kinematic chain or joint state, or commanded and measured disagree
 uint8 HOLD_STOPPING = 21           # G-18: the stop ramp of the last release still runs; engagement follows
+# G-19, only with base driving on (the teleop node's base_driving parameter):
+uint8 HOLD_BASE_DRIVE = 22         # the left grip (hold to drive the base) is held: the clutch is refused
+uint8 HOLD_BASE_MOVING = 23        # odometry says the base is still moving; engagement follows at rest
+uint8 HOLD_BASE_ODOM = 24          # no fresh odometry: whether the base is at rest is unknown
+uint8 HOLD_BASE_TURNED = 25        # the base turned past the set angle since the calibration: calibrate again (A)
 uint8 hold_reason
 
 # Bound that shaped the target or the joint command of this cycle (G-6, G-8, G-14).
