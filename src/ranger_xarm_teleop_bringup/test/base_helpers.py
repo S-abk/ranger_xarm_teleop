@@ -20,7 +20,8 @@ topics (its state, both commands, odometry, the operator's vibrations and panel)
 A phase is ``(seconds, how)``. ``how`` keys: ``grip`` (left grip held), ``left`` (left stick
 x, y), ``right`` (right stick x, y), ``rgrip`` (right grip held), ``move`` (the right
 controller's velocity, m/s in WebXR axes, while the phase lasts), ``a``, ``b`` (right A, B
-held), ``left_missing`` (no left controller), ``session`` ('new': another XR session from
+held), ``x``, ``y`` (left X, Y held: the episode's controls), ``left_missing`` (no left
+controller), ``session`` ('new': another XR session from
 this phase on), ``back`` (the phase's first frame goes this many frames back), ``gap`` (no
 frames for the phase: the input goes stale).
 """
@@ -85,7 +86,8 @@ def write_recording(path, phases):
             right['axes'] = [0.0, 0.0, float(rx), float(ry)]
             left = None
             if not how.get('left_missing'):
-                left = mf.hand(LEFT_POS, mf.yaw(0.0), bool(how.get('grip')))
+                left = mf.hand(LEFT_POS, mf.yaw(0.0), bool(how.get('grip')),
+                               a=bool(how.get('x')), b=bool(how.get('y')))
                 lx, ly = how.get('left', (0.0, 0.0))
                 left['axes'] = [0.0, 0.0, float(lx), float(ly)]
             lines.append(mf.line(i, right, mf.viewer(), seq=seq, session_id=session, left=left))
@@ -120,13 +122,14 @@ class BaseWatcher:
     def __init__(self, probe):
         self.probe = probe
         self.lock = threading.Lock()
-        self.states, self.cmds, self.stamped, self.odom = [], [], [], []
+        self.states, self.cmds, self.stamped, self.odom, self.gt = [], [], [], [], []
         self.haptics, self.panel = [], []
         node = probe.node
         node.create_subscription(BaseState, '/teleop/base/state', self._add('states'), QOS)
         node.create_subscription(Twist, '/cmd_vel', self._add('cmds'), QOS)
         node.create_subscription(TwistStamped, '/teleop/base/cmd_vel', self._add('stamped'), QOS)
         node.create_subscription(Odometry, '/odom', self._add('odom'), 50)
+        node.create_subscription(Odometry, '/ground_truth/odom', self._add('gt'), 50)
         node.create_subscription(Haptic, '/teleop/haptic', self._add('haptics'), QOS)
         node.create_subscription(OperatorStatus, '/teleop/operator/status', self._add('panel'),
                                  PANEL_QOS)

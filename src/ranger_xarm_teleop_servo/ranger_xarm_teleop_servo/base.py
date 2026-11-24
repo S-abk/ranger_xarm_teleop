@@ -41,7 +41,9 @@ Driving the base from the headset (G-19), as pure logic.
   runs; the arm's gate refuses the clutch while the left grip is held. The first to be held
   wins; both first held in one frame: neither moves. Teleop need not be armed to drive.
 * **Never by itself.** A start needs a press: the grip seen released, then held. After any
-  refusal or stop the grip must be released and pressed again.
+  refusal or stop the grip must be released and pressed again. A release and a frame without
+  the left controller in the same cycle stop the drive as a missing controller: the release is
+  used up, and the grip must be released once more before the next press.
 * **Tool speed in the room (optional).** With ``tool_speed_cap`` set, the whole command is
   scaled down (direction kept) so that the tool, at its measured position in the base frame,
   moves no faster than the cap in the room: a turn moves it at the turning rate times its
