@@ -89,6 +89,8 @@ TILT_LEVEL_ASSUMED = 2
 STABILITY_TILT_NAMES = {TILT_NONE: 'TILT_NONE', TILT_MEASURED: 'TILT_MEASURED',
                         TILT_LEVEL_ASSUMED: 'TILT_LEVEL_ASSUMED'}
 # The edge of the contact hull by the direction of its outward normal in the base frame.
+# Stream kinds that never fail an episode: no stream check of any kind applies to them.
+INFORMATION_KINDS = ('stability_state',)
 EDGE_NONE = 0
 EDGE_FRONT = 1
 EDGE_FRONT_LEFT = 2
@@ -759,7 +761,7 @@ def _smallest(st: Stream, key: str, edge_key: str, t0: float,
     return out
 
 
-def _stability_report(ep: Episode, t0: float) -> dict:
+def _stability_report(ep: Episode, ctx: _Context) -> dict:
     """
     Report the stability monitor's recorded state (information only: no reason, no flag).
 
@@ -767,7 +769,9 @@ def _stability_report(ep: Episode, t0: float) -> dict:
     ``share`` of the messages and ``by_reason`` counts per reason name); the smallest finite
     ``margin_m``, ``margin_pessimistic_m``, ``stop_margin_m`` (with the ``stop_decel_m_s2`` it
     assumed) and ``energy_reserve_j``, each with ``value``, ``edge`` (name, see EDGE_NAMES)
-    and ``time_s`` from ``t0`` (the episode's start); ``tilt_sources`` (counts per source name),
+    and ``time_s`` from the episode's start; ``rate_hz`` and ``max_gap_s`` of the messages in
+    the episode window (the largest gap includes the stretches before the first and after the
+    last message; information, never a reason); ``tilt_sources`` (counts per source name),
     ``level_floor_assumed`` (some message had no tilt source: its figure is for a level floor)
     and ``model_sha256`` (the distinct mass models, sorted). NaN figures are skipped. A
     message of a kind or field the stream lacks gives no entry for it.
@@ -776,7 +780,10 @@ def _stability_report(ep: Episode, t0: float) -> dict:
     if st is None or len(st) == 0:
         return {'recorded': False}
     n = len(st)
-    out: dict = {'recorded': True, 'n': n}
+    t0 = ctx.window[0]
+    window = _window_stats(np.asarray(st.stamp, dtype=float), ctx)
+    out: dict = {'recorded': True, 'n': n, 'rate_hz': window['rate_hz'],
+                 'max_gap_s': window['max_gap_s']}
     if 'available' in st.fields:
         unavailable = ~np.asarray(st.fields['available'], dtype=bool)
         by_reason: Dict[str, int] = {}
@@ -804,7 +811,10 @@ def stability_lines(section: dict) -> List[str]:
     """Return the report lines of a ``_stability_report`` section (for the command line)."""
     if not section.get('recorded'):
         return ['stability: not recorded']
-    lines = [f'stability: {section["n"]} messages']
+    rate, gap = section.get('rate_hz'), section.get('max_gap_s')
+    lines = [f'stability: {section["n"]} messages'
+             + (f', {rate:.1f} Hz' if rate is not None else '')
+             + (f', largest gap {gap:.2f} s' if gap is not None else '')]
     gone = section.get('unavailable')
     if gone:
         reasons = ', '.join(f'{k} {v}' for k, v in sorted(gone['by_reason'].items()))
@@ -940,6 +950,14 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     stream_reasons: List[str] = []
     domain: Dict[str, List[str]] = {}
     for name, spec in recorded(ep.profile).items():
+        if spec.get('kind') in INFORMATION_KINDS:
+            # Information only (a killed monitor must change nothing else): no rate, gap,
+            # offset or clock check, so no reason; see the ``stability`` section.
+            st = ep.get(name)
+            report['streams'][name] = {'present': st is not None and len(st) > 0,
+                                       'required': False, 'n': 0 if st is None else len(st),
+                                       'ok': True, 'problems': [], 'information_only': True}
+            continue
         report['streams'][name] = _check_stream(name, spec, ctx, stream_reasons, domain)
     if domain.get('robot'):
         reasons.append('ONE_HOST: robot-side streams on more than one clock: '
@@ -968,7 +986,7 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     reasons.extend(state_problems)
     report['rtf'] = _rtf_report(ep, flags)
     report['base'] = _base_report(ep, checks, flags)
-    report['stability'] = _stability_report(ep, ctx.window[0])
+    report['stability'] = _stability_report(ep, ctx)
     report['link'] = _link_report(ep, checks, flags)
 
     raised = {f['flag'] for f in flags}         # the checker's own judgement of the same flag wins

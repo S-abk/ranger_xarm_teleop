@@ -30,10 +30,11 @@ MSG = os.path.join(os.path.dirname(__file__), '..', '..', '..',
                    'ranger_xarm_teleop_interfaces', 'msg', 'StabilityState.msg')
 
 
-def with_stability(ep, rows=200, hz=50.0, **columns):
+def with_stability(ep, rows=200, hz=50.0, stamps=None, **columns):
     """Record the stability state in ``ep`` (rows from T0); ``columns`` override the defaults."""
     spec = ep.profile['streams']['stability_state']
-    stamp = T0 + np.arange(rows) / hz
+    stamp = T0 + np.arange(rows) / hz if stamps is None else T0 + np.asarray(stamps, dtype=float)
+    rows = len(stamp)
     fields = {
         'available': np.ones(rows, dtype=bool), 'reason': np.zeros(rows, dtype=int),
         'tilt_source': np.full(rows, 1), 'margin_m': np.full(rows, 0.30),
@@ -181,6 +182,36 @@ def test_the_section_is_information_only_it_changes_no_verdict_reason_or_flag():
     assert report['reasons'] == plain['reasons']
     assert report['flags'] == plain['flags']
     assert report['usable'] == plain['usable']
+
+
+def test_a_gap_or_a_stop_in_the_stream_fails_nothing_and_is_reported_as_information():
+    plain = checker.check_episode(synth.build(), CHECKS)
+    assert plain['verdict'] == 'PASS'
+    gap = np.concatenate([np.arange(50) / 50.0, 9.0 + np.arange(150) / 50.0])
+    halfway = np.arange(300) / 50.0                   # 6 s of the 12 s episode, then nothing
+    for stamps, largest in ((gap, 8.0), (halfway, 6.0)):
+        report = checker.check_episode(with_stability(synth.build(), stamps=stamps), CHECKS)
+        assert report['verdict'] == plain['verdict']
+        assert report['reasons'] == plain['reasons'] == []
+        assert report['flags'] == plain['flags']
+        assert report['usable'] == plain['usable']
+        out = report['stability']
+        assert out['max_gap_s'] == pytest.approx(largest, abs=0.05)
+        assert out['rate_hz'] is not None
+        assert any('largest gap' in line for line in checker.stability_lines(out))
+        assert report['streams']['stability_state']['ok'] is True
+
+
+def test_a_stream_on_another_clock_or_with_late_stamps_fails_nothing_either():
+    plain = checker.check_episode(synth.build(), CHECKS)
+    ep = with_stability(synth.build(), rows=600)
+    st = ep.streams['stability_state']
+    ep.streams['stability_state'] = Stream(
+        name=st.name, topic=st.topic, kind=st.kind, stamp=st.stamp + 5000.0,
+        recv=st.recv, fields=st.fields, labels=st.labels, has_header=True,
+        frame_id=st.frame_id)
+    report = checker.check_episode(ep, CHECKS)
+    assert report['verdict'] == plain['verdict'] and report['reasons'] == plain['reasons']
 
 
 def test_the_edge_and_reason_tables_match_the_message_definition():
