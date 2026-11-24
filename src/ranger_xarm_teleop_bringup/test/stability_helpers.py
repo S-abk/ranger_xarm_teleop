@@ -58,10 +58,6 @@ class LoadReference:
         self.contacts = {w: posed.contacts[w] for w in WHEELS}
         self.edges = st.support_polygon(list(self.contacts.values()))
         self.a, self.b = 1.0, 0.0
-        self.unsprung = {}
-        for w in WHEELS:
-            corner = w.replace('_wheel_link', '')
-            self.unsprung[w] = sum(b.mass for b in self.model.bodies if b.link.startswith(corner))
 
     def spring_force(self, positions: Dict[str, float]) -> np.ndarray:
         return np.array([self.springs[w].stiffness * (positions[self.joint(w)]
@@ -126,13 +122,17 @@ def judge(windows: List[dict], ref_t: np.ndarray, ref: np.ndarray, mon_t: np.nda
     """
     Judge every manoeuvre window by the frozen rule; return one row per window.
 
-    ``windows``: {'name', 'start', 'end', 'zero' (or None), 'judged' (bool)} in the same clock
-    as ``ref_t`` and ``mon_t`` (simulation time).
+    ``windows``: {'name', 'start', 'end', 'zero' (or None), 'speed' (the commanded speed; a
+    turn's at its wheels), 'judged' (bool)} in the same clock as ``ref_t`` and ``mon_t``
+    (simulation time). Each window ends after its own settling: no window reaches into the next.
     """
     rows = []
     for w in windows:
-        sel = (ref_t >= w['start']) & (ref_t <= w['end'] + 0.3)
+        sel = (ref_t >= w['start']) & (ref_t <= w['end'])
         if sel.sum() < 5:
+            rows.append({'name': w['name'], 'judged': w['judged'], 'loads_min': math.nan,
+                         'dev': math.nan, 'safer_anywhere': math.nan, 'pess_ok': True,
+                         'stop': None, 'problems': ['no reference in the window']})
             continue
         j = np.where(sel)[0][np.argmin(ref[sel])]
         near = (mon_t >= ref_t[j] - WINDOW_S) & (mon_t <= ref_t[j] + WINDOW_S)
@@ -144,25 +144,27 @@ def judge(windows: List[dict], ref_t: np.ndarray, ref: np.ndarray, mon_t: np.nda
             rows.append(row)
             continue
         row['dev'] = float(np.min(nominal[near]) - ref[j])
-        inside = (mon_t >= w['start']) & (mon_t <= w['end'] + 0.3)
+        inside = (mon_t >= w['start']) & (mon_t <= w['end'])
         row['pess_ok'] = bool(np.all(pessimistic[inside] <= nominal[inside] + 1e-9))
         on_ref = np.interp(ref_t[sel], mon_t[inside], nominal[inside]) if inside.sum() > 1 \
             else np.full(sel.sum(), np.nan)
         row['safer_anywhere'] = float(np.nanmax(on_ref - ref[sel]))
+        stop_judged = (w.get('zero') is not None and w['judged']
+                       and w.get('speed', math.inf) <= STOP_JUDGED_UP_TO)
         if w.get('zero') is not None:
             before = (mon_t >= w['zero'] - 0.06) & (mon_t <= w['zero'])
             after = (ref_t >= w['zero']) & (ref_t <= w['end'])
             if before.any() and after.any():
-                v = float(max(np.max(speed[before]),
-                              np.max(np.abs(turn[before])) * TURN_WHEEL_RADIUS))
-                row['stop'] = (v, float(np.min(stop[before]) - np.min(ref[after])))
+                row['stop'] = (w.get('speed', math.nan),
+                               float(np.min(stop[before]) - np.min(ref[after])))
+            elif stop_judged:
+                row['problems'].append('no stop figure before the zero')
         if w['judged']:
             if not (-LOWER <= row['dev'] <= SAFER):
                 row['problems'].append(f'figure {row["dev"]:+.3f} m from the loads')
             if not row['pess_ok']:
                 row['problems'].append('pessimistic above nominal')
-            if row['stop'] and row['stop'][0] <= STOP_JUDGED_UP_TO \
-                    and not (-LOWER <= row['stop'][1] <= SAFER):
+            if stop_judged and row['stop'] and not (-LOWER <= row['stop'][1] <= SAFER):
                 row['problems'].append(f'stop figure {row["stop"][1]:+.3f} m from the loads')
         rows.append(row)
     return rows

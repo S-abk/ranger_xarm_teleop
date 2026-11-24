@@ -739,15 +739,19 @@ only**: refused outside simulation, and no figure for a description that is not 
 **Information only**: the stability node publishes its own state and nothing reads it to decide
 a command, a hold or a refusal; stopped, killed or never started, it changes nothing else. It
 **does not see a force on the tool** (the arm or the tool caught on something while the base
-drives): the arm reports no joint effort.
+drives): the arm reports no joint effort. Nor does it see the ground: it puts every wheel's
+contact under the wheel on a plane, so a wheel climbing a step, whose load then acts at the
+step's edge up to sqrt(2 r s - s^2) ahead of the axle (6 cm for a 0.1 m wheel on a 2 cm step),
+shrinks the real support by that much unseen (in simulation it then read up to 0.027 m safer
+than the wheels' loads).
 
 - **The figure:** the signed distance (m) from the point where the floor's reaction acts (the
   centre of pressure) to the nearest edge of the wheel contacts, with that edge named; negative
   is past it. On a level floor at rest it is the distance from the point under the centre of
   mass to that edge. It weighs every body of the robot description at the measured joints, with
-  the base's acceleration, the turn, the body's own rocking on its springs and each arm body's
-  own acceleration, all taken from the IMU's linear acceleration and angular rate (its
-  orientation is never read) carried to every body.
+  the base's acceleration, the turn and the body's own rocking on its springs, taken from the
+  IMU's linear acceleration and angular rate carried to every body (its orientation is never
+  read), and each arm body's own acceleration, from the joint states.
 - **Nominal and pessimistic:** the pessimistic figure is the worst over the mass file's bounds.
 - **If the base stopped now:** the figure through a stop from the present motion at
   `stop_decel_m_s2` (carried in the state), amplified by the springs, and never above the

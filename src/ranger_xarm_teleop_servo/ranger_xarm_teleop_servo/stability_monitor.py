@@ -74,6 +74,9 @@ NOTE = 'does not see a force on the tool'
 # which then settle again before a figure is published: differences across a gap are not rates.
 GAP_S = 0.1
 
+# How many of its time constants the tilt filter needs after a (re)start before a figure.
+TILT_SETTLE_TAUS = 3.0
+
 # The stop figure's memory of the present figure never spans more than this (a body with no
 # spring stiffness left would otherwise remember for ever).
 MAX_RING_MEMORY_S = 3.0
@@ -302,11 +305,12 @@ class Monitor:
         self.imu_arrival = arrival
 
     def _imu_settled(self) -> bool:
-        # The rates settle in a few of their time constants; the tilt filter, started from the
-        # accelerometer alone, in its own time constant.
+        # The rates settle in a few of their time constants. The tilt filter, started from the
+        # accelerometer alone (which also feels the base's acceleration), in three of its own:
+        # an error at the start has then fallen to 5 %.
         return (self.tilt.down is not None and self.alpha.value is not None
-                and self.imu_stamp - self.imu_first_stamp >= max(self.settle_s,
-                                                                 self.config.tilt_tau_s))
+                and self.imu_stamp - self.imu_first_stamp
+                >= max(self.settle_s, TILT_SETTLE_TAUS * self.config.tilt_tau_s))
 
     # ---------------------------------------------------------------- the cycle
     def cycle(self, now: float) -> Result:
@@ -438,6 +442,8 @@ class Monitor:
         # the stop is never above the present figure's minimum over the last period of the
         # body's slowest mode (at the softest springs).
         memory = self.ring_period(posed, worst_sprung)
+        if not math.isfinite(memory):
+            memory = MAX_RING_MEMORY_S
         self._recent.append((now, nominal.margin, nominal.edge, pess[0], pess[1]))
         while self._recent and self._recent[0][0] < now - memory:
             self._recent.popleft()
@@ -473,8 +479,17 @@ class Monitor:
         """
         down_body = st.gravity_vectors(len(posed.masses), np.array([0.0, 0.0, -st.G]))
         heaviest, lightest = float(arrays['mass_high'].sum()), float(arrays['mass_low'].sum())
-        c = (posed.masses[:, None] * posed.positions).sum(axis=0) / posed.masses.sum()
-        height = c[2] - posed.plane_z + float(arrays['com_bound'].max(initial=0.0))
+        # The highest the centre of mass can be within the bounds: the masses at the end of
+        # their bound that raises it (a threshold, as for the figure), plus the largest bound.
+        z = posed.positions[:, 2] - posed.plane_z
+        height = float((posed.masses * z).sum() / posed.masses.sum())
+        for _ in range(100):
+            m = np.where(z > height, arrays['mass_high'], arrays['mass_low'])
+            new = float((m * z).sum() / m.sum())
+            if abs(new - height) < 1e-12:
+                break
+            height = new
+        height += float(arrays['com_bound'].max(initial=0.0))
         yaw = st.yaw_inertia(posed.positions, posed.masses, posed.inertias)
         ke = st.kinetic_energy(heaviest, velocity, wz, yaw * heaviest / posed.masses.sum())
         best = None
@@ -517,8 +532,11 @@ class Monitor:
         c_mode = float((damp * (coords[:, axis] - centre) ** 2).sum())
         sprung = self._derived['sprung']
         p = posed.positions[sprung]
-        scale = (np.ones(len(posed.masses)) if masses is None
-                 else np.asarray(masses) / posed.masses)[sprung]
+        scale = np.ones(len(posed.masses))
+        if masses is not None:          # a body of no mass keeps scale 1 (its own inertia is 0)
+            np.divide(np.asarray(masses, dtype=float), posed.masses, out=scale,
+                      where=posed.masses > 0.0)
+        scale = scale[sprung]
         m = posed.masses[sprung] * scale
         about = 1 - axis                    # pitch turns about y, roll about x
         inertia = float((m * ((p[:, axis] - centre) ** 2 + (p[:, 2] - posed.plane_z) ** 2)).sum()

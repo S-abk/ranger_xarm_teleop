@@ -205,7 +205,7 @@ def test_the_node_publishes_its_state_only_and_asks_nothing(rig):
 
 def test_a_figure_at_rest_from_the_wheeled_description(rig):
     r = rig()
-    s = r.run(4.0)
+    s = r.run(9.5)
     assert s.available and s.reason == StabilityState.REASON_OK, s.reason_text
     assert s.tilt_source == StabilityState.TILT_MEASURED
     assert s.margin_m == pytest.approx(0.1835, abs=0.003)          # stage 1: 0.1837 static
@@ -217,8 +217,8 @@ def test_a_figure_at_rest_from_the_wheeled_description(rig):
 
 
 def test_the_imus_orientation_is_never_read(rig):
-    a = rig().run(4.0)
-    b = rig().run(4.0, orientation=(math.nan, 5.0, -3.0, math.nan))
+    a = rig().run(9.5)
+    b = rig().run(9.5, orientation=(math.nan, 5.0, -3.0, math.nan))
     assert b.available and b.margin_m == a.margin_m and b.roll_deg == a.roll_deg
 
 
@@ -235,13 +235,13 @@ def test_a_robot_that_is_not_a_simulator_gets_no_figure(rig):
     ({'imu': False}, StabilityState.REASON_NO_TILT),
 ])
 def test_one_missing_input_is_unavailable_with_its_reason(rig, kw, reason):
-    s = rig().run(4.0, **kw)
+    s = rig().run(9.5, **kw)
     assert not s.available and s.reason == reason and math.isnan(s.margin_m)
     assert s.reason_text
 
 
 def test_no_tilt_says_how_the_simulator_bridges_its_imu(rig):
-    s = rig().run(4.0, imu=False)
+    s = rig().run(9.5, imu=False)
     assert 'sensors:=true' in s.reason_text
 
 
@@ -252,7 +252,7 @@ def test_no_tilt_says_how_the_simulator_bridges_its_imu(rig):
 ])
 def test_an_input_going_stale_is_unavailable(rig, kw, reason):
     r = rig()
-    assert r.run(4.0).available
+    assert r.run(9.5).available
     s = r.run(0.6, **kw)
     assert not s.available and s.reason == reason
 

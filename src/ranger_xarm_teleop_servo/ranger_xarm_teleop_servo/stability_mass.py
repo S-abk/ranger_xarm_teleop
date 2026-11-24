@@ -120,7 +120,8 @@ def _keys(section, allowed, where: str, required=()) -> dict:
     return section
 
 
-def _bound(section, where: str, default_value: Optional[float], value_required: bool) -> Bound:
+def _bound(section, where: str, default_value: Optional[float], value_required: bool,
+           positive: bool = False) -> Bound:
     _keys(section, ('value', 'plus', 'minus'), where,
           required=('plus', 'minus') + (('value',) if value_required else ()))
     value = _number(section['value'], f'{where}.value') if 'value' in section else default_value
@@ -130,6 +131,9 @@ def _bound(section, where: str, default_value: Optional[float], value_required: 
     minus = _number(section['minus'], f'{where}.minus')
     if minus > value:
         raise MassFileError(f'{where}: minus {minus:g} exceeds the value {value:g}')
+    if positive and not value - minus > 0.0:
+        raise MassFileError(f'{where}: a mass and its lower bound must stay above 0 (value '
+                            f'{value:g}, minus {minus:g})')
     return Bound(value, plus, minus)
 
 
@@ -181,7 +185,7 @@ def parse(data, model: RobotModel, simulation: bool) -> MassModel:
         if b.link in corrections:
             where = f'bodies.{b.link}'
             entry = _keys(corrections[b.link], ('mass', 'com'), where, required=('mass', 'com'))
-            mass = _bound(entry['mass'], f'{where}.mass', b.mass, False)
+            mass = _bound(entry['mass'], f'{where}.mass', b.mass, False, positive=True)
             com, com_bound = _com(entry['com'], f'{where}.com', b.com, False)
             bodies.append(UncertainBody(Body(b.name, b.link, mass.value, com, b.inertia), mass,
                                         com_bound))
@@ -201,7 +205,7 @@ def parse(data, model: RobotModel, simulation: bool) -> MassModel:
         if entry['parent'] not in model.links:
             raise MassFileError(f'{where}.parent: {entry["parent"]!r} is not a link of the '
                                 'description')
-        mass = _bound(entry['mass'], f'{where}.mass', None, True)
+        mass = _bound(entry['mass'], f'{where}.mass', None, True, positive=True)
         com, com_bound = _com(entry['com'], f'{where}.com', None, True)
         inertia = np.zeros((3, 3))
         if 'inertia' in entry:

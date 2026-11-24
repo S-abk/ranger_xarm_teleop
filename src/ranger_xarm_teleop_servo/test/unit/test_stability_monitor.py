@@ -30,7 +30,7 @@ G = st.G
 JOINTS = ['arm_joint1', 'arm_joint2']
 STEER = [f'{c}_steer_joint' for c in ('front_left', 'front_right', 'rear_left', 'rear_right')]
 IMU_POS = np.array([-0.3, 0.0, 1.1])
-WARM = 3.5                  # the tilt filter settles in its tau (3 s) after the IMU starts
+WARM = 9.5                  # the tilt filter settles in three of its tau (3 s) after a start
 
 
 def config(tilt=True, **kw):
@@ -467,3 +467,114 @@ def test_without_a_tilt_source_the_centre_of_mass_bound_lowers_the_pessimistic_f
         t = feed(mon, 0.0, 1.0, imu=False)
         figures.append(mon.cycle(t).margin_pessimistic)
     assert figures[1] < figures[0] - 0.03                 # the bound itself, and the lean it adds
+
+
+def test_the_tilt_filter_needs_three_of_its_time_constants_after_a_start():
+    mon = ready()
+    t = feed(mon, 0.0, 3.0 * 3.0 - 0.2)
+    assert mon.cycle(t).reason == sm.NO_TILT
+    t = feed(mon, t, 0.4)
+    assert mon.cycle(t).available
+
+
+def test_after_a_gap_the_tilt_starts_again_from_the_accelerometer():
+    mon = ready()
+    t = feed(mon, 0.0, WARM)
+    old = mon.tilt
+    t = feed(mon, t, 0.3, imu=False)
+    th = math.radians(5.0)
+    f = (0.0, -G * math.sin(th), G * math.cos(th))
+    feed(mon, t, 0.02, f=f)
+    assert mon.tilt is not old and mon.imu_restarts == 1
+    assert mon.tilt.down == pytest.approx(-np.array(f) / G, abs=1e-3)
+
+
+def test_a_body_of_no_mass_is_refused_in_the_mass_file():
+    mon = ready()
+    data = copy.deepcopy(MASS_FILE)
+    data['bodies']['chassis']['mass'] = {'value': 0.0, 'plus': 0.0, 'minus': 0.0}
+    mon.set_mass_data(data)
+    assert mon.cycle(0.0).reason == sm.MASS_FILE_REFUSED
+    data['bodies']['chassis']['mass'] = {'value': 4.0, 'plus': 0.0, 'minus': 4.0}
+    mon.set_mass_data(data)
+    assert mon.cycle(0.0).reason == sm.MASS_FILE_REFUSED
+
+
+def test_the_pessimistic_modes_use_the_heavier_masses_and_five_stiffnesses():
+    mon = ready()
+    t = feed(mon, 0.0, WARM)
+    mon.cycle(t)
+    k = mon.mass.stiffness
+    expect = [v / 20000.0 for v in (k.low, (k.low + k.value) / 2, k.value,
+                                    (k.value + k.high) / 2, k.high)]
+    assert [kf for kf, _ in mon._derived['corners']['all']] == pytest.approx(expect)
+    assert all(cf == pytest.approx(mon.mass.damping.low / 500.0)
+               for _, cf in mon._derived['corners']['all'])
+    posed = mon.model.pose({n: v for n, (v, _) in mon.joints.items()}, mon.mass.nominal_bodies)
+    arrays = smass.as_arrays(mon.mass)
+    sprung = mon._sprung(posed, arrays['mass'])
+    light = mon._modes(posed, sprung, 1.0, 1.0)
+    heavy = mon._modes(posed, sprung, 1.0, 1.0, arrays['mass_high'])
+    assert heavy[1][1] > light[1][1] and heavy[1][2] > light[1][2]   # more overshoot, longer
+
+
+def test_the_energy_reserve_formula_with_the_bounds():
+    mon = ready()
+    t = feed(mon, 0.0, WARM, v=(0.0, 0.25, 0.0))
+    r = mon.cycle(t)
+    posed = mon.model.pose({n: v for n, (v, _) in mon.joints.items()}, mon.mass.nominal_bodies)
+    arrays = smass.as_arrays(mon.mass)
+    edges = st.support_polygon(list(posed.contacts.values()))
+    left = [e for e in edges if e.name == 'left'][0]
+    d0, _ = st.pessimistic_margin(posed.positions, posed.masses, arrays['mass_low'],
+                                  arrays['mass_high'], arrays['com_bound'],
+                                  st.gravity_vectors(len(posed.masses),
+                                                     np.array([0.0, 0.0, -G])),
+                                  posed.plane_z, [left])
+    z = posed.positions[:, 2] - posed.plane_z
+    best = -math.inf
+    for i in range(len(z)):                               # the highest weighted mean, by brute
+        m = np.where(z >= z[i], arrays['mass_high'], arrays['mass_low'])
+        best = max(best, float((m * z).sum() / m.sum()))
+    h = best + arrays['com_bound'].max()
+    tip = arrays['mass_low'].sum() * G * (math.hypot(d0, h) - h)
+    yaw = st.yaw_inertia(posed.positions, posed.masses, posed.inertias)
+    ke = st.kinetic_energy(arrays['mass_high'].sum(), np.array([0.0, 0.25]), 0.0, yaw)
+    assert r.energy_reserve == pytest.approx(tip - ke, abs=0.05)
+
+
+def test_without_a_tilt_source_the_bound_also_leans_the_body():
+    figures = []
+    for com in (0.0, 0.03):
+        mon = ready(tilt=False)
+        data = copy.deepcopy(MASS_FILE)
+        data['default_uncertainty']['com_m'] = com
+        data['bodies']['chassis']['com']['bound'] = com
+        mon.set_mass_data(data)
+        t = feed(mon, 0.0, 1.0, imu=False)
+        figures.append(mon.cycle(t).margin_pessimistic)
+    # More than the bound itself: the shifted centre of mass leans the body on the soft springs.
+    assert figures[0] - figures[1] > 0.03 * 1.08
+
+
+def test_the_pessimistic_stop_takes_the_heavier_masses_ring():
+    mon = ready()
+    t = feed(mon, 0.0, WARM, v=(0.0, 0.25, 0.0))
+    r = mon.cycle(t)
+    posed = mon.model.pose({n: v for n, (v, _) in mon.joints.items()}, mon.mass.nominal_bodies)
+    arrays = smass.as_arrays(mon.mass)
+    edges = st.support_polygon(list(posed.contacts.values()))
+    worst = (mon._sprung(posed, arrays['mass_high'])[0],
+             mon._sprung(posed, arrays['mass'])[1] + arrays['com_bound'].max())
+    expect = math.inf
+    for kf, cf in mon._derived['corners']['all']:
+        (ax, ox, _), (ay, oy, _) = mon._modes(posed, worst, kf, cf, arrays['mass_high'])
+        for fx, fy in ((ax * (1 + ox), ay * (1 + oy)), (-ax * ox, -ay * oy)):
+            w = st.stop_vectors(posed.positions, st.G * mon.tilt.down, np.array([0.0, 0.25]),
+                                0.0, 1.0, 3.5, fx, fy)
+            m, _ = st.pessimistic_margin(posed.positions, posed.masses, arrays['mass_low'],
+                                         arrays['mass_high'], arrays['com_bound'], w,
+                                         posed.plane_z, edges)
+            expect = min(expect, m)
+    assert r.stop_margin_pessimistic == pytest.approx(min(expect, r.margin_pessimistic,
+                                                          r.stop_margin), abs=1e-9)

@@ -100,9 +100,9 @@ class Recorder:
             self.states.append((stamp(m.header), time.monotonic(), m))
 
     def _gt(self, m):
-        p = m.pose.pose.position
+        p, q = m.pose.pose.position, m.pose.pose.orientation
         with self.lock:
-            self.gt.append((stamp(m.header), p.x, p.y))
+            self.gt.append((stamp(m.header), p.x, p.y, q.x, q.y, q.z, q.w))
 
     def _cmd(self, m):
         with self.lock:
@@ -121,7 +121,19 @@ class Recorder:
 
     def position(self):
         with self.lock:
-            return self.gt[-1][1:] if self.gt else None
+            return self.gt[-1][1:3] if self.gt else None
+
+    def down_between(self, t0, t1):
+        """Return the mean direction of gravity in the body (ground truth) over [t0, t1]."""
+        with self.lock:
+            rows = [g for g in self.gt if t0 <= g[0] <= t1]
+        downs = []
+        for _, _, _, x, y, z, w in rows:
+            # The world's -z in body axes: minus the third row of the rotation matrix.
+            downs.append(-np.array([2 * (x * z - y * w), 2 * (y * z + x * w),
+                                    1 - 2 * (x * x + y * y)]))
+        d = np.mean(downs, axis=0)
+        return d / np.linalg.norm(d)
 
     def last_state(self):
         with self.lock:
@@ -231,6 +243,7 @@ def posture(stack, name, rest=2.0):
 
 
 def drive(stack, vx, vy, wz, hold, label, zero=True, ramp=None, judged=True):
+    speed = max(math.hypot(vx, vy), abs(wz) * sh.TURN_WHEEL_RADIUS)
     """Command the base directly (stepped, or ramped at ``ramp``), hold, then stop."""
     rec, pub = stack['rec'], stack['pub']
     t0 = rec.now()
@@ -249,7 +262,7 @@ def drive(stack, vx, vy, wz, hold, label, zero=True, ramp=None, judged=True):
     tz = rec.now()
     rec.sleep(3.0 if zero else 4.0)
     stack['windows'].append({'name': label, 'start': t0, 'end': rec.now(), 'zero': tz,
-                             'judged': judged})
+                             'speed': speed, 'judged': judged})
 
 
 def crab_to(stack, y_target, speed=0.15, accel=0.15, label=''):
@@ -294,7 +307,7 @@ def test_the_figure_agrees_with_the_wheels_loads(stack):
         sel = [s for s in susp if t0 <= s[0] <= t1]
         mean = {j: float(np.mean([s[1][j] for s in sel])) for j in sel[0][1]}
         q = dict(zip(ARM, POSTURES[name]))
-        cop, weight = sh.model_cop_at_rest(urdf, q, np.array([0.0, 0.0, -1.0]))
+        cop, weight = sh.model_cop_at_rest(urdf, q, rec.down_between(t0, t1))
         calibration.append((mean, cop, weight))
     reference = sh.LoadReference(urdf, {})
     worst = reference.calibrate(calibration)
@@ -312,12 +325,15 @@ def test_the_figure_agrees_with_the_wheels_loads(stack):
     play(stack, 'release_drive', [phase(0.4), phase(1.5, grip=True, left=FORWARD), phase(3.0)])
     with rec.lock:
         cmds = [c for c in rec.cmds if c[0] >= t0]
-    moving = [c for c in cmds if abs(c[1]) > 0.01]
-    zeros = [c[0] for c in cmds if moving and c[0] > moving[-1][0] and c[1:] == (0.0,) * 3]
-    zero = zeros[0] if zeros else None
+    # The zero is the first all-zero command after the last moving one, in arrival order (the
+    # two can share a simulation stamp).
+    last_moving = max((i for i, c in enumerate(cmds) if abs(c[1]) > 0.01), default=None)
+    moving = last_moving is not None
+    zero = next((c[0] for c in cmds[(last_moving or 0) + 1:] if c[1:] == (0.0,) * 3), None) \
+        if moving else None
     assert moving and zero is not None, 'the base node did not drive and stop'
     stack['windows'].append({'name': 'release through the stack 0.2', 'start': t0,
-                             'end': rec.now(), 'zero': zero, 'judged': True})
+                             'end': rec.now(), 'zero': zero, 'speed': 0.2, 'judged': True})
 
     # From here the test commands the base itself (the base node now refuses: a second
     # publisher of the base command, G-9).
@@ -385,8 +401,8 @@ def test_the_figure_agrees_with_the_wheels_loads(stack):
         handle.write('\n'.join(table) + '\n')
     note(stack, '\n'.join(table))
     failed = [(r['name'], r['problems']) for r in rows if r['problems']]
+    assert len(rows) == len(stack['windows'])
     assert not failed, failed
-    assert len(rows) >= 30
 
 
 def test_a_recorded_episode_carries_the_monitor_and_its_model(stack):
@@ -415,29 +431,63 @@ def test_a_recorded_episode_carries_the_monitor_and_its_model(stack):
 
 
 def test_killed_the_monitor_changes_nothing_else_and_never_lengthened_the_cycle(stack):
-    """INV-2 in Gazebo: the teleop node's period with the monitor, then without it."""
-    probe, teleop = stack['probe'], stack['teleop']
+    """
+    INV-2 in Gazebo: the teleop node's period with the monitor, without it, and across its start.
 
-    def periods(seconds):
+    Each measure lasts 20 s with the base driving back and forth (the monitor busy). The start:
+    after the kill, a new monitor with the same settings joins the running graph (by design it
+    starts with the stack, before arming; this measures a join at its worst, mid-session).
+    """
+    probe, teleop, rec = stack['probe'], stack['teleop'], stack['rec']
+    pub = stack.get('pub') or probe.node.create_publisher(Twist, '/cmd_vel', 10)
+
+    def periods(seconds, during=None):
         t0 = time.monotonic()
-        time.sleep(seconds)
+        k = 0
+        while time.monotonic() - t0 < seconds:
+            m = Twist()
+            m.linear.x = 0.2 if (k // 100) % 2 == 0 else -0.2       # 2 s each way
+            pub.publish(m)
+            if during is not None and k == 50:
+                during()
+            k += 1
+            time.sleep(0.02)
+        pub.publish(Twist())
         with probe.lock:
             arrivals = [t for t, _ in probe.states if t >= t0]
         d = np.diff(arrivals) * 1e3
         return np.percentile(d, 50), np.percentile(d, 99), d.max(), len(arrivals) / seconds
+
+    def text(name, p):
+        return f'{name} {p[0]:.1f}/{p[1]:.1f}/{p[2]:.1f} ms, {p[3]:.1f}/s'
 
     with_monitor = periods(20.0)
     os.kill(node_pid({'launch': teleop}, 'stability_node'), signal.SIGKILL)
     probe.wait_for(lambda: '/stability_node' not in graph_nodes(probe, settle=0.5), 40.0,
                    'discovery to drop the killed monitor')
     without = periods(20.0)
-    text = ('teleop state period (ms) p50/p99/max, rate: with the monitor '
-            f'{with_monitor[0]:.1f}/{with_monitor[1]:.1f}/{with_monitor[2]:.1f}, '
-            f'{with_monitor[3]:.1f}/s; without {without[0]:.1f}/{without[1]:.1f}/'
-            f'{without[2]:.1f}, {without[3]:.1f}/s')
-    note(stack, text)
+    params = os.path.join(SHARE, 'config', 'stability_SIMULATION_ONLY.yaml')
+    started = []
+
+    def start():
+        started.append(Process(['ros2', 'run', 'ranger_xarm_teleop_servo', 'stability_node',
+                                '--ros-args', '--params-file', params, '-p',
+                                f'mass_file:={SIM_MASS_FILE}', '-p', 'use_sim_time:=true'],
+                               stack['env'], str(stack['logs'] / 'stability_restart.log')))
+    try:
+        joining = periods(15.0, during=start)
+        rec.sleep(1.0)
+        assert rec.last_state() is not None
+    finally:
+        for p in started:
+            p.stop()
+    line = ('teleop state period p50/p99/max, rate, the base driving: ' +
+            '; '.join([text('with the monitor', with_monitor), text('without', without),
+                       text('across a monitor joining', joining)]))
+    note(stack, line)
     with open(stack['logs'] / 'inv2.txt', 'w', encoding='utf-8') as handle:
-        handle.write(text + '\n')
-    assert abs(with_monitor[0] - without[0]) < 2.0
-    assert with_monitor[1] <= without[1] * 1.5 + 5.0
+        handle.write(line + '\n')
+    assert abs(with_monitor[0] - without[0]) < 1.0
+    assert with_monitor[1] <= without[1] + 2.0 and with_monitor[2] <= without[2] + 5.0
+    assert joining[1] <= without[1] + 2.0 and joining[2] <= without[2] + 5.0
     assert probe.state() is not None and time.monotonic() - probe.states[-1][0] < 0.5
