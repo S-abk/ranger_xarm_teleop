@@ -135,7 +135,8 @@ def judge(windows: List[dict], ref_t: np.ndarray, ref: np.ndarray, mon_t: np.nda
                          'stop': None, 'problems': ['no reference in the window']})
             continue
         j = np.where(sel)[0][np.argmin(ref[sel])]
-        near = (mon_t >= ref_t[j] - WINDOW_S) & (mon_t <= ref_t[j] + WINDOW_S)
+        near = ((mon_t >= max(ref_t[j] - WINDOW_S, w['start']))
+                & (mon_t <= min(ref_t[j] + WINDOW_S, w['end'])))
         row = {'name': w['name'], 'judged': w['judged'], 'loads_min': float(ref[j]),
                'dev': math.nan, 'safer_anywhere': math.nan, 'pess_ok': True, 'stop': None,
                'problems': []}
@@ -150,12 +151,12 @@ def judge(windows: List[dict], ref_t: np.ndarray, ref: np.ndarray, mon_t: np.nda
             else np.full(sel.sum(), np.nan)
         row['safer_anywhere'] = float(np.nanmax(on_ref - ref[sel]))
         stop_judged = (w.get('zero') is not None and w['judged']
-                       and w.get('speed', math.inf) <= STOP_JUDGED_UP_TO)
+                       and w['speed'] <= STOP_JUDGED_UP_TO)         # a stop names its speed
         if w.get('zero') is not None:
             before = (mon_t >= w['zero'] - 0.06) & (mon_t <= w['zero'])
             after = (ref_t >= w['zero']) & (ref_t <= w['end'])
             if before.any() and after.any():
-                row['stop'] = (w.get('speed', math.nan),
+                row['stop'] = (w['speed'],
                                float(np.min(stop[before]) - np.min(ref[after])))
             elif stop_judged:
                 row['problems'].append('no stop figure before the zero')

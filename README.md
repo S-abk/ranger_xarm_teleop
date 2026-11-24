@@ -738,12 +738,15 @@ Off unless the stack is launched with `stability:=true` (default false), and **s
 only**: refused outside simulation, and no figure for a description that is not a simulator's.
 **Information only**: the stability node publishes its own state and nothing reads it to decide
 a command, a hold or a refusal; stopped, killed or never started, it changes nothing else. It
+starts with the stack, before arming; do not start it on its own mid-session: a process joining
+the running graph stalled the teleop node's cycle for up to 390 ms in simulation. It
 **does not see a force on the tool** (the arm or the tool caught on something while the base
 drives): the arm reports no joint effort. Nor does it see the ground: it puts every wheel's
-contact under the wheel on a plane, so a wheel climbing a step, whose load then acts at the
-step's edge up to sqrt(2 r s - s^2) ahead of the axle (6 cm for a 0.1 m wheel on a 2 cm step),
-shrinks the real support by that much unseen (in simulation it then read up to 0.027 m safer
-than the wheels' loads).
+contact under the wheel on a plane. A wheel climbing a step carries its load at the step's
+edge, up to sqrt(2 r s - s^2) ahead of the axle (6 cm for a 0.1 m wheel on a 2 cm step); when
+that wheel climbs toward the robot's centre (a rear wheel going forward), the real support
+shrinks by that much unseen (in simulation the figure then read up to 0.027 m safer than the
+wheels' loads).
 
 - **The figure:** the signed distance (m) from the point where the floor's reaction acts (the
   centre of pressure) to the nearest edge of the wheel contacts, with that edge named; negative
@@ -761,6 +764,9 @@ than the wheels' loads).
   base's stop is unmeasured; the simulated controller also halts after 0.3 s and swings its
   steering back in a sideways stop, which the stop figure does not model (above 0.25 m/s it
   read up to 0.16 m safer than the wheel loads in simulation).
+- **Settling:** after the monitor starts, or after a gap of more than 0.1 s in the IMU or the
+  joints, its filters start again; the tilt filter needs three of its time constants (about 9 s
+  with the simulation settings), and the state says "settling" until then.
 - **Tilt source:** an IMU on `tilt_topic`. Gazebo bridges its IMU only when started with
   `sensors:=true`; without it the state says "no tilt" and names that argument. With no tilt
   source configured, a figure only while the base is at rest ("level floor assumed", the

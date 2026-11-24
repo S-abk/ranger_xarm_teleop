@@ -578,3 +578,29 @@ def test_the_pessimistic_stop_takes_the_heavier_masses_ring():
             expect = min(expect, m)
     assert r.stop_margin_pessimistic == pytest.approx(min(expect, r.margin_pessimistic,
                                                           r.stop_margin), abs=1e-9)
+
+
+def test_a_body_of_no_mass_in_the_description_gives_a_figure_and_a_bounded_memory():
+    mon = sm.Monitor(config(), simulation=True)
+    mon.set_description(make_urdf().replace('<mass value="0.1"/>', '<mass value="0.0"/>'))
+    data = copy.deepcopy(MASS_FILE)
+    mon.set_mass_data(data)
+    mon.set_imu_frame(np.eye(3), IMU_POS)
+    assert 0.0 in [b.mass for b in mon.model.bodies]
+    t = feed(mon, 0.0, WARM, v=(0.0, 0.25, 0.0))
+    r = mon.cycle(t)
+    assert r.available and math.isfinite(r.stop_margin_pessimistic)
+    for i in range(500):
+        t = feed(mon, t, 0.01, v=(0.0, 0.25, 0.0))
+        mon.cycle(t)
+    assert len(mon._recent) <= sm.MAX_RING_MEMORY_S / 0.01 + 2
+
+
+def test_an_added_body_of_no_mass_is_refused():
+    mon = ready()
+    data = copy.deepcopy(MASS_FILE)
+    data['added'] = {'carried': {'parent': 'arm_link2', 'mass': {'value': 0.0, 'plus': 0.1,
+                                                                 'minus': 0.0},
+                                 'com': {'value': [0.0, 0.0, 0.0], 'bound': 0.0}}}
+    mon.set_mass_data(data)
+    assert mon.cycle(0.0).reason == sm.MASS_FILE_REFUSED
