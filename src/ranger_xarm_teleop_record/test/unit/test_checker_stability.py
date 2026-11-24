@@ -197,6 +197,18 @@ def test_the_edge_and_reason_tables_match_the_message_definition():
     assert tilts == checker.STABILITY_TILT_NAMES
 
 
+def test_the_edge_names_are_those_of_the_monitor():
+    from ranger_xarm_teleop_servo import stability
+    assert tuple(checker.EDGE_NAMES[i] for i in range(1, 9)) == tuple(stability.EDGE_NAMES)
+
+
+def test_the_lines_survive_a_stop_figure_whose_deceleration_was_not_finite():
+    out = {'recorded': True, 'n': 1, 'margin_m': None,
+           'stop_margin_m': {'value': 0.1, 'edge': 'front', 'time_s': 0.0,
+                             'stop_decel_m_s2': None}}
+    assert any('stop_margin_m' in line for line in checker.stability_lines(out))
+
+
 def test_an_edge_number_outside_the_table_is_named_not_dropped():
     assert checker.edge_name(3) == 'left'
     assert checker.edge_name(99) == 'unknown 99'

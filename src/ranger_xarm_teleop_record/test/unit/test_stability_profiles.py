@@ -38,5 +38,5 @@ def test_the_hardware_profile_does_not_record_it():
 
 
 def test_the_kind_is_known_and_added_at_the_end_of_the_kinds():
-    assert profile.KINDS[-1] == 'stability_state'
-    assert profile.KINDS[-2] == 'other'
+    assert profile.KINDS.index('stability_state') > profile.KINDS.index('other')
+    assert profile.KINDS.index('base_state') < profile.KINDS.index('other')

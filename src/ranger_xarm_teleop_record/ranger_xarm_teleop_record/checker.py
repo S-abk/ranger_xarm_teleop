@@ -816,8 +816,8 @@ def stability_lines(section: dict) -> List[str]:
         if found is None:
             lines.append(f'  smallest {key}: no finite value')
             continue
-        extra = (f', assuming a stop at {found["stop_decel_m_s2"]:g} m/s^2'
-                 if 'stop_decel_m_s2' in found else '')
+        decel = found.get('stop_decel_m_s2')       # None when it was not finite (jsonable)
+        extra = f', assuming a stop at {decel:g} m/s^2' if decel is not None else ''
         lines.append(f'  smallest {key}: {found["value"]:.4f} {unit} at the {found["edge"]} '
                      f'edge, {found["time_s"]:.2f} s from the start{extra}')
     sources = section.get('tilt_sources') or {}

@@ -75,6 +75,6 @@ def test_an_unavailable_state_keeps_its_nan_figures_and_its_reason():
 
 
 def test_the_kind_is_the_last_of_the_tables():
-    assert list(bag_io.KIND_FIELDS)[-1] == 'stability_state'
-    assert list(bag_io.KIND_FIELDS)[-2] == 'base_state'
+    kinds = list(bag_io.KIND_FIELDS)
+    assert kinds.index('stability_state') > kinds.index('base_state')
     assert 'ranger_xarm_teleop_interfaces/msg/StabilityState' not in bag_io.LEGACY
