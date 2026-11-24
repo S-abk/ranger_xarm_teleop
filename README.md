@@ -732,6 +732,53 @@ ros2 launch ranger_xarm_teleop_bringup teleop_sim.launch.py base:=true
 ros2 topic echo /teleop/base/state --field reason_text     # what it does and why
 ```
 
+### How far from tipping (stability)
+
+Off unless the stack is launched with `stability:=true` (default false), and **simulation
+only**: refused outside simulation, and no figure for a description that is not a simulator's.
+**Information only**: the stability node publishes its own state and nothing reads it to decide
+a command, a hold or a refusal; stopped, killed or never started, it changes nothing else. It
+**does not see a force on the tool** (the arm or the tool caught on something while the base
+drives): the arm reports no joint effort.
+
+- **The figure:** the signed distance (m) from the point where the floor's reaction acts (the
+  centre of pressure) to the nearest edge of the wheel contacts, with that edge named; negative
+  is past it. On a level floor at rest it is the distance from the point under the centre of
+  mass to that edge. It weighs every body of the robot description at the measured joints, with
+  the base's acceleration, the turn, the body's own rocking on its springs and each arm body's
+  own acceleration, all taken from the IMU's linear acceleration and angular rate (its
+  orientation is never read) carried to every body.
+- **Nominal and pessimistic:** the pessimistic figure is the worst over the mass file's bounds.
+- **If the base stopped now:** the figure through a stop from the present motion at
+  `stop_decel_m_s2` (carried in the state), amplified by the springs, and never above the
+  present figure's minimum over the body's last swing. The **energy reserve** (J): the energy to
+  roll the robot over the edge the motion heads toward, minus the kinetic energy; positive
+  means a stop from this motion cannot roll it over (a sufficient condition only). The real
+  base's stop is unmeasured; the simulated controller also halts after 0.3 s and swings its
+  steering back in a sideways stop, which the stop figure does not model (above 0.25 m/s it
+  read up to 0.16 m safer than the wheel loads in simulation).
+- **Tilt source:** an IMU on `tilt_topic`. Gazebo bridges its IMU only when started with
+  `sensors:=true`; without it the state says "no tilt" and names that argument. With no tilt
+  source configured, a figure only while the base is at rest ("level floor assumed", the
+  pessimistic figure on the assumed slope bound `assumed_slope_deg`).
+- **The mass file** (`stability_mass_file`, outside any checkout): corrects a body of the
+  description, adds one (a tool, a carried object, fixed to a link), and gives every value a
+  bound; anything unknown or missing is refused by name. Start from
+  `config/stability_mass_TEMPLATE.yaml`. The simulation wrappers pass
+  `config/stability_mass_SIMULATION_ONLY.yaml`, which corrects no mass. The model in force is
+  fingerprinted (`model_sha256` in the state); each episode records the state and the mass
+  file's hash and copy.
+- **State:** `/teleop/stability/state` (`StabilityState`, 50 Hz): available or the reason
+  (missing or stale joints, odometry, IMU, description or mass file), the figures and edges, the
+  stop figure, the energy reserve, the tilt. The checker reports each episode's smallest
+  figures (information, never a failure). Not on the panel yet.
+
+```bash
+ros2 launch ranger_xarm_gazebo sim.launch.py drive_base:=true sensors:=true
+ros2 launch ranger_xarm_teleop_bringup teleop_sim.launch.py base:=true stability:=true
+ros2 topic echo /teleop/stability/state --field margin_m
+```
+
 ### Measuring a run
 
 ```bash
