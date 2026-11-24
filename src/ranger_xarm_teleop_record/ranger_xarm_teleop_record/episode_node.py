@@ -58,7 +58,7 @@ from .extrinsics import Frames
 from .linkstats import link_quality
 from .parameters import NAMES, ParameterRead, TYPES, VALUES
 from .profile import load_checks, load_profile, recorded
-from .provenance import git_info, sha256_file, sha256_text
+from .provenance import git_info, sha256_file, sha256_text, stability_record
 from .streams import FieldPresence
 from .streamwatch import StreamWatch
 
@@ -119,6 +119,7 @@ class EpisodeNode(Node):
         self.declare_parameter('session_dir', '')
         self.declare_parameter('recorder', '/teleop_episode_recorder')
         self.declare_parameter('limits_file', '')
+        self.declare_parameter('stability_mass_file', '')
         self.declare_parameter('teleop_node', '/teleop_servo')
         self.declare_parameter('servo_node', '/servo_node')
         self.declare_parameter('mux_node', '/arm_mux')
@@ -443,6 +444,8 @@ class EpisodeNode(Node):
         }
         for key in ('software', 'robot', 'limits', 'frames', 'time', 'recorder', 'profile'):
             self.episode[key] = copy.deepcopy(self.session[key])
+        if 'stability' in self.session:
+            self.episode['stability'] = copy.deepcopy(self.session['stability'])
         self.ep_log = {'input_age': [], 'status': [], 'scales': set(),
                        'calibration': (s.calibrated, round(s.calibration_heading, 9),
                                        s.calibration_session_id, s.calibration_reset_count),
@@ -780,7 +783,10 @@ class EpisodeNode(Node):
                                'sha256': sha256_file(limits)})
         streams = self.streams
         sim = bool(self.profile['use_sim_time'])
-        return {
+        stability = stability_record(str(gp('stability_mass_file').value), self.session_dir)
+        if stability is not None and stability.get('error'):
+            self.get_logger().error(stability['error'])
+        record = {
             'format': md.SESSION_FORMAT,
             'name': os.path.basename(self.session_dir),
             'started_wall': time.time(),
@@ -808,6 +814,9 @@ class EpisodeNode(Node):
                          'one_file_per_episode': True},
             'profile': self.profile,
         }
+        if stability is not None:           # optional: absent unless a mass file was given
+            record['stability'] = stability
+        return record
 
     def fetch_parameters(self) -> None:
         """Read the teleop, Servo and mux parameters once each (limits in force)."""

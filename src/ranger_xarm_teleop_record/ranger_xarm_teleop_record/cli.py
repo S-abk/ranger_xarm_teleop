@@ -92,7 +92,7 @@ def _episodes(session: str, which):
 def check_main(argv=None) -> int:
     """Check episodes; exit 1 when a kept episode fails."""
     from .bag_io import read_episode
-    from .checker import check_episode
+    from .checker import check_episode, stability_lines
     ap = argparse.ArgumentParser(description='Check recorded episodes (rates, gaps, clocks, '
                                  'losses, consistency). Never changes the data.')
     ap.add_argument('session')
@@ -124,6 +124,9 @@ def check_main(argv=None) -> int:
             flags += f' [provisional tolerance: {",".join(provisional)}]'
         print(f'{os.path.basename(path)[:-5]:>4} {status:<11} {report["verdict"]:<8} '
               f'{str(report["usable"]):<6} {flags} {"; ".join(report["reasons"])[:200]}')
+        if 'stability' in report:           # not in the report of an episode with no timeline
+            for line in stability_lines(report['stability']):
+                print(f'     {line}')
         if status == 'kept' and report['verdict'] != 'PASS':
             bad += 1
     return 1 if bad else 0

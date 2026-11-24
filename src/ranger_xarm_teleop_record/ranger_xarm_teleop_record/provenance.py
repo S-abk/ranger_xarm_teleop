@@ -21,6 +21,7 @@ so a session can be moved to another machine without carrying where it was made.
 import functools
 import hashlib
 import os
+import shutil
 import subprocess
 from typing import Optional
 
@@ -39,6 +40,34 @@ def sha256_file(path: str) -> str:
         for block in iter(lambda: handle.read(1 << 20), b''):
             digest.update(block)
     return digest.hexdigest()
+
+
+MASS_FILE_COPY = 'stability_mass.yaml'
+
+
+def stability_record(mass_file: str, session_dir: str) -> Optional[dict]:
+    """
+    Return the optional sidecar key ``stability`` for the stability monitor's mass file.
+
+    ``mass_file`` empty: None (the sidecar then has no such key). Otherwise the file is copied
+    into ``session_dir`` as ``stability_mass.yaml`` (as the limits file is) and the record holds
+    ``mass_file`` (that copy's name, relative to the session), ``mass_file_sha256`` and
+    ``source_name`` (the original's file name, never its directory). A file that cannot be read
+    gives ``mass_file`` and ``mass_file_sha256`` None and ``error`` saying why; the caller logs
+    it.
+    """
+    if not mass_file:
+        return None
+    record = {'mass_file': None, 'mass_file_sha256': None,
+              'source_name': os.path.basename(mass_file)}
+    try:
+        digest = sha256_file(mass_file)
+        shutil.copyfile(mass_file, os.path.join(session_dir, MASS_FILE_COPY))
+    except OSError as err:
+        record['error'] = f'mass file {record["source_name"]} not recorded: {err}'
+        return record
+    record.update({'mass_file': MASS_FILE_COPY, 'mass_file_sha256': digest})
+    return record
 
 
 def _git(root: str, *args: str) -> Optional[str]:

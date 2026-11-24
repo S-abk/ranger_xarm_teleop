@@ -68,6 +68,12 @@ Pixels are not held here; ``Episode.images[name]`` loads one frame by row index.
 ``event_count``; bool ``driving``, ``at_rest``, ``enabled``; float ``odom_age`` (NaN when no
 odometry), ``tool_speed_scale`` (NaN when no such limit), ``command`` ``(n, 6)`` (the last
 command published, as a twist); the stamp is the header's.
+``stability_state`` (StabilityState, information only): bool ``available``, ``at_rest``; int
+``reason``, ``tilt_source``, ``edge``, ``edge_pessimistic``, ``stop_edge``, ``energy_edge``;
+float ``margin_m``, ``margin_pessimistic_m``, ``stop_margin_m``, ``stop_margin_pessimistic_m``,
+``stop_decel_m_s2``, ``energy_reserve_j``, ``speed_m_s`` (the figures are NaN while not
+``available``); str list ``reason_text`` and ``model_sha256`` (in ``labels``); the stamp is
+the header's.
 Kinds not listed (tf, strings, logs) carry no fields; only their times are used.
 
 Absent fields

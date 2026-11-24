@@ -116,6 +116,11 @@ def generate_launch_description():
                 'session': LaunchConfiguration('record_session'),
                 'record_extra': LaunchConfiguration('record_extra'),
                 'limits_file': os.path.join(share, 'config', 'SIMULATION_ONLY_limits.yaml'),
+                # the mass file is recorded only when the monitor runs
+                'stability_mass_file': PythonExpression([
+                    "'", LaunchConfiguration('stability_mass_file'), "' if '",
+                    LaunchConfiguration('stability'),
+                    "'.lower() in ('true', '1', 'yes') else ''"]),
                 'tool_frame': LaunchConfiguration('tool_frame'),
             }.items(),
             condition=IfCondition(LaunchConfiguration('record'))),
