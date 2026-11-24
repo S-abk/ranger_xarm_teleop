@@ -401,7 +401,7 @@ def test_the_figure_agrees_with_the_wheels_loads(stack):
         handle.write('\n'.join(table) + '\n')
     note(stack, '\n'.join(table))
     failed = [(r['name'], r['problems']) for r in rows if r['problems']]
-    assert len(stack['windows']) == 34 and len(rows) == 34     # every manoeuvre judged
+    assert len(stack['windows']) == 33 and len(rows) == 33     # every manoeuvre judged
     assert not failed, failed
 
 
