@@ -742,11 +742,9 @@ starts with the stack, before arming; do not start it on its own mid-session: a 
 the running graph stalled the teleop node's cycle for up to 390 ms in simulation. It
 **does not see a force on the tool** (the arm or the tool caught on something while the base
 drives): the arm reports no joint effort. Nor does it see the ground: it puts every wheel's
-contact under the wheel on a plane. A wheel climbing a step carries its load at the step's
-edge, up to sqrt(2 r s - s^2) ahead of the axle (6 cm for a 0.1 m wheel on a 2 cm step); when
-that wheel climbs toward the robot's centre (a rear wheel going forward), the real support
-shrinks by that much unseen (in simulation the figure then read up to 0.027 m safer than the
-wheels' loads).
+contact under the wheel on a plane. Driving over a 2 cm bar in simulation, with the rear wheels
+crossing it, the figure read up to 0.04 m safer than the wheels' loads, the cause not shown: a
+step under a wheel is outside what the figure was shown to follow.
 
 - **The figure:** the signed distance (m) from the point where the floor's reaction acts (the
   centre of pressure) to the nearest edge of the wheel contacts, with that edge named; negative

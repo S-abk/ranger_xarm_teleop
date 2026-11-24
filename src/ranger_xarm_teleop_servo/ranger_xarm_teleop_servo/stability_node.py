@@ -124,6 +124,8 @@ class StabilityNode(Node):
         self._load_mass_file()
 
         self.timing: List[float] = []
+        self.logged_reason: Optional[tuple] = None      # (reason, text) last written to the log
+        self.reason_log: List[str] = []                     # every such line (tests read it)
         self.timing_logged = time.monotonic()
         self.imu_frame_looked = -1e9
         self.imu_header_frame = ''
@@ -237,6 +239,7 @@ class StabilityNode(Node):
         else:
             result = self.monitor.cycle(start)
         self.publish(result)
+        self._log_reason(result)
         self.timing.append(time.monotonic() - start)
         if start - self.timing_logged > TIMING_REPORT_S:
             self.timing_logged = start
@@ -246,6 +249,20 @@ class StabilityNode(Node):
                 f'stability: cycle n {len(v)} p50 {v[len(v) // 2] * 1e3:.2f} p99 '
                 f'{v[min(len(v) - 1, int(0.99 * len(v)))] * 1e3:.2f} max {v[-1] * 1e3:.2f} ms; '
                 f'last: {"figure" if result.available else smon.reason_name(result.reason)}')
+
+    def _log_reason(self, r: smon.Result) -> None:
+        """Write the state's reason to the log once per change (it can name the fix)."""
+        key = (bool(r.available), int(r.reason), '' if r.available else r.reason_text)
+        if key == self.logged_reason:
+            return
+        self.logged_reason = key
+        line = ('stability: figure available' if r.available else
+                f'stability: unavailable ({smon.reason_name(r.reason)}): {r.reason_text}')
+        self.reason_log.append(line)
+        if r.available:
+            self.get_logger().info(line)
+        else:
+            self.get_logger().warning(line)
 
     def publish(self, r: smon.Result) -> None:
         """Publish one state."""

@@ -241,8 +241,14 @@ def test_one_missing_input_is_unavailable_with_its_reason(rig, kw, reason):
 
 
 def test_no_tilt_says_how_the_simulator_bridges_its_imu(rig):
-    s = rig().run(9.5, imu=False)
+    r = rig()
+    s = r.run(9.5, imu=False)
     assert 'sensors:=true' in s.reason_text
+    # The log names it too, once (not every cycle), and says when the figure comes back.
+    named = [line for line in r.node.reason_log if 'sensors:=true' in line]
+    assert len(named) == 1, r.node.reason_log
+    r.run(9.5)
+    assert r.node.reason_log[-1] == 'stability: figure available'
 
 
 @pytest.mark.parametrize('kw, reason', [
