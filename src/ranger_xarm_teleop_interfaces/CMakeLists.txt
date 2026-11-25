@@ -20,6 +20,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ResetHeartbeat.msg"
   "msg/ResetState.msg"
   "msg/ResetWatchdog.msg"
+  "msg/StabilityState.msg"
   "msg/TeleopState.msg"
   "srv/GetJointPath.srv"
   "srv/SetArmOwner.srv"

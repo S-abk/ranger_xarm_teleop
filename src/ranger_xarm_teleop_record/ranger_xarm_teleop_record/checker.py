@@ -21,7 +21,9 @@ missing is reported, and fails the episode.
 
 Report keys: ``verdict`` (PASS, FAIL, REFUSED), ``reasons``, ``flags`` (INV-4 notices; each
 ``{flag, reason, time}``), ``usable``, ``streams`` (one entry per recorded profile stream),
-``link``, ``rtf``, ``base``, ``limits``, ``consistency``, ``missing_metadata``, ``window``,
+``link``, ``rtf``, ``base``, ``stability`` (information only, never a reason or a flag: the
+stability monitor's recorded state, see ``_stability_report``), ``limits``, ``consistency``,
+``missing_metadata``, ``window``,
 ``fields`` (optional fields absent per stream, see streams.py) and ``tolerances`` (which
 profile's overrides were applied over checks.yaml, which values are provisional, and every
 value in force) and ``checked_by`` (the commit, dirty state and a source digest of the
@@ -73,6 +75,35 @@ LIMIT_NAMES = {
     7: 'LIMIT_JOINT_VELOCITY', 8: 'LIMIT_JOINT_POSITION', 9: 'LIMIT_LINK_KEEPOUT',
     10: 'LIMIT_JOINT_ACCELERATION'}
 LIMIT_NONE = 0
+
+# Replicated from ranger_xarm_teleop_interfaces/msg/StabilityState.msg (REASON_*, TILT_*, EDGE_*).
+STABILITY_REASON_NAMES = {
+    0: 'REASON_OK', 1: 'REASON_NO_DESCRIPTION', 2: 'REASON_DESCRIPTION_UNUSABLE',
+    3: 'REASON_NO_MASS_FILE', 4: 'REASON_MASS_FILE_REFUSED', 5: 'REASON_NO_JOINT_STATES',
+    6: 'REASON_JOINT_STATES_STALE', 7: 'REASON_NO_ODOMETRY', 8: 'REASON_ODOMETRY_STALE',
+    9: 'REASON_NO_TILT', 10: 'REASON_MOVING_WITHOUT_TILT', 11: 'REASON_NOT_FINITE',
+    12: 'REASON_NOT_SIMULATION'}
+TILT_NONE = 0
+TILT_MEASURED = 1
+TILT_LEVEL_ASSUMED = 2
+STABILITY_TILT_NAMES = {TILT_NONE: 'TILT_NONE', TILT_MEASURED: 'TILT_MEASURED',
+                        TILT_LEVEL_ASSUMED: 'TILT_LEVEL_ASSUMED'}
+# The edge of the contact hull by the direction of its outward normal in the base frame.
+# Stream kinds that never fail an episode: no stream check of any kind applies to them.
+INFORMATION_KINDS = ('stability_state',)
+EDGE_NONE = 0
+EDGE_FRONT = 1
+EDGE_FRONT_LEFT = 2
+EDGE_LEFT = 3
+EDGE_REAR_LEFT = 4
+EDGE_REAR = 5
+EDGE_REAR_RIGHT = 6
+EDGE_RIGHT = 7
+EDGE_FRONT_RIGHT = 8
+EDGE_NAMES = {EDGE_NONE: 'none', EDGE_FRONT: 'front', EDGE_FRONT_LEFT: 'front-left',
+              EDGE_LEFT: 'left', EDGE_REAR_LEFT: 'rear-left', EDGE_REAR: 'rear',
+              EDGE_REAR_RIGHT: 'rear-right', EDGE_RIGHT: 'right',
+              EDGE_FRONT_RIGHT: 'front-right'}
 
 CMD_VEL_EPS = 1e-6
 # BASE_DURING_CLUTCH values (checks.yaml flags), used when an older tolerance file lacks them.
@@ -710,6 +741,105 @@ def _base_report(ep: Episode, checks: dict, flags: List[dict]) -> dict:
     return report
 
 
+def edge_name(edge) -> str:
+    """Return the name of a stability edge number (``unknown <n>`` for one not in the table)."""
+    return EDGE_NAMES.get(int(edge), f'unknown {int(edge)}')
+
+
+def _smallest(st: Stream, key: str, edge_key: str, t0: float,
+              also: Tuple[str, ...] = ()) -> Optional[dict]:
+    """Return the smallest finite value of a stability field, its edge and time since ``t0``."""
+    values = np.asarray(st.fields.get(key, []), dtype=float)
+    finite = np.isfinite(values)
+    if not np.any(finite):
+        return None
+    row = int(np.argmin(np.where(finite, values, np.inf)))
+    out = {'value': float(values[row]), 'time_s': float(st.stamp[row]) - t0}
+    out['edge'] = edge_name(st.fields[edge_key][row])
+    for name in also:                       # fields of the same message, as it was then
+        out[name] = float(st.fields[name][row])
+    return out
+
+
+def _stability_report(ep: Episode, ctx: _Context) -> dict:
+    """
+    Report the stability monitor's recorded state (information only: no reason, no flag).
+
+    Not recorded: ``{'recorded': False}``. Recorded: ``n`` messages; ``unavailable`` (``n``,
+    ``share`` of the messages and ``by_reason`` counts per reason name); the smallest finite
+    ``margin_m``, ``margin_pessimistic_m``, ``stop_margin_m`` (with the ``stop_decel_m_s2`` it
+    assumed) and ``energy_reserve_j``, each with ``value``, ``edge`` (name, see EDGE_NAMES)
+    and ``time_s`` from the episode's start; ``rate_hz`` and ``max_gap_s`` of the messages in
+    the episode window (the largest gap includes the stretches before the first and after the
+    last message; information, never a reason); ``tilt_sources`` (counts per source name),
+    ``level_floor_assumed`` (some message had no tilt source: its figure is for a level floor)
+    and ``model_sha256`` (the distinct mass models, sorted). NaN figures are skipped. A
+    message of a kind or field the stream lacks gives no entry for it.
+    """
+    st = ep.get('stability_state')
+    if st is None or len(st) == 0:
+        return {'recorded': False}
+    n = len(st)
+    t0 = ctx.window[0]
+    window = _window_stats(np.asarray(st.stamp, dtype=float), ctx)
+    out: dict = {'recorded': True, 'n': n, 'rate_hz': window['rate_hz'],
+                 'max_gap_s': window['max_gap_s']}
+    if 'available' in st.fields:
+        unavailable = ~np.asarray(st.fields['available'], dtype=bool)
+        by_reason: Dict[str, int] = {}
+        for code in np.asarray(st.fields['reason'], dtype=int)[unavailable]:
+            name = STABILITY_REASON_NAMES.get(int(code), f'REASON_UNKNOWN_{int(code)}')
+            by_reason[name] = by_reason.get(name, 0) + 1
+        count = int(np.sum(unavailable))
+        out['unavailable'] = {'n': count, 'share': count / n, 'by_reason': by_reason}
+    for key, edge_key in (('margin_m', 'edge'), ('margin_pessimistic_m', 'edge_pessimistic'),
+                          ('stop_margin_m', 'stop_edge'), ('energy_reserve_j', 'energy_edge')):
+        out[key] = _smallest(st, key, edge_key, t0,
+                             ('stop_decel_m_s2',) if key == 'stop_margin_m' else ())
+    if 'tilt_source' in st.fields:
+        sources: Dict[str, int] = {}
+        for code in np.asarray(st.fields['tilt_source'], dtype=int):
+            name = STABILITY_TILT_NAMES.get(int(code), f'TILT_UNKNOWN_{int(code)}')
+            sources[name] = sources.get(name, 0) + 1
+        out['tilt_sources'] = sources
+        out['level_floor_assumed'] = 'TILT_LEVEL_ASSUMED' in sources
+    out['model_sha256'] = sorted({s for s in st.labels.get('model_sha256', []) if s})
+    return out
+
+
+def stability_lines(section: dict) -> List[str]:
+    """Return the report lines of a ``_stability_report`` section (for the command line)."""
+    if not section.get('recorded'):
+        return ['stability: not recorded']
+    rate, gap = section.get('rate_hz'), section.get('max_gap_s')
+    lines = [f'stability: {section["n"]} messages'
+             + (f', {rate:.1f} Hz' if rate is not None else '')
+             + (f', largest gap {gap:.2f} s' if gap is not None else '')]
+    gone = section.get('unavailable')
+    if gone:
+        reasons = ', '.join(f'{k} {v}' for k, v in sorted(gone['by_reason'].items()))
+        lines.append(f'  unavailable: {gone["n"]} ({gone["share"] * 100:.1f}%)'
+                     + (f': {reasons}' if reasons else ''))
+    for key, unit in (('margin_m', 'm'), ('margin_pessimistic_m', 'm'), ('stop_margin_m', 'm'),
+                      ('energy_reserve_j', 'J')):
+        found = section.get(key)
+        if found is None:
+            lines.append(f'  smallest {key}: no finite value')
+            continue
+        decel = found.get('stop_decel_m_s2')       # None when it was not finite (jsonable)
+        extra = f', assuming a stop at {decel:g} m/s^2' if decel is not None else ''
+        lines.append(f'  smallest {key}: {found["value"]:.4f} {unit} at the {found["edge"]} '
+                     f'edge, {found["time_s"]:.2f} s from the start{extra}')
+    sources = section.get('tilt_sources') or {}
+    if sources:
+        lines.append('  tilt sources: ' + ', '.join(f'{k} {v}' for k, v in sorted(sources.items()))
+                     + ('; level floor assumed' if section.get('level_floor_assumed') else ''))
+    hashes = section.get('model_sha256') or []
+    lines.append(f'  mass models: {len(hashes)}'
+                 + (': ' + ', '.join(h[:12] for h in hashes) if hashes else ''))
+    return lines
+
+
 def _link_report(ep: Episode, checks: dict, flags: List[dict]) -> dict:
     """Operator link quality over the window; flag LINK_DEGRADED."""
     tol = checks['flags']
@@ -820,6 +950,14 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     stream_reasons: List[str] = []
     domain: Dict[str, List[str]] = {}
     for name, spec in recorded(ep.profile).items():
+        if spec.get('kind') in INFORMATION_KINDS:
+            # Information only (a killed monitor must change nothing else): no rate, gap,
+            # offset or clock check, so no reason; see the ``stability`` section.
+            st = ep.get(name)
+            report['streams'][name] = {'present': st is not None and len(st) > 0,
+                                       'required': False, 'n': 0 if st is None else len(st),
+                                       'ok': True, 'problems': [], 'information_only': True}
+            continue
         report['streams'][name] = _check_stream(name, spec, ctx, stream_reasons, domain)
     if domain.get('robot'):
         reasons.append('ONE_HOST: robot-side streams on more than one clock: '
@@ -848,6 +986,7 @@ def check_episode(ep: Episode, checks: dict) -> dict:
     reasons.extend(state_problems)
     report['rtf'] = _rtf_report(ep, flags)
     report['base'] = _base_report(ep, checks, flags)
+    report['stability'] = _stability_report(ep, ctx)
     report['link'] = _link_report(ep, checks, flags)
 
     raised = {f['flag'] for f in flags}         # the checker's own judgement of the same flag wins

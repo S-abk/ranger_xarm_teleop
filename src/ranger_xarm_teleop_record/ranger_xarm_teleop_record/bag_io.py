@@ -56,6 +56,12 @@ KIND_FIELDS = {
     'base_state': (('state', int), ('mode', int), ('reason', int), ('active_limit', int),
                    ('event_count', int), ('driving', bool), ('at_rest', bool),
                    ('enabled', bool), ('odom_age', float), ('tool_speed_scale', float)),
+    'stability_state': (
+        ('available', bool), ('reason', int), ('tilt_source', int), ('margin_m', float),
+        ('edge', int), ('margin_pessimistic_m', float), ('edge_pessimistic', int),
+        ('stop_margin_m', float), ('stop_margin_pessimistic_m', float), ('stop_edge', int),
+        ('stop_decel_m_s2', float), ('energy_reserve_j', float), ('energy_edge', int),
+        ('speed_m_s', float), ('at_rest', bool)),
 }
 
 
@@ -201,6 +207,9 @@ def _add(rows: _Rows, msg, recv: float) -> None:
         rows.put('twist', _twist(msg.twist))
     elif kind == 'base_state':
         rows.put('command', _twist(msg.command))
+    elif kind == 'stability_state':
+        rows.labels.setdefault('reason_text', []).append(msg.reason_text)
+        rows.labels.setdefault('model_sha256', []).append(msg.model_sha256)
 
 
 def _image_array(msg) -> np.ndarray:

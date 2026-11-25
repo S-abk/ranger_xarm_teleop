@@ -1,0 +1,28 @@
+# STABILITY MASS FILE TEMPLATE. This file is refused (template: true).
+#
+# The stability monitor weighs every body of the robot description. This file corrects a
+# body, adds one (a tool, an object carried) and gives every value a bound; the pessimistic
+# figure takes the worst of those bounds. Copy it OUTSIDE any checkout, give every value,
+# delete the `template: true` line, and pass your copy as stability_mass_file.
+#
+# Units: kg, m (com in the link's own frame), N/m, N s/m. `plus` and `minus` are absolute.
+# In `bodies`, `value` is optional (absent: the description's value); the bounds are not.
+# Anything unknown or missing is refused with its key named. The model in force is
+# fingerprinted and recorded with every episode.
+template: true
+stability_mass_model: 1
+simulation_only: false
+default_uncertainty: {mass_fraction: 0.10, com_m: 0.02}   # every body not listed below
+bodies:
+  chassis_link:                     # a link of your description that has an <inertial>
+    mass: {value: 50.0, plus: 5.0, minus: 5.0}
+    com: {value: [-0.03, 0.0, 0.10], bound: 0.03}
+added:
+  tool:                             # any new name, fixed to an existing link
+    parent: tool_flange_link
+    mass: {value: 1.0, plus: 0.1, minus: 0.1}
+    com: {value: [0.0, 0.0, 0.05], bound: 0.01}
+    inertia: [0.001, 0.001, 0.001]  # about its centre of mass: ixx, iyy, izz (optional)
+suspension:                         # only if the description has springs
+  stiffness: {value: 20000.0, plus: 2000.0, minus: 12000.0}
+  damping: {value: 570.0, plus: 171.0, minus: 171.0}

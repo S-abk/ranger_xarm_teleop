@@ -1,0 +1,17 @@
+# SIMULATION ONLY. The stability monitor's mass file for the simulated robot: it CORRECTS NO
+# MASS (the simulator's masses are the description's), and gives every body and the springs a
+# bound, which make the pessimistic figure. Refused outside simulation (simulation_only).
+#
+# The description's chassis and structure masses are estimates (its own comments say so):
+# +-20 % and 0.05 m; every other body +-10 % and 0.02 m. Spring stiffness -60 % / +10 % (the
+# description names 8.2 kN/m as the soft case of its 20 kN/m), damping +-30 %.
+# For a real robot: copy stability_mass_TEMPLATE.yaml outside any checkout.
+stability_mass_model: 1
+simulation_only: true
+default_uncertainty: {mass_fraction: 0.10, com_m: 0.02}
+bodies:
+  ranger_cad_link: {mass: {plus: 9.4, minus: 9.4}, com: {bound: 0.05}}
+  custom_structure_link: {mass: {plus: 5.0, minus: 5.0}, com: {bound: 0.05}}
+suspension:
+  stiffness: {plus: 2000.0, minus: 12000.0}
+  damping: {plus: 171.0, minus: 171.0}

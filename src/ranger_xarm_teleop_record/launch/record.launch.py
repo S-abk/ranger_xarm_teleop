@@ -83,7 +83,9 @@ def launch_setup(context, *args, **kwargs):
         package='ranger_xarm_teleop_record', executable='episode_node', output='screen',
         parameters=[{'profile': arg('profile'), 'session_dir': session,
                      'recorder': '/' + profile['recorder']['node'],
-                     'limits_file': arg('limits_file'), 'tool_frame': arg('tool_frame'),
+                     'limits_file': arg('limits_file'),
+                     'stability_mass_file': arg('stability_mass_file'),
+                     'tool_frame': arg('tool_frame'),
                      'use_sim_time': bool(profile['use_sim_time']),
                      'record_extra': ','.join(extra)}])
     return [recorder, node]
@@ -103,6 +105,9 @@ def generate_launch_description():
                                           'the profile does not (for example depth_gantry).'),
         DeclareLaunchArgument('limits_file', default_value='',
                               description='The limits file in force, copied into the session.'),
+        DeclareLaunchArgument('stability_mass_file', default_value='',
+                              description="The stability monitor's mass file, copied into the "
+                                          'session and fingerprinted in the sidecar (optional).'),
         DeclareLaunchArgument('tool_frame', default_value=''),
         OpaqueFunction(function=launch_setup),
     ])

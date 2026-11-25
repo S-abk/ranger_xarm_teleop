@@ -1,0 +1,35 @@
+# SIMULATION ONLY. Settings of the stability monitor (contract, "Stability monitor") for the
+# simulated robot. The monitor is information only and is refused on the hardware path; the
+# node also publishes "unavailable" for a robot description that is not a simulator's.
+#
+# Every value is required: the node has no defaults for them.
+#   wheel_links            the links whose contacts carry the robot (from the description)
+#   tilt_topic             sensor_msgs/Imu; only its linear acceleration and angular rate are
+#                          read. The simulator bridges this IMU only when started with
+#                          sensors:=true; without it the state says "no tilt".
+#   cutoff_hz              low-pass on the IMU and the joints (15 Hz: 10-20 ms of lag, chosen
+#                          on the simulated runs; on a real robot it must sit below the frame's
+#                          own ring)
+#   tilt_tau_s             the tilt filter's accelerometer time constant
+#   stop_decel_m_s2        the stop the figure "if the base stopped now" assumes: the simulated
+#   stop_turn_decel_rad_s2 base's controller brakes at about 1.0 m/s2 and ends a turn in
+#                          0.11-0.14 s from 0.4 rad/s. Its parking-brake halt after 0.3 s and the
+#                          steering swinging back in a sideways stop are not modelled: above
+#                          0.25 m/s the stop figure reads safer than the wheel loads (up to
+#                          0.16 m in the simulated runs). The real base's stop is unmeasured.
+/**:
+  ros__parameters:
+    base_frame: base_link
+    wheel_links: [front_left_wheel_link, front_right_wheel_link, rear_left_wheel_link,
+                  rear_right_wheel_link]
+    tilt_topic: /ouster/imu
+    imu_frame: ''
+    odom_topic: /odom
+    steering_topic: /dynamic_joint_states
+    cutoff_hz: 15.0
+    tilt_tau_s: 3.0
+    joint_timeout_s: 0.5
+    odometry_timeout_s: 0.5
+    imu_timeout_s: 0.5
+    stop_decel_m_s2: 1.0
+    stop_turn_decel_rad_s2: 3.5

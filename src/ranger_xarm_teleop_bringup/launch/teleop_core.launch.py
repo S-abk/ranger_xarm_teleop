@@ -106,6 +106,9 @@ def launch_setup(context, *args, **kwargs):
         if _true(arg('base')):
             raise ValueError('base:=true is refused outside simulation: base driving (G-19) is '
                              'simulation only')
+        if _true(arg('stability')):
+            raise ValueError('stability:=true is refused outside simulation: the stability '
+                             'monitor is simulation only until reviewed for hardware')
     base = _true(arg('base'))
     base_values = check_base_limits(limits_file, limits) if base else {}
     if gripper:
@@ -276,7 +279,20 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{**base_values, 'enabled': True, 'cmd_topic': arg('base_cmd_topic'),
                          'tool_frame': arg('tool_frame')}, sim_time]))
 
-    nodes = [mux, teleop] + gripper_nodes + feedback_nodes + reset_nodes + base_nodes
+    stability_nodes = []
+    if _true(arg('stability')):
+        # Information only: it publishes its own state, which nothing here reads.
+        params_file, mass_file = arg('stability_params_file'), arg('stability_mass_file')
+        if not params_file or not mass_file:
+            raise ValueError('stability:=true needs stability_params_file and '
+                             'stability_mass_file (no defaults here; the simulation wrappers '
+                             'pass their simulation-only files)')
+        stability_nodes.append(Node(
+            package='ranger_xarm_teleop_servo', executable='stability_node', output='screen',
+            parameters=[params_file, {'mass_file': mass_file}, sim_time]))
+
+    nodes = ([mux, teleop] + gripper_nodes + feedback_nodes + reset_nodes + base_nodes
+             + stability_nodes)
     if simulation:
         return [spawner, servo_node] + nodes
     # Hardware path: the teleop controller is the bring-up's own (spawned inactive there), and
@@ -336,6 +352,18 @@ def generate_launch_description():
             description='Start the base node: hold the left grip to drive the base from the '
                         'left thumbstick, turn in place from the right thumbstick (G-19; '
                         'simulation only; the simulated base must be drivable).'),
+        DeclareLaunchArgument(
+            'stability', default_value='false',
+            description='Start the stability monitor: how far the robot is from starting to '
+                        'tip, information only (simulation only; it does not see a force on '
+                        'the tool).'),
+        DeclareLaunchArgument(
+            'stability_params_file', default_value='',
+            description="The stability monitor's settings (required with stability:=true)."),
+        DeclareLaunchArgument(
+            'stability_mass_file', default_value='',
+            description="The stability monitor's mass file: corrections, added bodies and "
+                        'bounds (required with stability:=true; outside any checkout).'),
         DeclareLaunchArgument(
             'base_cmd_topic', default_value='/cmd_vel',
             description='The velocity command topic the base driver takes.'),
