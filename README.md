@@ -743,8 +743,9 @@ the running graph stalled the teleop node's cycle for up to 414 ms in simulation
 **does not see a force on the tool** (the arm or the tool caught on something while the base
 drives): the arm reports no joint effort. Nor does it see the ground: it puts every wheel's
 contact under the wheel on a plane. Driving over a 2 cm bar in simulation, with the rear wheels
-crossing it, the figure read up to 0.04 m safer than the wheels' loads, the cause not shown: a
-step under a wheel is outside what the figure was shown to follow.
+crossing it, the figure read up to 0.04 m safer than the wheels' loads, the cause not shown:
+the monitor was not shown to follow a step under a wheel. There only the pessimistic figure was
+held to the loads (in the recorded runs it read at least 0.023 m below them).
 
 - **The figure:** the signed distance (m) from the point where the floor's reaction acts (the
   centre of pressure) to the nearest edge of the wheel contacts, with that edge named; negative

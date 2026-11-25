@@ -28,6 +28,9 @@ The stability monitor's reference in Gazebo: the wheels' loads, and the rule INV
   most 0.25 m/s (a turn by its wheels' speed): its smallest value over the 60 ms before the zero
   against the loads' smallest after the zero, in the same band. Reported, not judged: the most
   the figure reads safer at any instant, and its lag against the loads.
+* **A step under a wheel** (a window marked ``step``): the nominal figure is reported, not
+  judged (the monitor was not shown to follow a step); the pessimistic figure is judged there
+  instead: its smallest within +-0.1 s of the loads' smallest must not lie above the loads.
 """
 
 import math
@@ -123,28 +126,32 @@ def judge(windows: List[dict], ref_t: np.ndarray, ref: np.ndarray, mon_t: np.nda
     Judge every manoeuvre window by the frozen rule; return one row per window.
 
     ``windows``: {'name', 'start', 'end', 'zero' (or None), 'speed' (the commanded speed; a
-    turn's at its wheels), 'judged' (bool)} in the same clock as ``ref_t`` and ``mon_t``
-    (simulation time). Each window ends after its own settling: no window reaches into the next.
+    turn's at its wheels), 'judged' (bool), 'step' (optional bool: a step under a wheel)} in
+    the same clock as ``ref_t`` and ``mon_t`` (simulation time). Each window ends after its own
+    settling: no window reaches into the next.
     """
     rows = []
     for w in windows:
+        step = bool(w.get('step'))
         sel = (ref_t >= w['start']) & (ref_t <= w['end'])
         if sel.sum() < 5:
-            rows.append({'name': w['name'], 'judged': w['judged'], 'loads_min': math.nan,
-                         'dev': math.nan, 'safer_anywhere': math.nan, 'pess_ok': True,
-                         'stop': None, 'problems': ['no reference in the window']})
+            rows.append({'name': w['name'], 'judged': w['judged'], 'step': step,
+                         'loads_min': math.nan, 'dev': math.nan, 'pess_dev': math.nan,
+                         'safer_anywhere': math.nan, 'pess_ok': True, 'stop': None,
+                         'problems': ['no reference in the window']})
             continue
         j = np.where(sel)[0][np.argmin(ref[sel])]
         near = ((mon_t >= max(ref_t[j] - WINDOW_S, w['start']))
                 & (mon_t <= min(ref_t[j] + WINDOW_S, w['end'])))
-        row = {'name': w['name'], 'judged': w['judged'], 'loads_min': float(ref[j]),
-               'dev': math.nan, 'safer_anywhere': math.nan, 'pess_ok': True, 'stop': None,
-               'problems': []}
+        row = {'name': w['name'], 'judged': w['judged'], 'step': step,
+               'loads_min': float(ref[j]), 'dev': math.nan, 'pess_dev': math.nan,
+               'safer_anywhere': math.nan, 'pess_ok': True, 'stop': None, 'problems': []}
         if not near.any():
             row['problems'].append("no monitor figure at the loads' minimum")
             rows.append(row)
             continue
         row['dev'] = float(np.min(nominal[near]) - ref[j])
+        row['pess_dev'] = float(np.min(pessimistic[near]) - ref[j])
         inside = (mon_t >= w['start']) & (mon_t <= w['end'])
         row['pess_ok'] = bool(np.all(pessimistic[inside] <= nominal[inside] + 1e-9))
         on_ref = np.interp(ref_t[sel], mon_t[inside], nominal[inside]) if inside.sum() > 1 \
@@ -161,7 +168,11 @@ def judge(windows: List[dict], ref_t: np.ndarray, ref: np.ndarray, mon_t: np.nda
             elif stop_judged:
                 row['problems'].append('no stop figure before the zero')
         if w['judged']:
-            if not (-LOWER <= row['dev'] <= SAFER):
+            if step:
+                if row['pess_dev'] > 0.0:
+                    row['problems'].append(f'pessimistic figure {row["pess_dev"]:+.3f} m above '
+                                           'the loads at a step')
+            elif not (-LOWER <= row['dev'] <= SAFER):
                 row['problems'].append(f'figure {row["dev"]:+.3f} m from the loads')
             if not row['pess_ok']:
                 row['problems'].append('pessimistic above nominal')
