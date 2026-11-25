@@ -210,6 +210,10 @@ def stack(tmp_path_factory):
         probe.move_to(READY, seconds=4.0)
         start_input(probe, env, logs)
         wait_for_settled_graph(probe)
+        # The input player's join can stall every node for a few hundred ms; the monitor then
+        # restarts its filters and settles again (about 9 s). The tests start from a figure.
+        probe.wait_for(lambda: rec.last_state() is not None and rec.last_state().available,
+                       120.0, 'a stability figure after the graph settled')
         yield {'probe': probe, 'env': env, 'logs': logs, 'rec': rec, 'watch': watch,
                'session': os.path.join(data, session), 'results': results, 'teleop': teleop,
                'windows': []}
@@ -242,7 +246,7 @@ def posture(stack, name, rest=2.0):
     return name, t0, rec.now()
 
 
-def drive(stack, vx, vy, wz, hold, label, zero=True, ramp=None, judged=True):
+def drive(stack, vx, vy, wz, hold, label, zero=True, ramp=None, judged=True, step=False):
     """Command the base directly (stepped, or ramped at ``ramp``), hold, then stop."""
     speed = max(math.hypot(vx, vy), abs(wz) * sh.TURN_WHEEL_RADIUS)
     rec, pub = stack['rec'], stack['pub']
@@ -262,7 +266,7 @@ def drive(stack, vx, vy, wz, hold, label, zero=True, ramp=None, judged=True):
     tz = rec.now()
     rec.sleep(3.0 if zero else 4.0)
     stack['windows'].append({'name': label, 'start': t0, 'end': rec.now(), 'zero': tz,
-                             'speed': speed, 'judged': judged})
+                             'speed': speed, 'judged': judged, 'step': step})
 
 
 def crab_to(stack, y_target, speed=0.15, accel=0.15, label=''):
@@ -353,14 +357,14 @@ def test_the_figure_agrees_with_the_wheels_loads(stack):
     drive(stack, 0, -0.2, 0, 1.5, 'right 0.2 stretch_left')
     drive(stack, 0, 0.8, 0, 1.5, 'left 0.8 stretch_left (a pair lifts)')
     drive(stack, 0, -0.8, 0, 1.5, 'right 0.8 stretch_left')
-    # A 2 cm bar driven over.
+    # A 2 cm bar driven over: a step under a wheel, where only the pessimistic figure is judged.
     posture(stack, 'ready', rest=0.5)
     x, y = rec.position()
     spawn('bar2cm', box_sdf('bar2cm', (0.05, 2.0, 0.02), (x + 1.0, y, 0.01, 0.0)))
     rec.sleep(1.0)
-    drive(stack, 0.2, 0, 0, 7.0, 'bar 0.2 ready')
-    drive(stack, -0.5, 0, 0, 3.5, 'bar back 0.5 ready')
-    drive(stack, 0.5, 0, 0, 3.0, 'bar 0.5 ready')
+    drive(stack, 0.2, 0, 0, 7.0, 'bar 0.2 ready', step=True)
+    drive(stack, -0.5, 0, 0, 3.5, 'bar back 0.5 ready', step=True)
+    drive(stack, 0.5, 0, 0, 3.0, 'bar 0.5 ready', step=True)
     # A 10 degree side ramp, the arm downhill.
     x, y = rec.position()
     spawn('ramp10', side_ramp('ramp10', 10.0, y + 0.8, x))
@@ -389,11 +393,14 @@ def test_the_figure_agrees_with_the_wheels_loads(stack):
                     col['margin_pessimistic_m'], col['stop_margin_m'], col['speed_m_s'],
                     col['turn_rate_rad_s'])
     shift, rms = sh.lag(t_s, ref, t_m, col['margin_m'])
-    table = ['manoeuvre | loads min | figure - loads | most safer anywhere | stop (v, dev)']
+    table = ['manoeuvre | loads min | figure - loads | pessimistic - loads | '
+             'most safer anywhere | stop (v, dev)']
     for r in rows:
         stop = f'{r["stop"][0]:.2f} {r["stop"][1]:+.3f}' if r['stop'] else ''
-        table.append(f'{r["name"]} | {r["loads_min"]:.3f} | {r["dev"]:+.3f} | '
-                     f'{r["safer_anywhere"]:+.3f} | {stop} {"; ".join(r["problems"])}')
+        mark = ' (step: figure reported, pessimistic judged)' if r['step'] else ''
+        table.append(f'{r["name"]}{mark} | {r["loads_min"]:.3f} | {r["dev"]:+.3f} | '
+                     f'{r["pess_dev"]:+.3f} | {r["safer_anywhere"]:+.3f} | {stop} '
+                     f'{"; ".join(r["problems"])}')
     table.append(f'lag of the figure against the loads: {shift * 1e3:+.0f} ms (rms {rms:.4f} m)')
     unavailable = sum(1 for s in states if not s[2].available)
     table.append(f'monitor states: {len(states)}, unavailable {unavailable}')
@@ -402,6 +409,7 @@ def test_the_figure_agrees_with_the_wheels_loads(stack):
     note(stack, '\n'.join(table))
     failed = [(r['name'], r['problems']) for r in rows if r['problems']]
     assert len(stack['windows']) == 33 and len(rows) == 33     # every manoeuvre judged
+    assert sum(r['step'] for r in rows) == 3                  # the bar: pessimistic judged only
     assert not failed, failed
 
 
