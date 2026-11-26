@@ -109,15 +109,17 @@ float64 commanded_angular_speed
 # Hand translation is multiplied by it; rotation is never scaled.
 float64 translation_scale
 
-# G-15 link keep-out: the arm's links (and the tool) against the robot's own fixed structure,
-# from a model built from the robot description at start-up (spheres covering each moving
-# link; it never reports more clearance than the collision geometry has).
-# Clearance (m): the smallest over all pairs, at the measured joint state (updated at 10 Hz,
-# 2 Hz while engaged). Exact within the keep-out's influence distance (the margin + 60 mm);
-# larger values are a lower bound. NaN when there is no model or no joint state.
+# G-15 link keep-out: the arm's links (and the tool) against the robot's own fixed structure
+# and against each other, from a model built from the robot description at start-up (it never
+# reports more clearance than the collision geometry has).
+# Clearance (m): the clearance of the pair nearest to its own margin (the fixed structure's
+# margin, or the self margin for two of the arm's own links; with one margin for all, the
+# smallest clearance), at the measured joint state (updated at 10 Hz, 2 Hz while engaged).
+# Exact within the keep-out's influence distance (the margin + 60 mm); larger values are a
+# lower bound. NaN when there is no model or no joint state.
 float64 keepout_clearance
-# The pair with that clearance: a moving link (arm or tool) and a fixed link (or, for the
-# tool, an arm link). Empty when the clearance is not exact.
+# The pair with that clearance: a moving link (arm or tool) and a fixed link, or two of the
+# arm's own links. Empty when the clearance is not exact.
 string keepout_link
 string keepout_obstacle
 # G-12: the same at the solver's reference (MoveIt Servo's commanded state) while the clutch
