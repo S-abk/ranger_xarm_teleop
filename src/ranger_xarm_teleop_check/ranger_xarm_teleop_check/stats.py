@@ -773,10 +773,11 @@ def still_windows(t: Sequence[float], p: Sequence[float], command_t: Sequence[fl
 
     A sample at ``t[i]`` is still when no entry of ``command_t`` (the times of nonzero
     joint-jog commands) falls in ``[t[i] - span, t[i]]`` and the positions ``p`` there differ
-    by less than ``move`` (largest minus smallest; at least two samples). A stretch is a run of
-    still samples with no gap above ``max_gap``; it starts ``span`` before its first sample
-    (that look-back was still too) and is kept when at least ``min_len`` long. A look-back with
-    a gap above ``max_gap`` in it, or none of whose samples is near its start, is not still.
+    by less than ``move`` (largest minus smallest; at least two samples). The look-back only
+    qualifies a sample: a stretch is a run of still samples with no gap above ``max_gap``, from
+    its first still sample to its last, and is kept when at least ``min_len`` long. A look-back
+    with a gap above ``max_gap`` in it, or none of whose samples is near its start, is not
+    still.
     """
     tt = np.asarray(t, dtype=float)
     pp = np.asarray(p, dtype=float)
@@ -808,8 +809,8 @@ def still_windows(t: Sequence[float], p: Sequence[float], command_t: Sequence[fl
         j = i
         while j + 1 < n and flags[j + 1] and tt[j + 1] - tt[j] <= max_gap:
             j += 1
-        if tt[j] - (tt[i] - span) >= min_len:
-            windows.append((float(tt[i] - span), float(tt[j])))
+        if tt[j] - tt[i] >= min_len:
+            windows.append((float(tt[i]), float(tt[j])))
         i = j + 1
     return windows
 

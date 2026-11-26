@@ -1151,8 +1151,8 @@ def reversal_measures(data: dict, mm: dict) -> dict:
                                            data.get('command_velocities', []))
 
     def counts(t, v):
-        return {j: stats.sign_changes_per_window(t, v[:, j], OSCILLATION_SPEED,
-                                                 OSCILLATION_WINDOW) for j in WRIST_JOINTS}
+        return {stats.ARM_JOINTS[j]: stats.sign_changes_per_window(
+            t, v[:, j], OSCILLATION_SPEED, OSCILLATION_WINDOW) for j in WRIST_JOINTS}
 
     osc = mm.get('wrist_sign_changes_per_s') or {}
     return {'jog_messages': len(data.get('jog', [])), 'jog_usable': int(len(jog_t)),
@@ -1160,8 +1160,7 @@ def reversal_measures(data: dict, mm: dict) -> dict:
             'command_source': series['source'],
             'command': counts(jog_t, jog_v) if len(jog_t) else {},
             'servo': counts(series['t'], series['v']) if series['source'] else {},
-            'joint_states': {j: osc.get(stats.ARM_JOINTS[j]) for j in WRIST_JOINTS}
-            if osc else {},
+            'joint_states': dict(osc),
             'joint_states_source': mm.get('velocity_source')}
 
 
@@ -1173,7 +1172,7 @@ def info_reversals_command_servo(rm: dict, opts: Options) -> Result:
                  '/joint_states only); shows where reversals arise')
 
     def count(source, j):
-        value = rm[source].get(j)
+        value = rm[source].get(stats.ARM_JOINTS[j])
         return 'n/a' if value is None else str(value)
 
     shown = '; '.join(
@@ -1232,8 +1231,8 @@ def still_noise_measures(data: dict) -> dict:
                  if len(arrivals) == len(jog) else [])
     for j in WRIST_JOINTS:
         windows = stats.still_windows(t, pos[:, j], commanded)
-        out['joints'][j] = stats.still_noise(t, vel[:, j], windows, OSCILLATION_SPEED,
-                                             OSCILLATION_WINDOW)
+        out['joints'][stats.ARM_JOINTS[j]] = stats.still_noise(
+            t, vel[:, j], windows, OSCILLATION_SPEED, OSCILLATION_WINDOW)
     return out
 
 
@@ -1251,12 +1250,13 @@ def info_still_velocity_noise(sm: dict) -> Result:
                       'the driver reports no velocity in /joint_states (or not in every '
                       'message): nothing measured', threshold)
     parts = []
-    for j, s in sm['joints'].items():
+    for name, s in sm['joints'].items():
+        label = _joint_label(stats.ARM_JOINTS.index(name))
         if not s['windows']:
-            parts.append(f'{_joint_label(j)}: no still window of at least '
+            parts.append(f'{label}: no still window of at least '
                          f'{stats.STILL_MIN_S:g} s')
             continue
-        parts.append(f"{_joint_label(j)}: still {s['seconds']:.1f} s in "
+        parts.append(f"{label}: still {s['seconds']:.1f} s in "
                      f"{_count(s['windows'], 'window', 'windows')}, RMS {s['rms']:.4f} rad/s, "
                      f"peak {s['peak']:.4f} rad/s, most "
                      f'sign changes above {OSCILLATION_SPEED:g} rad/s in any '
@@ -1297,10 +1297,10 @@ def info_keepout_step_time(km: dict) -> Result:
     threshold = ('informational: totals over every summary of the run; the median is the '
                  'median of the per-summary medians, p99 and longest the largest seen')
     pair, cycles = km['pair'], km['cycles']
+    none = ('no keep-out summary from the teleop node in this run (it logs one every '
+            f'{TELEOP_SUMMARY_PERIOD_S} s while commanding)')
     if not pair['active']['summaries'] and not cycles['summaries']:
-        return Result(KEEPOUT_STEP_INFO, INFO,
-                      'no keep-out summary from the teleop node in this run (it logs one '
-                      f'every {TELEOP_SUMMARY_PERIOD_S} s while commanding)', threshold)
+        return Result(KEEPOUT_STEP_INFO, INFO, none, threshold)
 
     def half(label, h):
         if not h['steps']:
@@ -1316,7 +1316,7 @@ def info_keepout_step_time(km: dict) -> Result:
                      + half('active', pair['active']) + '; '
                      + half('not active', pair['inactive']))
     else:
-        parts.append('no self-pair summary')
+        parts.append(none)
     if cycles['summaries']:
         parts.append('teleop cycle computation '
                      f"({_count(cycles['summaries'], 'summary', 'summaries')}): "
