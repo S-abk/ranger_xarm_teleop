@@ -363,6 +363,8 @@ class Solution:
     blocked: np.ndarray = field(default_factory=lambda: np.zeros(3))
     keepout_seconds: float = 0.0        # time spent on the keep-out this cycle (model and fix)
     keepout_cpu_seconds: float = 0.0    # the same, CPU time of the calling thread only
+    keepout_self_active: bool = False   # a self pair on the sphere covers gave a row
+    keepout_margin: float = math.nan    # the margin of ``keepout_pair``
 
     @property
     def damped(self) -> bool:
@@ -405,13 +407,15 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
     low_n, high_n = low / arm.velocity, high / arm.velocity
 
     rows = None
-    clearance, pair = math.inf, ('', '')
+    clearance, pair, self_active, pair_margin = math.inf, ('', ''), False, math.nan
     began, began_cpu = time.perf_counter(), time.thread_time()
     if keepout is not None:
         if list(keepout.joint_names) != list(arm.joint_names):
             raise ValueError("the keep-out model is not on the arm's joints")
         rows = keepout.evaluate(q, extra)
         clearance, pair = rows.clearance, rows.nearest
+        self_active = bool(getattr(rows, 'self_active', False))
+        pair_margin = float(getattr(rows, 'nearest_margin', keepout.margin))
     model_seconds = time.perf_counter() - began
     model_cpu = time.thread_time() - began_cpu
     began, began_cpu = time.perf_counter(), time.thread_time()
@@ -436,13 +440,14 @@ def solve(arm: Arm, q: Sequence[float], target: np.ndarray, params: SolverParams
                     keepout_seconds=(model_seconds + fix_seconds) if keepout is not None
                     else 0.0,
                     keepout_cpu_seconds=(model_cpu + fix_cpu) if keepout is not None
-                    else 0.0)
+                    else 0.0, keepout_self_active=self_active, keepout_margin=pair_margin)
 
 
 def _rows_normalised(arm: Arm, rows, keepout, params: SolverParams):
     """Return ``(A, L)``: the keep-out rows as ``A z >= L`` in normalised joint units."""
     a = rows.grad * arm.velocity[None, :]
-    target = keepout.margin + KEEPOUT_TARGET_INSIDE
+    margin = rows.margin if getattr(rows, 'margin', None) is not None else keepout.margin
+    target = margin + KEEPOUT_TARGET_INSIDE
     lower = -np.maximum(rows.distance - target, 0.0) / params.keepout_time
     return a, lower
 
