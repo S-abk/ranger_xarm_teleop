@@ -605,6 +605,40 @@ def test_self_pairs_get_tables_and_their_own_margin(node):
     assert 'one joint apart (xarm_joint6' in info
 
 
+def test_the_preview_lists_the_three_nearest_self_pairs_once_a_second_when_they_change(node):
+    """
+    The preview's arm-to-arm line lists the three nearest self pairs, nearest first.
+
+    A pair that stays near at every posture must not hide the pair a fold brings in, so
+    the line lists teleop_node.PREVIEW_SELF_COUNT pairs with their clearances, the model's
+    own values; it is looked up at most once a second and logged only when it changes.
+    """
+    n = node(robot_urdf(), motion_enabled=False)
+    _joints(n, READY)                                   # the gripper's joint state
+    lines = []
+    n.get_logger().info = lambda text, **_: lines.append(text)
+    model = n.keepout.subset([i for i in range(len(n.keepout.pair_list))
+                              if n.keepout.is_self(i)])
+    extra = n.keepout_extra()
+    folds = [np.array(READY), np.array([0.0, -0.6, -0.2, 0.0, 1.3, 0.0]),
+             np.array([0.0, 0.3, -2.0, 0.0, 2.0, 0.0])]
+    shown = []
+    for k, q in enumerate(folds):
+        nearest = model.nearest_pairs(q, extra, 3, within=teleop_node.PREVIEW_SELF_WITHIN)
+        assert len(nearest) == 3
+        n.preview_self_clearance(10.0 + 2.0 * k, q)
+        shown.append(nearest)
+        words = ', '.join(f'{c * 1000.0:.1f} mm ({a} - {b})' for c, (a, b) in nearest)
+        assert lines[-1] == (f"preview: nearest pairs of the arm's own links {words}, from "
+                             f'the model (never more than the geometry has); '
+                             f'arm_self_margin_m is 25.0 mm')
+        n.preview_self_clearance(10.5 + 2.0 * k, folds[(k + 1) % len(folds)])
+        n.preview_self_clearance(11.0 + 2.0 * k, q)            # unchanged: not logged again
+        assert len(lines) == k + 1
+    # Folding joint 3 brings pairs in behind the nearest one, and the line shows them.
+    assert {p for _, p in shown[1]} - {p for _, p in shown[0]}
+
+
 def _file_meshes(urdf, folder):
     """Return the made-up robot with its meshes as files (the builder reads them itself)."""
     from keepout_robot import MESHES

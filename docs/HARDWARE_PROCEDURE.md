@@ -384,13 +384,17 @@ right, up and down, releasing between strokes, as in stage 2.
 **3b''. The arm-to-arm clearance in the preview.** Still with motion disabled, plan and execute
 with MoveIt, at velocity scaling 0.1 and in small steps, a move from the stage 4 posture toward
 the fold that stopped the arm before (joint 3 toward its upper limit, the wrist bent back toward
-the upper arm), and back. Terminal 2 logs, once a second when it changes, `preview: least
-clearance between the arm's own links <value> mm (<link> - <link>)`, a model value that is never
-more than the geometry has.
+the upper arm), and back. Terminal 2 logs, once a second when it changes, `preview: nearest
+pairs of the arm's own links <value> mm (<link> - <link>), <value> mm (<link> - <link>), <value>
+mm (<link> - <link>)`: the three nearest pairs, nearest first, each value a model value that is
+never more than the geometry has.
 
-- You should see: the value falls as the arm folds and rises as it unfolds; the arm firmware
-  does not stop the arm.
-- Note the smallest value at which the firmware was still content, and the pair. Choose
+- You should see: link 6 against link 4 listed at about 30 to 37 mm at every posture (it barely
+  changes with the fold); the fold pair (link 1 against link 4 when joint 3 folds) enters the
+  list as the arm folds, its value falling as it folds and rising as it unfolds, and moves to
+  the front once it is nearer than link 6 against link 4; the arm firmware does not stop the arm.
+- Note the smallest value of the fold pair at which the firmware was still content, and the
+  pair. Choose
   `arm_self_margin_m` at or above that value (teleop then never folds the arm further than this
   step did), and above MoveIt Servo's 10 mm threshold plus your controller's overshoot; at most
   about 0.036 on this arm (above it link 6 against link 4 holds the arm over much of its range

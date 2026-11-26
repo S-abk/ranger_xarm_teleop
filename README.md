@@ -554,8 +554,10 @@ when it arrives (`ranger_xarm_teleop_servo/keepout.py`, numpy only):
 - **Checks.** A later `/robot_description`, or MoveIt Servo's robot description, with other
   geometry disables teleop until the node is restarted. `TeleopState` reports the clearance,
   its pair, that pair's margin and whether the keep-out shaped the command. In the preview the
-  node logs the least clearance between the arm's own links (a model value, never more than
-  the geometry has) once a second when it changes, for choosing `arm_self_margin_m`.
+  node logs the three nearest pairs of the arm's own links with their clearances (model values,
+  never more than the geometry has), nearest first, once a second when they change, for
+  choosing `arm_self_margin_m`: a pair that stays near at every posture does not hide the pair
+  a fold brings in.
 
 ### Wrist reversals
 

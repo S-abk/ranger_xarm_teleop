@@ -159,7 +159,8 @@ SLOW_CYCLE_S = 0.01         # a cycle longer than this is reported
 LATE_START_S = 0.03         # a cycle starting this long after the previous one is counted
 CYCLE_REPORT_S = 60.0       # how often the slow and late cycles are summed up in the log
 KEEPOUT_BUILD_POLL_S = 0.5  # how often a running table build is looked at
-PREVIEW_SELF_WITHIN = 0.15  # m: the preview's arm-to-arm clearance is exact up to this
+PREVIEW_SELF_WITHIN = 0.15  # m: the preview's arm-to-arm clearances are exact up to this
+PREVIEW_SELF_COUNT = 3      # the preview lists this many nearest pairs of the arm's own links
 TABLE_CONFIG = kt.TableConfig()   # the clearance tables' resolution (unit tests: TEST_CONFIG)
 INPUT_GAP_WINDOW_S = 0.2    # the longest gap between input callbacks is kept this long
 OWNER_TIMEOUT_S = 0.5       # mux state older than this counts as "no owner"
@@ -1779,10 +1780,12 @@ class TeleopNode(Node):
 
     def preview_self_clearance(self, now: float, joints) -> None:
         """
-        Log the least clearance between the arm's own links at the measured joints (preview).
+        Log the nearest pairs of the arm's own links at the measured joints (preview).
 
-        Once a second when it changed by a millimetre or more, or its pair changed: the
-        model's value (a lower bound of the geometry's) for choosing arm_self_margin_m while
+        The PREVIEW_SELF_COUNT nearest, nearest first, so a pair that stays near at every
+        posture (link 6 against link 4 on the arm) does not hide the pair a fold brings in.
+        Once a second when the pairs listed changed or any value by a millimetre or more: the
+        model's values (lower bounds of the geometry's) for choosing arm_self_margin_m while
         the arm is moved toward itself with motion disabled (docs/HARDWARE_PROCEDURE.md).
         """
         if (self.keepout is None or joints is None or now - self._self_logged_at < 1.0
@@ -1797,20 +1800,25 @@ class TeleopNode(Node):
             return
         self._self_logged_at = now          # looked up at most once a second
         try:
-            clearance, pair = model.clearance(joints, self.keepout_extra(),
-                                              within=PREVIEW_SELF_WITHIN)
+            nearest = model.nearest_pairs(joints, self.keepout_extra(), PREVIEW_SELF_COUNT,
+                                          within=PREVIEW_SELF_WITHIN)
         except (ko.ModelError, ValueError):
             return
+        values = {pair: clearance for clearance, pair in nearest}
         last = self._self_logged
-        if last is not None and pair == last[1] and abs(clearance - last[0]) < 0.001:
+        if (last is not None and last.keys() == values.keys()
+                and all(abs(values[p] - last[p]) < 0.001 for p in values)):
             return
-        self._self_logged = (clearance, pair)
-        if pair == ('', ''):
-            words = f'more than {PREVIEW_SELF_WITHIN * 1000.0:.0f} mm'
-        else:
-            words = f'{clearance * 1000.0:.1f} mm ({pair[0]} - {pair[1]})'
+        self._self_logged = values
+        beyond = f'{PREVIEW_SELF_WITHIN * 1000.0:.0f} mm'
+        words = ', '.join(f'{clearance * 1000.0:.1f} mm ({a} - {b})'
+                          for clearance, (a, b) in nearest)
+        if not nearest:
+            words = f'all more than {beyond}'
+        elif len(nearest) < PREVIEW_SELF_COUNT:
+            words += f', the others more than {beyond}'
         self.get_logger().info(
-            f"preview: least clearance between the arm's own links {words}, from the model "
+            f"preview: nearest pairs of the arm's own links {words}, from the model "
             f'(never more than the geometry has); arm_self_margin_m is '
             f'{self.self_margin * 1000.0:.1f} mm')
 

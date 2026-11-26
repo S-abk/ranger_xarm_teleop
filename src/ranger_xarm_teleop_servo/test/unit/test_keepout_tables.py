@@ -289,6 +289,19 @@ def test_pair_minima_and_least_excess_take_each_pairs_own_margin(model):
         float((values - margins).min()))
 
 
+def test_nearest_pairs_lists_the_least_clearances_nearest_first(model):
+    rng = np.random.default_rng(11)
+    for q in rng.uniform(-2.0, 2.0, (50, 6)):
+        values = model.pair_minima(q, limit=0.2)
+        nearest = model.nearest_pairs(q, count=3, within=0.2)
+        expected = sorted(v for v in values if v < 0.2)[:3]
+        assert [c for c, _ in nearest] == pytest.approx(expected)
+        assert all(values[model.pairs.index(p)] == pytest.approx(c) for c, p in nearest)
+    q = np.array([0.0, -0.6, -0.7, 0.0, 1.3, 0.0])
+    assert model.nearest_pairs(q, count=3, within=0.0) == []
+    assert len(model.nearest_pairs(q, count=5, within=math.inf)) == 5
+
+
 def test_a_self_margin_beyond_what_the_tables_hold_refuses_the_model(built):
     urdf, _, _, loaded = built
     with pytest.raises(ko.ModelError, match='beyond what the clearance tables hold'):

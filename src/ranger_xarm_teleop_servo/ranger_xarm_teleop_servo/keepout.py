@@ -1084,6 +1084,20 @@ class Model:
             out[self._table_pairs] = np.minimum(out[self._table_pairs], value)
         return out
 
+    def nearest_pairs(self, q: Sequence[float], extra: Optional[Mapping[str, float]] = None,
+                      count: int = 3, within: float = math.inf
+                      ) -> List[Tuple[float, Tuple[str, str]]]:
+        """
+        Return up to ``count`` pairs of least clearance, nearest first, as (clearance, pair).
+
+        Only pairs closer than ``within`` are listed (their clearance is the model's, never
+        more than the geometry has); fewer, or none, when fewer are that close.
+        """
+        values = self.pair_minima(q, extra, within)
+        order = np.argsort(values, kind='stable')[:max(count, 0)]
+        return [(float(values[i]), self._names(self.pair_list[i]))
+                for i in order if values[i] < within]
+
     def cover_error(self, index: int) -> float:
         """Return ``E`` of pair ``index``: each covered side's largest sphere radius, added."""
         kind, a, b = self.pair_list[index]
