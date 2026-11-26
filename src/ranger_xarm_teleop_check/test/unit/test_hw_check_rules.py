@@ -274,7 +274,7 @@ def test_oscillation_rule():
         arm.append((x, x, x, (0.0, 0.0, 0.0, wrist, 0.0, 0.0), None, False))
     mm = rules.motion_measures(idle_data(arm=arm))
     r = rules.rule_oscillation(mm)
-    assert r.verdict == FAIL and 'limit cycle near the wrist singularity' in r.advice
+    assert r.verdict == FAIL and 'reverses faster than the rule allows' in r.advice
     assert rules.rule_oscillation(rules.motion_measures(idle_data(arm=[]))
                                   ).verdict == NOT_JUDGED
 

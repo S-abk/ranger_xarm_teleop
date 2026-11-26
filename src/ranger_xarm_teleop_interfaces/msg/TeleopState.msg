@@ -42,6 +42,7 @@ uint8 HOLD_BASE_DRIVE = 22         # the left grip (hold to drive the base) is h
 uint8 HOLD_BASE_MOVING = 23        # odometry says the base is still moving; engagement follows at rest
 uint8 HOLD_BASE_ODOM = 24          # no fresh odometry: whether the base is at rest is unknown
 uint8 HOLD_BASE_TURNED = 25        # the base turned past the set angle since the calibration: calibrate again (A)
+uint8 HOLD_KEEPOUT_BUILDING = 26   # G-15: the link keep-out's clearance tables are being built (a first start); arming is refused until they are
 uint8 hold_reason
 
 # Bound that shaped the target or the joint command of this cycle (G-6, G-8, G-14).
@@ -108,15 +109,17 @@ float64 commanded_angular_speed
 # Hand translation is multiplied by it; rotation is never scaled.
 float64 translation_scale
 
-# G-15 link keep-out: the arm's links (and the tool) against the robot's own fixed structure,
-# from a model built from the robot description at start-up (spheres covering each moving
-# link; it never reports more clearance than the collision geometry has).
-# Clearance (m): the smallest over all pairs, at the measured joint state (updated at 10 Hz,
-# 2 Hz while engaged). Exact within the keep-out's influence distance (the margin + 60 mm);
-# larger values are a lower bound. NaN when there is no model or no joint state.
+# G-15 link keep-out: the arm's links (and the tool) against the robot's own fixed structure
+# and against each other, from a model built from the robot description at start-up (it never
+# reports more clearance than the collision geometry has).
+# Clearance (m): the clearance of the pair nearest to its own margin (the fixed structure's
+# margin, or the self margin for two of the arm's own links; with one margin for all, the
+# smallest clearance), at the measured joint state (updated at 10 Hz, 2 Hz while engaged).
+# Exact within the keep-out's influence distance (the margin + 60 mm); larger values are a
+# lower bound. NaN when there is no model or no joint state.
 float64 keepout_clearance
-# The pair with that clearance: a moving link (arm or tool) and a fixed link (or, for the
-# tool, an arm link). Empty when the clearance is not exact.
+# The pair with that clearance: a moving link (arm or tool) and a fixed link, or two of the
+# arm's own links. Empty when the clearance is not exact.
 string keepout_link
 string keepout_obstacle
 # G-12: the same at the solver's reference (MoveIt Servo's commanded state) while the clutch

@@ -77,6 +77,8 @@ def _range_rcl_reads():
 def pytest_configure(config):
     """Switch discovery off in an xdist worker, before any test module starts ROS."""
     global _problem
+    config.addinivalue_line('markers', 'real_table_build: the node starts the keep-out '
+                            'table builder process itself')
     if 'PYTEST_XDIST_WORKER' not in os.environ:
         return
     refused = [name for name in REFUSED if os.environ.get(name)]
@@ -111,3 +113,38 @@ def _discovery_off_in_parallel_workers():
     if leftover or seen not in (None, RANGE_OFF):
         pytest.fail(f'discovery not switched off: rcl reads range {seen}, still set: {leftover}',
                     pytrace=False)
+
+
+@pytest.fixture(scope='session', autouse=True)
+def _keepout_table_cache(tmp_path_factory):
+    """Keep the link keep-out's clearance tables of the tests out of the user's cache."""
+    before = os.environ.get('XDG_CACHE_HOME')
+    os.environ['XDG_CACHE_HOME'] = str(tmp_path_factory.mktemp('cache'))
+    yield
+    if before is None:
+        os.environ.pop('XDG_CACHE_HOME', None)
+    else:
+        os.environ['XDG_CACHE_HOME'] = before
+
+
+@pytest.fixture(autouse=True)
+def _keepout_tables_in_process(request, monkeypatch):
+    """
+    Node tests of made-up robots: coarse tables (TEST_CONFIG), built in the test's process.
+
+    The builder process finds meshes through the ament index, which the made-up robots' meshes
+    are not in. A test marked ``real_table_build`` runs the node's own path (the process).
+    """
+    import sys
+    node = sys.modules.get('ranger_xarm_teleop_servo.teleop_node')
+    if node is None:
+        yield
+        return
+    from ranger_xarm_teleop_servo import keepout_tables as kt
+    monkeypatch.setattr(node, 'TABLE_CONFIG', kt.TEST_CONFIG)
+    if request.node.get_closest_marker('real_table_build') is None:
+        def build_here(self, plan, cache):
+            kt.build_missing(plan, cache, 1, lambda text: None)
+            self._make_keepout(plan, kt.load(plan, cache), 'built in the test')
+        monkeypatch.setattr(node.TeleopNode, '_start_table_build', build_here)
+    yield

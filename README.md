@@ -491,16 +491,19 @@ the machine, so 100 ms is 100 ms of real time whatever the simulator does.
 ### Link keep-out
 
 The teleop node keeps every arm link, and the tool, `link_keepout_margin_m` away from the
-robot's own fixed structure (G-15), so pulling the tool back toward the base no longer ends in
-MoveIt Servo's collision halt. The model is built from `/robot_description` when it arrives
-(`ranger_xarm_teleop_servo/keepout.py`, numpy only):
+robot's own fixed structure, and two of the arm's own links (with what is fixed to the wrist)
+`arm_self_margin_m` apart wherever at least two arm joints lie between them (G-15), so pulling
+the tool back toward the base, or folding the arm, no longer ends in MoveIt Servo's collision
+halt or the arm firmware's self-collision stop. The model is built from `/robot_description`
+when it arrives (`ranger_xarm_teleop_servo/keepout.py`, numpy only):
 
 - **What is kept apart.** Fixed: every link joined to the arm base through fixed joints (base,
   mounts, sensors, anything bolted on). Moving: every link downstream of the first arm joint
   (arm, gripper, cameras, any tool a project attaches). Every moving link against every fixed
-  one, and the links moved by the last arm joint against the arm links three or more joints up.
-  Left out, and logged at start-up: a moving link attached directly to a fixed one, and a pair
-  that is within the margin in every sampled posture. The service `/teleop/keepout_info`
+  one, and every two moving links with at least two arm joints between them (self pairs).
+  Left out, and logged at start-up: a moving link attached directly to a fixed one, a pair
+  that is within its margin in every sampled posture, and two moving links one arm joint
+  apart (below). The service `/teleop/keepout_info`
   (`std_srvs/Trigger`) lists the model, the pairs left out and why.
 - **The model never reports more clearance than the geometry has.** Moving links, and fixed
   meshes, are covered by spheres (25 mm cells) that contain every triangle; fixed boxes,
@@ -517,7 +520,32 @@ MoveIt Servo's collision halt. The model is built from `/robot_description` when
   refuses the start, naming the pair, its clearance range and the largest margin that frees
   it; simulation logs the same as a warning. At every start the node also logs the largest
   margin no pair is inside at the start posture and 0.1 rad either way of each joint.
-- **In the solver.** Within 60 mm of the margin, a pair's clearance `d` may fall at most at
+- **Self pairs two joints apart: clearance tables.** Their clearance depends on those two
+  joints only (and, for a body the gripper moves, on the gripper, taken at its worst over its
+  range). It is tabled once over the two joints, from a distance grid of the inner link and a
+  fine sphere cover of the outer one, and read each cycle (13 pairs on this arm: about 50 us,
+  18 MB). The read is a lower bound between grid points too (the slack is the grid spacing
+  times each joint's largest lever arm, from the description); the rows' direction is the
+  read's difference over 10 mm of motion each way. Three or more joints apart: the sphere
+  covers, as for the fixed structure.
+- **First start: the tables are built once, in a separate process.** The node looks for them
+  in the user's cache (`$XDG_CACHE_HOME/ranger_xarm_teleop/keepout_tables`, else under
+  `~/.cache`), one file per pair, keyed by its geometry, the table settings and the code that
+  makes them; a missing, damaged or mismatched file is built again, never used. While
+  `keepout_tables_build` runs (about 5 min on 4 cores; one builder at a time, under a lock on
+  the cache) the node holds with `HOLD_KEEPOUT_BUILDING` ("Building the link keep-out: wait")
+  and refuses to arm. To build ahead of a first start:
+  `ros2 run ranger_xarm_teleop_servo keepout_tables_build --description robot.urdf --base
+  <arm base link> --tip <arm tip link>`.
+- **One joint apart.** Two links joined by one arm joint (direct neighbours) are only listed.
+  Any other pair with one arm joint between them (the last link and what is fixed beyond the
+  next one, such as a gripper on the wrist) moves only by that joint, which no command of the
+  others changes. At start-up its least and largest clearance over that joint's whole range
+  and the gripper's are computed from fine covers, with the check's own error. If the least is
+  below `arm_self_margin_m` and the joint changes it by more than that error, or the two can
+  touch, the hardware path refuses the start (simulation warns); below the margin but constant
+  within the error, it is listed as constant over that joint.
+- **In the solver.** Within 60 mm of its margin, a pair's clearance `d` may fall at most at
   `(d - margin) / 0.2 s`: 0.3 m/s at 60 mm, nothing at the margin, so at 0.25 m/s motion toward
   the structure slows from about 50 mm and stops at the margin; motion along or away from it
   keeps its speed. Where the command breaks that, it is replaced by the nearest
@@ -525,7 +553,18 @@ MoveIt Servo's collision halt. The model is built from `/robot_description` when
   slowing along it).
 - **Checks.** A later `/robot_description`, or MoveIt Servo's robot description, with other
   geometry disables teleop until the node is restarted. `TeleopState` reports the clearance,
-  its pair and whether the keep-out shaped the command.
+  its pair, that pair's margin and whether the keep-out shaped the command. In the preview the
+  node logs the least clearance between the arm's own links (a model value, never more than
+  the geometry has) once a second when it changes, for choosing `arm_self_margin_m`.
+
+### Wrist reversals
+
+The feedforward (the target's own twist) passes the hand's small fast rotations straight into
+joints 4 and 6, which carry most of the tool's rotation: the command reverses many times a
+second although the hand only wobbles. Its rotation rate is therefore low-passed (gate default
+`feedforward_rotation_cutoff_hz`); its translation is not. The pose term (gain 5/s) still
+closes the rotation, so the tool reaches the hand's orientation when the hand stops: a turning
+hand is followed with a small lag, and nothing drifts.
 
 ### Command mux
 

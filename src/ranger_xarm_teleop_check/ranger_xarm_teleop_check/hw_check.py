@@ -35,6 +35,7 @@ from ranger_xarm_teleop_check.rules import Options
 from ranger_xarm_teleop_servo.joint_accel import ACCELERATION_NAME, IMMEDIATE_STOP_LOG
 
 NODE_NAME = 'hw_check'
+TELEOP_NODE_NAME = 'teleop_servo'     # the node whose /rosout summaries are read
 VERSION_PACKAGES = ('controller_manager', 'joint_trajectory_controller', 'moveit_servo')
 # Discovery: wait at least this long, and up to the longer one for the joint states publisher
 # and, in the idle stage, a publisher of the arm driver's state type (s).
@@ -193,10 +194,12 @@ def collect(stage: str, opts: Options, seconds: float) -> dict:
     executor.add_node(node)
     data = {'arm': [], 'gripper': [], 'js_publishers': [], 'clock_publishers': [],
             'activity': None, 'controller_state': {}, 'description': None, 'states': [],
-            'targets': [], 'command': [], 'jog': [], 'command_capture': None, 'clutch': [],
+            'targets': [], 'command': [], 'command_velocities': [], 'jog': [],
+            'jog_arrival': [], 'command_capture': None, 'clutch': [],
             'tracking': [],
             'warnings': [], 'robot_states': None,
             'rosout': {'overruns': 0, 'read_failures': 0, 'immediate_stops': 0,
+                       'teleop_summaries': [],
                        'overrun_examples': [],
                        'read_examples': []},
             'cameras': {}, 'qos': {}}
@@ -326,12 +329,15 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
                        tuple(pt.positions)) for pt in msg.points]
             data['command'].append((time.monotonic(), _stamp_ns(msg.header),
                                     tuple(msg.joint_names), points))
+            # Beside it, not in it: the velocities of each point (empty when it has none).
+            data['command_velocities'].append(tuple(tuple(pt.velocities) for pt in msg.points))
 
         subscribe(JointTrajectory, opts.command_topic, on_command, COMMAND_DEPTH, 'reliable',
                   'volatile')
 
         def on_jog(msg):
             data['jog'].append((tuple(msg.joint_names), tuple(msg.velocities)))
+            data['jog_arrival'].append(time.monotonic())    # beside it: when it arrived
 
         subscribe(JointJog, opts.jog_topic, on_jog, COMMAND_DEPTH, 'reliable', 'volatile')
 
@@ -345,6 +351,10 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
                 r['overrun_examples'].append(f'{msg.name}: {msg.msg}')
         if IMMEDIATE_STOP_LOG in msg.msg:     # the teleop node's stop without a ramp
             r['immediate_stops'] += 1
+        if TELEOP_NODE_NAME in msg.name.split('.') and (
+                'link keep-out by self pair' in msg.msg
+                or 'teleop cycle computation' in msg.msg):
+            r['teleop_summaries'].append(msg.msg)     # parsed in rules.keepout_step_measures
         if 'Read() returns' in msg.msg:
             r['read_failures'] += 1
             if len(r['read_examples']) < 5:

@@ -17,6 +17,7 @@ import dataclasses
 import math
 import os
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -46,6 +47,7 @@ LIMITS = {
     'max_lead_rotation_deg': 12.0,
     'max_translation_scale': 2.0,
     'link_keepout_margin_m': 0.025,
+    'arm_self_margin_m': 0.025,
     'joint_acceleration_limit_rad_s2': 10.0,    # G-18, the simulation values
     'joint_speed_cap_rad_s': 1.9,
     'motion_enabled': True,
@@ -124,14 +126,14 @@ def test_simulation_warns_and_keeps_the_rest(node):
 
 
 def test_hardware_builds_the_model_when_no_pair_is_dropped(node):
-    n = node(robot_urdf(), **HARDWARE)
+    n = node(robot_urdf(tool_lift=0.07), **HARDWARE)
     assert n.keepout is not None and ('l2', 'screen') in n.keepout.pairs
 
 
 def test_hardware_refuses_a_margin_that_holds_the_arm_over_much_of_its_range(node):
     # The arm base as a mesh close under l2: the finer cover still holds that pair inside a
     # 40 mm margin at about half of the solver's range; at 25 mm it does not.
-    urdf = robot_urdf(base_mesh_top=0.16)
+    urdf = robot_urdf(base_mesh_top=0.16, tool_lift=0.07)
     with pytest.raises(StartupRefused) as refused:
         node(urdf, link_keepout_margin_m=0.04, **HARDWARE)
     text = str(refused.value)
@@ -580,3 +582,95 @@ def test_a_failing_preview_solve_reports_nothing_and_says_so(node, monkeypatch):
     assert n.preview_limit(q, target) == teleop_node.Limit.NONE
     assert any(w.startswith('preview: the solver check failed: ') for w in warnings)
     assert n.solution is None and n.sent is None
+
+
+def test_self_margin_has_no_default(ros):
+    values = {k: v for k, v in LIMITS.items() if k != 'arm_self_margin_m'}
+    with pytest.raises(StartupRefused, match='arm_self_margin_m'):
+        TeleopNode(node_name='teleop_keepout_noself',
+                   parameter_overrides=[Parameter(k, value=v) for k, v in values.items()])
+    with pytest.raises(StartupRefused, match='arm_self_margin_m'):
+        TeleopNode(node_name='teleop_keepout_badself',
+                   parameter_overrides=[Parameter(k, value=v) for k, v in
+                                        {**LIMITS, 'arm_self_margin_m': 0.0}.items()])
+
+
+def test_self_pairs_get_tables_and_their_own_margin(node):
+    n = node(robot_urdf(), arm_self_margin_m=0.03)
+    kinds = [kind for kind, _, _ in n.keepout.pair_list]
+    assert kinds.count('table') == 8 and 'tool' in kinds
+    assert n.keepout.self_margin == 0.03 and n.keepout.margin == 0.025
+    info = n._on_keepout_info(Trigger.Request(), Trigger.Response()).message
+    assert "30.0 mm between the arm's own links" in info and '8 from clearance tables' in info
+    assert 'one joint apart (xarm_joint6' in info
+
+
+def _file_meshes(urdf, folder):
+    """Return the made-up robot with its meshes as files (the builder reads them itself)."""
+    from keepout_robot import MESHES
+    for name, data in MESHES.items():
+        path = os.path.join(str(folder), name.rsplit('/', 1)[-1])
+        with open(path, 'wb') as handle:
+            handle.write(data)
+        urdf = urdf.replace(name, 'file://' + path)
+    return urdf
+
+
+def test_hardware_refuses_a_body_one_joint_apart_that_the_joint_brings_into_contact(node):
+    # The camera and the gripper fixed to l6 reach l5 as joint 6 turns (one joint apart:
+    # no command of the others changes it, and the joint's limits are all that holds it).
+    with pytest.raises(StartupRefused) as refused:
+        node(robot_urdf(), **HARDWARE)
+    text = str(refused.value)
+    assert text.startswith('link keep-out: pairs one joint apart below arm_self_margin_m 0.025 m')
+    assert 'camera - l5 left out: one joint apart (xarm_joint6' in text
+    assert 'gripper_base - l5' in text and 'the two can touch' in text
+    n = node(robot_urdf())                       # simulation: warned, and running
+    assert n.keepout is not None
+
+
+@pytest.mark.real_table_build
+def test_a_first_start_builds_the_tables_in_a_process_holding_and_refusing_to_arm(
+        node, tmp_path, monkeypatch):
+    from ranger_xarm_teleop_servo import keepout as ko
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'cache'))      # nothing built yet
+    urdf = _file_meshes(robot_urdf(), tmp_path)
+    n = node()
+    n._resolver = lambda: ko.make_resolver(lambda package: '')
+    n._on_robot_description(String(data=urdf))
+    assert n.keepout is None and n.keepout_building
+    assert n._builder.poll() is None or n._builder.returncode == 0
+    _joints(n, READY)
+    assert math.isnan(n.arming_conditioning(np.array(READY)))      # arming refused
+    deadline = time.monotonic() + 120.0
+    while n.keepout is None and time.monotonic() < deadline:
+        rclpy.spin_once(n, timeout_sec=0.2)
+    assert n.keepout is not None and not n.keepout_building
+    assert [kind for kind, _, _ in n.keepout.pair_list].count('table') == 8
+    # The next start finds every entry in the cache: no process.
+    m = node()
+    m._resolver = lambda: ko.make_resolver(lambda package: '')
+    m._on_robot_description(String(data=urdf))
+    assert m.keepout is not None and m._builder is None
+
+
+def test_hardware_refuses_a_self_margin_that_holds_the_arm_and_names_the_parameter(node):
+    # At 40 mm the l4 - l2 table holds the arm over much of its range (INV-3 for self pairs).
+    with pytest.raises(StartupRefused) as refused:
+        node(robot_urdf(tool_lift=0.07), arm_self_margin_m=0.04, **HARDWARE)
+    text = str(refused.value)
+    assert text.startswith('link keep-out: arm_self_margin_m 0.04 m holds the arm over much of '
+                           'its range: l4 - l2 is inside the margin of 40.0 mm')
+
+
+@pytest.mark.real_table_build
+def test_a_failed_table_build_refuses_to_run(node, tmp_path, monkeypatch):
+    # The builder process finds package:// meshes through the ament index, where the made-up
+    # robot's are not: it fails, and the node must not run without its tables.
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'cache'))
+    n = node(robot_urdf())
+    assert n.keepout is None and n.keepout_building
+    deadline = time.monotonic() + 120.0
+    with pytest.raises(StartupRefused, match='the clearance table build failed'):
+        while time.monotonic() < deadline:
+            rclpy.spin_once(n, timeout_sec=0.2)

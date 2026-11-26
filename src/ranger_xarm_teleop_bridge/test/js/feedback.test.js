@@ -366,7 +366,7 @@ test('lines: no key line is wider than a key line holds (no squeezed key text)',
   const eps = [episode({}), episode({ state: 'IDLE', index: 99 }), episode({ state: 'REVIEW', index: 999 }),
     episode({ state: 'REVIEW', index: 999, discard_armed: true }), episode({ state: 'NOT_READY' }), null];
   // every limit word of operator_status.py LIMIT_TEXT
-  const limits = ['reach range', 'rotation range', 'keep-out zone', 'near robot body', 'arm controller slowing',
+  const limits = ['reach range', 'rotation range', 'keep-out zone', 'near robot body: move away', 'arm controller slowing',
     'arm lagging hand', 'speed', 'joint speed', 'joint at its end'];
   for (const ep of eps) {
     for (const limit of limits) {

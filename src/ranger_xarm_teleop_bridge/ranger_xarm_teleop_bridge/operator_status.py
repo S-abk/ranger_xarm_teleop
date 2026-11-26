@@ -46,6 +46,7 @@ HOLD_NAMES = {
     13: 'SESSION_CHANGED', 14: 'SEQ_BACKWARDS', 15: 'INPUT_JUMP', 16: 'STEP_REJECTED',
     17: 'TOOL_POSE_STALE', 18: 'SERVO_NOT_READY', 19: 'SERVO_HALTED', 20: 'SOLVER',
     21: 'STOPPING', 22: 'BASE_DRIVE', 23: 'BASE_MOVING', 24: 'BASE_ODOM', 25: 'BASE_TURNED',
+    26: 'KEEPOUT_BUILDING',
 }
 HOLD_TEXT = {
     'NONE': '',
@@ -75,6 +76,7 @@ HOLD_TEXT = {
     'BASE_MOVING': 'Base still moving: arm waits for it to stop',
     'BASE_ODOM': 'Base odometry missing: arm held',
     'BASE_TURNED': 'Base turned since calibration: recalibrate (A)',
+    'KEEPOUT_BUILDING': 'Building the link keep-out: wait (about 5 min on first start)',
 }
 # ArmOwner.STATUS_NO_ANSWER in TeleopState.mux_status (checked against the message by the unit
 # tests): teleop's last request for the arm had no answer in time; it is being asked again.
@@ -83,7 +85,7 @@ NOT_OWNER_NO_ANSWER_TEXT = 'No answer from the command mux: asking for the arm a
 # Holds that are the system's state, not a fault; every other hold is a fault and is latched.
 STATE_HOLDS = frozenset({'NONE', 'MOTION_DISABLED', 'NOT_ARMED', 'NOT_OWNER',
                          'NOT_CALIBRATED', 'CLUTCH_RELEASED', 'STOPPING', 'BASE_DRIVE',
-                         'BASE_MOVING', 'BASE_TURNED'})
+                         'BASE_MOVING', 'BASE_TURNED', 'KEEPOUT_BUILDING'})
 
 # TeleopState.LIMIT_*.
 LIMIT_NAMES = {
@@ -101,7 +103,7 @@ LIMIT_TEXT = {
     'TOOL_SPEED': 'speed',
     'JOINT_VELOCITY': 'joint speed cap',
     'JOINT_POSITION': 'joint at its end',
-    'LINK_KEEPOUT': 'near robot body',
+    'LINK_KEEPOUT': 'near robot body: move away',
     'JOINT_ACCELERATION': 'acceleration limit',
 }
 # Appended to the limit's words while motion is disabled: nothing moves, the limit is what would

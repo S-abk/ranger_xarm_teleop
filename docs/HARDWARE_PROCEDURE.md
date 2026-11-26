@@ -74,6 +74,7 @@ suggestions, not defaults, and appear nowhere the hardware path reads them.
 | `step_rotation_limit_deg` | the same in rotation | a third of the simulation value: 3 |
 | `view_cone_half_angle_deg` | controller angle off the headset's forward axis | 50 (simulation 65; narrower is stricter) |
 | `link_keepout_margin_m` | arm links from the robot's fixed structure | 0.025 (simulation 0.025); see below |
+| `arm_self_margin_m` | two of the arm's own links (and what is fixed to the wrist) with at least two arm joints between them | from 3b'': at or above the smallest arm-to-arm clearance the firmware accepted there (simulation 0.025); at most about 0.036 on this arm (above it link 6 against link 4 holds the arm, and the start is refused) |
 | `tool_pose_timeout_s` | age of the measured tool pose | from stage 2's `joint_states largest gap`: at least 3 x that gap and at most 0.1 s. If the gap needs more than 0.1 s, stop |
 
 The speed cap and the lead limit bound each other: the arm cannot go faster than lead / lag.
@@ -260,14 +261,14 @@ for it); write it next to the check report.
   not shown is in `ros2 topic echo --field preview_reason /teleop/state`.
 - **What would act on the preview.** The panel's limit line ends in "(preview)" and says what
   would hold the arm back if it were armed: "keep-out zone" or "reach range" while a plane or
-  the offset limit holds the preview; "near robot body" or "joint at its end" when, from the
+  the offset limit holds the preview; "near robot body: move away" or "joint at its end" when, from the
   posture the arm is in, the solver would remove the motion toward that target (the link
   keep-out, a joint position limit). Nothing is commanded. Terminal 2 logs each change; for the
   link keep-out it names the nearest pair and its clearance:
   `preview: LINK_KEEPOUT would act (nearest pair ..., clearance ... mm, margin ... mm)`
   [`test_hwmock_preview_limits`: at a margin of 0.04 the preview at the stage 4 posture reports
   the link keep-out and names the pair; at 0.025 nothing]. The solver is checked from the
-  posture the arm is in now, not along the way to the target. "near robot body (preview)" or
+  posture the arm is in now, not along the way to the target. "near robot body: move away (preview)" or
   "joint at its end (preview)" while your hand moves through open space means the arm would
   not follow from this posture: note the pair terminal 2 names. This is not yet the stage 4
   posture; the check that counts for stage 4 is 3b'.
@@ -372,13 +373,32 @@ right, up and down, releasing between strokes, as in stage 2.
 - You should see: the preview follows each stroke; the panel shows no limit line, or only
   "keep-out zone (preview)" or "reach range (preview)" where a plane or the offset limit holds
   the preview [`test_hwmock_preview_limits`].
-- **Stop if:** "near robot body (preview)" or "joint at its end (preview)" shows while your hand
+- **Stop if:** "near robot body: move away (preview)" or "joint at its end (preview)" shows while your hand
   moves through open space. The arm would not follow there: at a margin of 0.04 this is what
   held joints 1 and 2 still in the first stage 4 run. Do not arm. Note the pair terminal 2
   names and its clearance; choose another posture (plan it as in 3b) or a smaller margin
   (Values you supply), and repeat this step. **Stop also if** terminal 2 logs `preview: the
   solver check failed` or keeps logging `not ready`: the check did not run, and no limit line
   then proves nothing.
+
+**3b''. The arm-to-arm clearance in the preview.** Still with motion disabled, plan and execute
+with MoveIt, at velocity scaling 0.1 and in small steps, a move from the stage 4 posture toward
+the fold that stopped the arm before (joint 3 toward its upper limit, the wrist bent back toward
+the upper arm), and back. Terminal 2 logs, once a second when it changes, `preview: least
+clearance between the arm's own links <value> mm (<link> - <link>)`, a model value that is never
+more than the geometry has.
+
+- You should see: the value falls as the arm folds and rises as it unfolds; the arm firmware
+  does not stop the arm.
+- Note the smallest value at which the firmware was still content, and the pair. Choose
+  `arm_self_margin_m` at or above that value (teleop then never folds the arm further than this
+  step did), and above MoveIt Servo's 10 mm threshold plus your controller's overshoot; at most
+  about 0.036 on this arm (above it link 6 against link 4 holds the arm over much of its range
+  and the start is refused).
+- **Stop if:** the firmware stops the arm (self-collision) before the value has fallen to the
+  margin you meant to use: that margin is too small for this arm's firmware envelope. Recover
+  as in the arm's own instructions and choose a larger margin, at most the 0.036 above; if no
+  margin fits (the firmware stops the arm above 0.036), do not arm and report it.
 
 Then stop terminal 2 and start it again with `motion_enabled:=true`, as at the start of this
 stage, before 3c.
@@ -502,8 +522,10 @@ rotation lead stays near 0].
   disarm, keep the report (`link keep-out shaping the command` and `target lead (rotation)` show
   it), and go back to 3b';
 - it keeps moving more than about 2 cm after you release;
-- the wrist oscillates (the solver's limit cycle near the wrist singularity: release, then
-  disarm, and plan the arm away from the singular posture through MoveIt);
+- `wrist oscillation` fails (more than 4 reversals in a second on joint 4 or 6, counted past a
+  dead band of ±0.1 rad/s): release, then disarm, and plan the arm away from the posture
+  through MoveIt; keep the report, whose INFO lines give the count without the dead band, the
+  command and Servo-output reversals and the reported-velocity noise with the arm still;
 - `commanded joint acceleration (teleop joint command)`, `commanded joint acceleration (MoveIt
   Servo output)` or `stop time after a release` fails: keep the report and stop the stage;
 - the arm reports a collision error: payload, mounting or sensitivity may be set wrong, but

@@ -68,7 +68,10 @@ robot description shows simulator hardware only.
 
 from collections import deque
 from dataclasses import replace
+import hashlib
 import math
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -90,6 +93,7 @@ from ranger_xarm_teleop_servo import calls
 from ranger_xarm_teleop_servo import gripper as grip
 from ranger_xarm_teleop_servo import joint_accel as ja
 from ranger_xarm_teleop_servo import keepout as ko
+from ranger_xarm_teleop_servo import keepout_tables as kt
 from ranger_xarm_teleop_servo import params as gate_params
 from ranger_xarm_teleop_servo import preview
 from ranger_xarm_teleop_servo import rigid_pairs
@@ -154,6 +158,9 @@ TF_STATIC_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
 SLOW_CYCLE_S = 0.01         # a cycle longer than this is reported
 LATE_START_S = 0.03         # a cycle starting this long after the previous one is counted
 CYCLE_REPORT_S = 60.0       # how often the slow and late cycles are summed up in the log
+KEEPOUT_BUILD_POLL_S = 0.5  # how often a running table build is looked at
+PREVIEW_SELF_WITHIN = 0.15  # m: the preview's arm-to-arm clearance is exact up to this
+TABLE_CONFIG = kt.TableConfig()   # the clearance tables' resolution (unit tests: TEST_CONFIG)
 INPUT_GAP_WINDOW_S = 0.2    # the longest gap between input callbacks is kept this long
 OWNER_TIMEOUT_S = 0.5       # mux state older than this counts as "no owner"
 SERVICE_TIMEOUT_S = 1.0     # a Servo or mux call without an answer is abandoned
@@ -303,6 +310,9 @@ class CycleCounter:
         self.latest = 0.0                   # longest interval between cycle starts
         self.keepout = []                   # seconds of each solver keep-out step (wall)
         self.keepout_cpu = []               # the same, CPU time of the node's thread
+        self.keepout_self = []              # whether a self pair gave a row, per step
+        self.computation = []               # seconds of each target cycle's computation
+        self.over_period = 0                # cycles whose computation took a whole period
         self.measured_clearance = []        # seconds of each clearance at the measured joints
         self.reference_ages = []            # seconds: MoveIt Servo's output at each solve
 
@@ -310,10 +320,19 @@ class CycleCounter:
         """Record how old MoveIt Servo's newest output was when the solver used it."""
         self.reference_ages.append(age)
 
-    def keepout_step(self, took: float, cpu: float) -> None:
+    def keepout_step(self, took: float, cpu: float, self_active: bool = False) -> None:
         """Record one solver keep-out step (model and, if bound, the fix): wall and CPU s."""
         self.keepout.append(took)
         self.keepout_cpu.append(cpu)
+        self.keepout_self.append(bool(self_active))
+
+    def cycle(self, took: float, period: float) -> None:
+        """Record one target cycle's computation (s); count it if it took a whole period."""
+        if self.since is None:
+            return
+        self.computation.append(took)
+        if took > period:
+            self.over_period += 1
 
     def measured_clearance_step(self, took: float) -> None:
         """Record one keep-out clearance computed at the measured joints (s)."""
@@ -349,6 +368,21 @@ class CycleCounter:
                     f'p99 {np.percentile(steps, 99):.2f} ms, longest {steps.max():.2f} ms '
                     f'(CPU of this thread: median {np.median(cpu):.2f} ms, p99 '
                     f'{np.percentile(cpu, 99):.2f} ms). ')
+            active = np.array(self.keepout_self, dtype=bool)
+
+            def half(name, values):
+                if len(values) == 0:
+                    return f'{name} 0 steps'
+                return (f'{name} {len(values)} steps, median {np.median(values):.2f} ms, p99 '
+                        f'{np.percentile(values, 99):.2f} ms, longest {values.max():.2f} ms')
+            text += ('link keep-out by self pair: ' + half('active', steps[active]) + '; '
+                     + half('not active', steps[~active]) + '. ')
+        if self.computation:
+            took = np.array(self.computation) * 1000.0
+            text += (f'teleop cycle computation: {len(took)} cycles, median '
+                     f'{np.median(took):.2f} ms, p99 {np.percentile(took, 99):.2f} ms, longest '
+                     f'{took.max():.2f} ms, {self.over_period} over the '
+                     f'{TARGET_PERIOD_MS:.0f} ms period. ')
         if self.measured_clearance:
             steps = np.array(self.measured_clearance) * 1000.0
             text += (f'clearance at the measured joints: {len(steps)} times, median '
@@ -398,6 +432,8 @@ class TeleopNode(Node):
         self.declare_parameter('robot_description_timeout_s', 15.0)
         # G-15: PENDING for hardware, so no default; the cell is a model resolution.
         self.declare_parameter('link_keepout_margin_m', Parameter.Type.DOUBLE)
+        # G-15 between the arm's own links: PENDING for hardware, no default.
+        self.declare_parameter('arm_self_margin_m', Parameter.Type.DOUBLE)
         # G-18: PENDING for hardware, simulation values in the simulation-only file; no default.
         for name in ja.NAMES:
             self.declare_parameter(name, Parameter.Type.DOUBLE)
@@ -529,6 +565,13 @@ class TeleopNode(Node):
         if not (math.isfinite(margin) and margin > 0.0):
             raise StartupRefused(f'link_keepout_margin_m: {margin!r} is not a positive number')
         self.keepout_margin = float(margin)
+        margin = self._value_or_none('arm_self_margin_m')
+        if margin is None:
+            raise StartupRefused('required safety values without a default are not set: '
+                                 'arm_self_margin_m')
+        if not (math.isfinite(margin) and margin > 0.0):
+            raise StartupRefused(f'arm_self_margin_m: {margin!r} is not a positive number')
+        self.self_margin = float(margin)
         self.keepout_cell = float(self.get_parameter('link_keepout_cell_m').value)
         if not (math.isfinite(self.keepout_cell) and 0.002 < self.keepout_cell <= 0.05):
             raise StartupRefused('link_keepout_cell_m must be within (0.002, 0.05] m')
@@ -552,6 +595,10 @@ class TeleopNode(Node):
         self.keepout: Optional[ko.Model] = None
         self.keepout_fault = ''
         self._keepout_tried = False
+        self.keepout_building = False       # the table builder runs (HOLD_KEEPOUT_BUILDING)
+        self._later_description = None      # a different description received during the build
+        self._table_config = TABLE_CONFIG
+        self._builder = None
         self.keepout_floor = math.inf       # clearance the next cycle may not fall below
         self.servo_description_compared = False
         self.servo_pairs_checked = False    # rigid self-collision pairs reported once
@@ -680,6 +727,9 @@ class TeleopNode(Node):
         self.preview_shown_limit = Limit.NONE     # the one last logged
         self.preview_logged_at = -math.inf
         self._preview_pair = None
+        self._self_model = None             # (model, its self pairs) for the preview line
+        self._self_logged = None
+        self._self_logged_at = -math.inf
         if self.params.motion_enabled:
             self.target_pub = self.create_publisher(PoseStamped, TARGET_TOPIC, 10)
             self.servo_pub = self.create_publisher(JointJog, f'{servo}/delta_joint_cmds', 10)
@@ -928,63 +978,175 @@ class TeleopNode(Node):
         return ko.make_resolver(get_package_share_directory)
 
     def _build_keepout(self) -> None:
-        """Build the link keep-out model from the robot description (refuses the start)."""
+        """
+        Build the link keep-out model from the robot description (refuses the start).
+
+        The clearance tables of the self pairs two joints apart come from the cache; when an
+        entry is missing, one separate builder process (``keepout_build``, under the cache's
+        lock) writes it while the node holds (HOLD_KEEPOUT_BUILDING, arming refused), and the
+        model is made once it has finished.
+        """
         self._keepout_tried = True
         self._room_logged = False
-        started = time.perf_counter()
         try:
-            self.keepout = ko.build(self.urdf, self._resolver(), self.base_frame,
-                                    self.tip_frame, self.keepout_margin,
-                                    cell=self.keepout_cell,
-                                    joint_margin=self.solver_params.limit_margin)
+            plan = kt.make_plan(self.urdf, self._resolver(), self.base_frame, self.tip_frame,
+                                self._table_config)
         except ChainError as err:
             # No arm chain: the solver has none either and teleop stays not ready.
             self.get_logger().error(f'no link keep-out model: {err}')
             return
         except (ko.ModelError, ValueError) as err:
             raise StartupRefused(f'link keep-out: {err}') from err
+        cache = kt.cache_directory()
+        loaded = kt.load(plan, cache)
+        if loaded is None:
+            self._start_table_build(plan, cache)
+            return
+        self._make_keepout(plan, loaded, f'read from the cache {cache}')
+
+    def _start_table_build(self, plan, cache: str) -> None:
+        """Start the builder process for the missing tables (one; it locks the cache)."""
+        absent = kt.missing(plan, cache)
+        self.get_logger().warning(
+            f'link keep-out: {len(absent)} of {len(plan.pairs) + len(plan.one)} clearance '
+            f'entries are not in the cache {cache}; building them in a separate process '
+            '(about 5 min on a first start); arming is refused until it has finished')
+        folder = os.path.join(cache, 'descriptions')
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, hashlib.sha256(self.urdf.encode()).hexdigest() + '.urdf')
+        tmp = f'{path}.{os.getpid()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as handle:
+            handle.write(self.urdf)
+        os.replace(tmp, path)
+        command = [sys.executable, '-m', 'ranger_xarm_teleop_servo.keepout_build',
+                   '--description', path, '--base', self.base_frame, '--tip', self.tip_frame,
+                   '--cache', cache, '--with-parent']
+        if self._table_config == kt.TEST_CONFIG:
+            command.append('--test-resolution')
+        self.keepout_building = True
+        self._build_plan, self._build_cache = plan, cache
+        self._build_started = time.perf_counter()
+        self._build_lines = deque(maxlen=20)
+        self._builder = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True)
+
+        def relay(stream=self._builder.stdout, lines=self._build_lines):
+            for line in stream:
+                lines.append(line.rstrip())
+                self.get_logger().info(line.rstrip())
+        self._build_reader = threading.Thread(target=relay, daemon=True)
+        self._build_reader.start()
+        self._build_timer = self.create_timer(KEEPOUT_BUILD_POLL_S, self._poll_table_build)
+
+    def _poll_table_build(self) -> None:
+        """Load the tables once the builder has finished (refuses the start if it failed)."""
+        code = self._builder.poll()
+        if code is None:
+            return
+        self._build_timer.cancel()
+        self._build_reader.join(2.0)
+        took = time.perf_counter() - self._build_started
+        self.keepout_building = False
+        loaded = kt.load(self._build_plan, self._build_cache) if code == 0 else None
+        if loaded is None:
+            raise StartupRefused(
+                f'link keep-out: the clearance table build failed (exit status {code}, '
+                f'{took:.0f} s): ' + ' | '.join(self._build_lines))
+        self._make_keepout(self._build_plan, loaded, f'built in {took:.0f} s into the cache '
+                           f'{self._build_cache}')
+
+    def _make_keepout(self, plan, loaded, source: str) -> None:
+        """Build the model with the tables, log it, and refuse what hardware must not run."""
+        started = time.perf_counter()
+        try:
+            model = ko.build(self.urdf, self._resolver(), self.base_frame, self.tip_frame,
+                             self.keepout_margin, cell=self.keepout_cell,
+                             joint_margin=self.solver_params.limit_margin,
+                             self_margin=self.self_margin, tables=loaded)
+        except ChainError as err:
+            self.get_logger().error(f'no link keep-out model: {err}')
+            return
+        except (ko.ModelError, ValueError) as err:
+            raise StartupRefused(f'link keep-out: {err}') from err
         took = time.perf_counter() - started
-        model = self.keepout
-        self.get_logger().info(
-            f'link keep-out: margin {model.margin * 1000.0:.1f} mm, {model.sphere_count} '
-            f'spheres on {len(model.bodies)} moving links, largest radius '
+        log = self.get_logger()
+        kinds = [kind for kind, _, _ in model.pair_list]
+        log.info(
+            f'link keep-out: margin {model.margin * 1000.0:.1f} mm from the fixed structure, '
+            f"{model.self_margin * 1000.0:.1f} mm between the arm's own links; "
+            f'{model.sphere_count} spheres on {len(model.bodies)} moving links, largest radius '
             f'{model.largest_radius * 1000.0:.1f} mm (inflation below twice that per covered '
-            f'side), {len(model.pair_list)} pairs, fixed '
-            f'links {model.units.names}, built in {took:.2f} s, fingerprint '
-            f'{model.fingerprint[:12]}')
+            f'side); {kinds.count("fixed")} pairs with the fixed links {model.units.names}, '
+            f'{kinds.count("tool")} self pairs on spheres (three or more joints apart), '
+            f'{kinds.count("table")} from clearance tables (two joints apart, '
+            f'{model.table_bytes / 2 ** 20:.1f} MB, {source}); built in {took:.2f} s, '
+            f'fingerprint {model.fingerprint[:12]}')
+        for outer, inner, why in model.unsupported:
+            log.warning(f'link keep-out: {outer} - {inner} has no table ({why}); it is on the '
+                        'sphere covers')
         if model.refined:
-            self.get_logger().info(
+            log.info(
                 f'link keep-out: finer cells ({model.fine_cell * 1000.0:.0f} mm) on '
                 f'{model.refined}: the pairs {model.refined_by} stayed within the margin plus '
                 "their covers' own error at every sampled posture")
+
+        def margin_name(item) -> Tuple[str, float]:
+            return (('arm_self_margin_m', model.self_margin) if item.self_pair
+                    else ('link_keepout_margin_m', model.margin))
+        refused_one = []
         for item in model.excluded:
-            self.get_logger().warning(f'link keep-out: {ko.excluded_text(item, model.margin)}')
+            _, margin = margin_name(item)
+            text = f'link keep-out: {ko.excluded_text(item, margin)}'
+            if item.reason == 'adjacent':
+                log.info(text)
+            elif item.reason == ko.ONE_JOINT and not ko.one_joint_refused(item, margin):
+                log.info(text)
+            else:
+                log.warning(text)
+            if ko.one_joint_refused(item, margin):
+                refused_one.append(item)
         for item in model.held:
-            self.get_logger().warning(f'link keep-out: {ko.held_text(item, model.margin)}')
+            log.warning(f'link keep-out: {ko.held_text(item, margin_name(item)[1])}')
         keepable = [item for item in model.excluded if ko.kept_by_smaller_margin(item)]
+        procedure = '(docs/HARDWARE_PROCEDURE.md, "Values you supply")'
         if keepable and self.hardware_limits:
             # A pair the margin silently drops is not kept clear at all; on hardware the
-            # margin is chosen again instead (docs/HARDWARE_PROCEDURE.md, "Values you supply").
+            # margin is chosen again instead.
             raise StartupRefused(
-                f'link keep-out: link_keepout_margin_m {model.margin:g} m leaves out '
-                + '; '.join(ko.excluded_text(item, model.margin) for item in keepable)
-                + '; choose a smaller margin (docs/HARDWARE_PROCEDURE.md, "Values you supply")')
+                'link keep-out: ' + '; '.join(
+                    f'{margin_name(i)[0]} {margin_name(i)[1]:g} m leaves out '
+                    + ko.excluded_text(i, margin_name(i)[1]) for i in keepable)
+                + f'; choose a smaller margin {procedure}')
         if model.held and self.hardware_limits:
             # A kept pair inside the margin over much of the working range holds joints
             # without a word, as on the first stage 4 run: on hardware the margin is chosen
             # again instead.
             raise StartupRefused(
-                f'link keep-out: link_keepout_margin_m {model.margin:g} m holds the arm over much '
-                'of its range: ' + '; '.join(ko.held_text(item, model.margin)
-                                             for item in model.held)
-                + '; choose a smaller margin (docs/HARDWARE_PROCEDURE.md, "Values you supply")')
+                'link keep-out: ' + '; '.join(
+                    f'{margin_name(i)[0]} {margin_name(i)[1]:g} m holds the arm over much of '
+                    'its range: ' + ko.held_text(i, margin_name(i)[1]) for i in model.held)
+                + f'; choose a smaller margin {procedure}')
+        if refused_one and self.hardware_limits:
+            # Two bodies one joint apart are held by nothing but that joint's limits: below
+            # the self margin, and changed by the joint, they could meet unseen.
+            raise StartupRefused(
+                'link keep-out: pairs one joint apart below arm_self_margin_m '
+                f'{model.self_margin:g} m that the joint between them changes, or that can '
+                'touch: ' + '; '.join(ko.excluded_text(i, model.self_margin)
+                                      for i in refused_one)
+                + f'; choose a smaller self margin or check the description {procedure}')
         if model.not_covered:
-            self.get_logger().warning(
+            log.warning(
                 'link keep-out: not covered (behind joints that are neither fixed nor arm '
                 f'joints): {model.not_covered}')
         if not model.pair_list:
-            self.get_logger().warning('link keep-out: the description has no pair of arm '
-                                      'and fixed collision geometry; nothing is kept out')
+            log.warning('link keep-out: the description has no pair of arm and fixed '
+                        'collision geometry; nothing is kept out')
+        self.keepout = model
+        later, self._later_description = self._later_description, None
+        if later is not None:
+            self._compare_description(later, 'a /robot_description that arrived during the '
+                                             'build')
         if self.gripper_params.enabled:
             joint = self.gripper_params.joint
             indices = model.pairs_moved_by(joint)
@@ -992,7 +1154,7 @@ class TeleopNode(Node):
                 {joint} | {name for name, (source, _, _) in model.extra_joints.items()
                            if source == joint})
             self.gripper_keepout = model.subset(indices) if indices else None
-            self.get_logger().info(
+            log.info(
                 f'link keep-out: {len(indices)} pairs move with {joint}; a gripper step '
                 'toward the margin is not taken')
 
@@ -1044,6 +1206,13 @@ class TeleopNode(Node):
 
     def close(self) -> None:
         """Log the cycle summary since the last one; stop the watcher thread and its node."""
+        if self._builder is not None and self._builder.poll() is None:
+            # Its entries are written whole, so a stopped build leaves none half-written.
+            self._builder.terminate()
+            try:
+                self._builder.wait(5.0)
+            except subprocess.TimeoutExpired:
+                self._builder.kill()
         try:
             summary = self._cycles.report(self.mono(), final=True)
             if summary:
@@ -1121,6 +1290,9 @@ class TeleopNode(Node):
             self._build_arm()
         elif msg.data != self.urdf and self.keepout is not None:
             self._compare_description(msg.data, 'a later /robot_description')
+        elif msg.data != self.urdf:
+            # The model is still being built: compared once it is (``_make_keepout``).
+            self._later_description = msg.data
 
     def _on_owner(self, msg: ArmOwner) -> None:
         self.owner = msg.owner
@@ -1272,6 +1444,10 @@ class TeleopNode(Node):
         """Return the solver's orientation conditioning at ``joints`` (NaN if unknown)."""
         if joints is None or self.arm is None:
             return math.nan
+        if self.keepout_building:
+            self.get_logger().error("arm refused: the link keep-out's clearance tables are "
+                                    'still being built (first start)')
+            return math.nan
         if self.keepout_fault:
             self.get_logger().error(f'arm refused: {self.keepout_fault}')
             return math.nan
@@ -1383,6 +1559,7 @@ class TeleopNode(Node):
                   servo_active=(self.servo_state == SERVO_ACTIVE and self.servo_verified
                                 and not self.servo_mode_wrong and following),
                   servo_halted=self.servo_halted() or stuck, solver_ready=solver_ready,
+                  keepout_building=self.keepout_building,
                   arming_conditioning=(self.arming_conditioning(joints)
                                        if self.state.arm_pending else math.inf),
                   blocked=blocked, stopping=self.stopping,
@@ -1433,6 +1610,7 @@ class TeleopNode(Node):
         marks.append(('publish state', self.mono()))
         steps = [(b[1] - a[1], b[0]) for a, b in zip(marks, marks[1:])]
         self._cycle_took = marks[-1][1] - now
+        self._cycles.cycle(self._cycle_took, self.params.target_period)
         self._cycle_slowest = '%s %.0f ms' % (max(steps)[1], max(steps)[0] * 1000.0)
         parts = ', '.join(f'{name} {seconds * 1000.0:.1f} ms'
                           for name, seconds in self._command_steps)
@@ -1472,10 +1650,13 @@ class TeleopNode(Node):
         others = {k: v for k, v in latest[2].items() if k not in self.gripper_moved}
 
         def clearance(position: float) -> float:
+            # The least clearance less its pair's margin, on the fixed margin's scale: below
+            # keepout_margin exactly when some pair is inside its own margin.
             values = dict(others)
             values[self.gripper_params.joint] = position
             try:
-                return float(model.clearance(joints, model.extra_values(values))[0])
+                return model.least_excess(joints, model.extra_values(values)) \
+                    + self.keepout_margin
             except (ko.ModelError, ValueError):
                 return math.nan
 
@@ -1557,6 +1738,7 @@ class TeleopNode(Node):
             self.preview_reason = why
         self.preview_solver_limit = (self.preview_limit(joints, target) if target is not None
                                      else Limit.NONE)
+        self.preview_self_clearance(env.now, joints)
         shown = preview.shown_limit(self.preview_state.limit, self.preview_solver_limit)
         # Logged when it changes, at most once a second (a hand at a boundary can make it
         # alternate from cycle to cycle); the state message has it every cycle.
@@ -1591,8 +1773,46 @@ class TeleopNode(Node):
                                       throttle_duration_sec=5.0)
             return Limit.NONE
         if solution.keepout_bound:
-            self._preview_pair = (solution.keepout_pair, solution.keepout_clearance)
+            self._preview_pair = (solution.keepout_pair, solution.keepout_clearance,
+                                  solution.keepout_margin)
         return preview.solver_limit(solution.fixed, solution.keepout_bound)
+
+    def preview_self_clearance(self, now: float, joints) -> None:
+        """
+        Log the least clearance between the arm's own links at the measured joints (preview).
+
+        Once a second when it changed by a millimetre or more, or its pair changed: the
+        model's value (a lower bound of the geometry's) for choosing arm_self_margin_m while
+        the arm is moved toward itself with motion disabled (docs/HARDWARE_PROCEDURE.md).
+        """
+        if (self.keepout is None or joints is None or now - self._self_logged_at < 1.0
+                or not np.all(np.isfinite(joints))):
+            return
+        if self._self_model is None or self._self_model[0] is not self.keepout:
+            members = [i for i in range(len(self.keepout.pair_list)) if self.keepout.is_self(i)]
+            self._self_model = (self.keepout,
+                                self.keepout.subset(members) if members else None)
+        model = self._self_model[1]
+        if model is None:
+            return
+        self._self_logged_at = now          # looked up at most once a second
+        try:
+            clearance, pair = model.clearance(joints, self.keepout_extra(),
+                                              within=PREVIEW_SELF_WITHIN)
+        except (ko.ModelError, ValueError):
+            return
+        last = self._self_logged
+        if last is not None and pair == last[1] and abs(clearance - last[0]) < 0.001:
+            return
+        self._self_logged = (clearance, pair)
+        if pair == ('', ''):
+            words = f'more than {PREVIEW_SELF_WITHIN * 1000.0:.0f} mm'
+        else:
+            words = f'{clearance * 1000.0:.1f} mm ({pair[0]} - {pair[1]})'
+        self.get_logger().info(
+            f"preview: least clearance between the arm's own links {words}, from the model "
+            f'(never more than the geometry has); arm_self_margin_m is '
+            f'{self.self_margin * 1000.0:.1f} mm')
 
     def preview_limit_words(self, limit: Limit) -> str:
         """Return the log line's words for the limit the preview reports."""
@@ -1601,10 +1821,11 @@ class TeleopNode(Node):
         words = f'{limit.name} would act'
         found = self._preview_pair
         if limit == Limit.LINK_KEEPOUT and found is not None:
-            (link, obstacle), clearance = found
+            (link, obstacle), clearance, margin = found
+            if not math.isfinite(margin):
+                margin = self.keepout_margin
             words += (f' (nearest pair {link} - {obstacle}, clearance '
-                      f'{clearance * 1000.0:.1f} mm, margin {self.keepout_margin * 1000.0:.1f} '
-                      'mm)')
+                      f'{clearance * 1000.0:.1f} mm, margin {margin * 1000.0:.1f} mm)')
         return words + '; nothing is commanded with motion disabled'
 
     def publish_target(self, target: Pose, stamp) -> None:
@@ -1702,7 +1923,8 @@ class TeleopNode(Node):
         if self.keepout is None:
             return
         took = solution.keepout_seconds
-        self._cycles.keepout_step(took, solution.keepout_cpu_seconds)
+        self._cycles.keepout_step(took, solution.keepout_cpu_seconds,
+                                  getattr(solution, 'keepout_self_active', False))
         self._command_steps.append(('link keep-out', took))
         if took > KEEPOUT_SLOW_S:
             self.get_logger().warning(f'link keep-out step took {took * 1000.0:.1f} ms',
@@ -1717,8 +1939,10 @@ class TeleopNode(Node):
                 f'({solution.keepout_pair[0]} - {solution.keepout_pair[1]}) is below the '
                 f'floor of the cycle before, {self.keepout_floor * 1000.0:.2f} mm',
                 throttle_duration_sec=1.0)
-        self.keepout_floor = (min(clearance, self.keepout.margin) if math.isfinite(clearance)
-                              else math.inf)
+        margin = getattr(solution, 'keepout_margin', math.nan)
+        if not math.isfinite(margin):
+            margin = self.keepout.margin
+        self.keepout_floor = min(clearance, margin) if math.isfinite(clearance) else math.inf
 
     def _on_joint_path(self, request, response):
         times, postures = self.path.path()
@@ -1749,22 +1973,34 @@ class TeleopNode(Node):
             response.success = False
             response.message = 'no link keep-out model yet (no robot description)'
             return response
-        lines = [f'margin {model.margin * 1000.0:.1f} mm; cell {model.cell * 1000.0:.0f} mm; '
+        kinds = [kind for kind, _, _ in model.pair_list]
+        lines = [f'margin {model.margin * 1000.0:.1f} mm from the fixed structure, '
+                 f"{model.self_margin * 1000.0:.1f} mm between the arm's own links; cell "
+                 f'{model.cell * 1000.0:.0f} mm; '
                  f'{model.sphere_count} spheres; largest radius '
                  f'{model.largest_radius * 1000.0:.1f} mm (inflation below twice that per '
                  f'covered side); fingerprint {model.fingerprint}',
                  f'fixed links: {model.units.names}',
-                 f'pairs: {len(model.pair_list)}']
+                 f'pairs: {len(model.pair_list)} ({kinds.count("fixed")} with the fixed '
+                 f'structure, {kinds.count("tool")} self pairs on spheres, '
+                 f'{kinds.count("table")} from clearance tables, '
+                 f'{model.table_bytes / 2 ** 20:.1f} MB)']
         for item in model.excluded:
-            lines.append(f'left out: {item.moving} - {item.other}: {item.reason}'
-                         + ('' if item.reason == 'adjacent' else
-                            f' (clearance {item.low * 1000.0:.1f} to '
-                            f'{item.high * 1000.0:.1f} mm)'))
+            margin = model.self_margin if item.self_pair else model.margin
+            if item.reason == 'adjacent':
+                lines.append(f'left out: {item.moving} - {item.other}: adjacent')
+            elif item.reason == ko.NEAR:
+                lines.append(f'left out: {item.moving} - {item.other}: {item.reason} '
+                             f'(clearance {item.low * 1000.0:.1f} to {item.high * 1000.0:.1f} '
+                             'mm)')
+            else:
+                lines.append(f'left out: {ko.excluded_text(item, margin)}')
         if model.refined:
             lines.append(f'finer cells ({model.fine_cell * 1000.0:.0f} mm): {model.refined}, '
                          f'for {model.refined_by}')
         for item in model.held:
-            lines.append(f'held at work: {ko.held_text(item, model.margin)}')
+            lines.append('held at work: ' + ko.held_text(
+                item, model.self_margin if item.self_pair else model.margin))
         if model.not_covered:
             lines.append(f'not covered: {model.not_covered}')
         if self.keepout_fault:
@@ -1943,8 +2179,8 @@ class TeleopNode(Node):
             msg.measured_tool_pose_stamp.sec = int(tool_stamp_ns // 1_000_000_000)
             msg.measured_tool_pose_stamp.nanosec = int(tool_stamp_ns % 1_000_000_000)
         msg.preview_reason = self.preview_reason if self.preview_pub is not None else ''
-        msg.keepout_margin = self.keepout_margin
         clearance, pair = self.idle_clearance()
+        msg.keepout_margin = self.keepout_margin      # the fixed structure's, as before
         msg.keepout_clearance = float(clearance)
         msg.keepout_link, msg.keepout_obstacle = pair
         msg.keepout_clearance_commanded = math.nan
@@ -2028,7 +2264,9 @@ class TeleopNode(Node):
         self.get_logger().info(
             f'link keep-out at the start posture: no pair is inside a margin up to {near}, '
             f'here and {ko.ROOM_STEP:g} rad either way of each joint; the margin is '
-            f'{self.keepout_margin * 1000.0:.1f} mm (looked up in {took * 1000.0:.0f} ms)')
+            f'{self.keepout_margin * 1000.0:.1f} mm from the fixed structure, '
+            f"{self.self_margin * 1000.0:.1f} mm between the arm's own links (looked up in "
+            f'{took * 1000.0:.0f} ms)')
 
     # ---- MoveIt Servo ----
 

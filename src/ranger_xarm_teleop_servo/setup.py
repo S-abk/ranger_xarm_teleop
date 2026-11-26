@@ -41,6 +41,7 @@ setup(
             'base_node = ranger_xarm_teleop_servo.base_node:main',
             'stability_node = ranger_xarm_teleop_servo.stability_node:main',
             'reset_watchdog_node = ranger_xarm_teleop_servo.reset_watchdog_node:main',
+            'keepout_tables_build = ranger_xarm_teleop_servo.keepout_build:main',
         ],
     },
 )

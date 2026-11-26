@@ -105,6 +105,7 @@ class Hold(IntEnum):
     BASE_MOVING = 23        # the base still moves by odometry; engage at rest (wait, bounded)
     BASE_ODOM = 24          # no fresh odometry: whether the base is at rest is unknown
     BASE_TURNED = 25        # the base turned past the set angle since the calibration
+    KEEPOUT_BUILDING = 26   # G-15: the link keep-out's clearance tables are being built
 
 
 class Limit(IntEnum):
@@ -166,6 +167,9 @@ class Env:
     # The solver can run: kinematic chain and joint state known, and the commanded state
     # agrees with the measured one.
     solver_ready: bool = True
+    # G-15: the link keep-out's clearance tables are still being built (first start); no
+    # target and no arming until they are.
+    keepout_building: bool = False
     # Orientation conditioning of the solver at the measured joints (NaN: unknown). Read
     # only when an arm request waits for it; the default leaves arming unchecked.
     arming_conditioning: float = math.inf
@@ -206,6 +210,8 @@ class GateState:
     scale: float = 1.0                # translation scale the engagement's anchor is built for
     filtered: Optional[Pose] = None
     last_target: Optional[Pose] = None
+    ff_rotation: Tuple[float, float, float] = (0.0, 0.0, 0.0)   # the feedforward's low-passed
+    #                                                             rotation rate (rad/s)
     events: Tuple[str, ...] = ()
 
 
@@ -401,6 +407,8 @@ def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Ho
     frame = state.frame
     if not params.motion_enabled:
         return Hold.MOTION_DISABLED
+    if env.keepout_building:
+        return Hold.KEEPOUT_BUILDING
     if not state.want_armed:
         return Hold.NOT_ARMED
     if not env.owner_is_teleop:
@@ -542,6 +550,16 @@ def absorb(anchor: Pose, filtered: Pose, mapped_turn: Quat, before: Pose,
                                  anchor.q))
     return (Pose(v_add(anchor.p, shift), anchor_q),
             Pose(v_add(filtered.p, shift), q_normalize(q_mul(turn, filtered.q))))
+
+
+def rotation_low_pass(previous: Sequence[float], rate: Sequence[float],
+                      params: GateParams) -> Tuple[float, float, float]:
+    """Return the feedforward's rotation rate after a first-order low-pass (wrist reversals)."""
+    cutoff = params.feedforward_rotation_cutoff_hz
+    if not cutoff > 0.0:
+        return tuple(float(v) for v in rate)
+    alpha = 1.0 - math.exp(-2.0 * math.pi * cutoff * params.target_period)
+    return tuple(float(p + alpha * (r - p)) for p, r in zip(previous, rate))
 
 
 def twist(previous: Pose, current: Pose, period: float) -> Tuple[float, ...]:
@@ -708,7 +726,8 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
                         tool0=env.tool_pose, anchor=env.tool_pose,
                         heading=state.calibration.heading,
                         scale=params.translation_scale(state.coarse),
-                        filtered=env.tool_pose, last_target=env.tool_pose)
+                        filtered=env.tool_pose, last_target=env.tool_pose,
+                        ff_rotation=(0.0, 0.0, 0.0))
         events.append(f'clutch engaged at seq {frame.seq}')
 
     controller = apply_pivot(frame.controller, params.pivot_offset)
@@ -730,6 +749,8 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
         return out(_released(state, Hold.STEP_REJECTED), None, Hold.STEP_REJECTED,
                    Limit.NONE, False)
     feedforward = twist(state.last_target, target, params.target_period)
+    rotation = rotation_low_pass(state.ff_rotation, feedforward[3:], params)
+    feedforward = feedforward[:3] + rotation
     final, leading = clamp_lead(target, env.tool_pose, params)
     final, absorbed = absorb_blocked(final, env.tool_pose, env.blocked)
     leading = leading or absorbed
@@ -739,11 +760,12 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
             # G-6 outranks: the last accepted target is kept, and so is the arm.
             final, limit = state.last_target, Limit.KEEP_OUT
             feedforward = (0.0,) * 6
+            rotation = (0.0, 0.0, 0.0)
     anchor, filtered = state.anchor, filtered
     if final != target:
         mapped_turn = clutch_relative(controller, state.clutch, state.heading,
                                       Pose(state.anchor.p, IDENTITY_Q)).q
         anchor, filtered = absorb(state.anchor, filtered, mapped_turn, target, final)
     state = replace(state, anchor=anchor, filtered=filtered, last_target=final,
-                    latched=Hold.NONE, events=())
+                    ff_rotation=tuple(rotation), latched=Hold.NONE, events=())
     return out(state, final, Hold.NONE, limit, True, feedforward)

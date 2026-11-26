@@ -18,6 +18,7 @@ Pure functions on plain lists; no ROS imports. Times are seconds (floats).
 """
 
 import math
+import re
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -26,6 +27,15 @@ from ranger_xarm_teleop_servo.tracking import resample, RESAMPLE_S
 
 ARM_JOINTS = tuple(f'xarm_joint{i}' for i in range(1, 7))
 GRIPPER_JOINT = 'xarm_drive_joint'
+
+# "Still" for the reported-velocity noise (still_windows): no nonzero joint-jog command for
+# STILL_SPAN_S before and during, and the joint position moving less than STILL_MOVE_RAD over
+# each STILL_SPAN_S span; a window counts from STILL_MIN_S; a gap between two samples longer
+# than STILL_MAX_GAP_S ends it (a lost stretch is not still time).
+STILL_SPAN_S = 0.5
+STILL_MOVE_RAD = 0.002
+STILL_MIN_S = 1.0
+STILL_MAX_GAP_S = 0.1
 
 
 def percentile(values: Sequence[float], q: float) -> Optional[float]:
@@ -682,4 +692,195 @@ def stop_durations(t: Sequence[float], analysis: dict,
         unfinished = bool(unfinished)
         out.append({'release_s': float(release), 'first_point_s': float(t[first]),
                     'duration_s': duration, 'unfinished': unfinished})
+    return out
+
+
+# ---- reversals of the command, still-arm velocity noise, teleop log summaries --------------
+
+def jog_series(messages, arrivals) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Return (t (n,), v (n, 6)): the arm joints' joint-jog velocities with their arrival times.
+
+    ``messages`` holds ``(names, velocities)`` as for ``jog_commands`` and ``arrivals`` the
+    arrival time (s) of each, in the same order; a message without all six arm joints is left
+    out. Empty when the two do not have the same length (no times were kept).
+    """
+    if len(messages) != len(arrivals):
+        return np.zeros(0), np.zeros((0, 6))
+    times, rows = [], []
+    for (names, velocities), arrived in zip(messages, arrivals):
+        index = {}
+        for i, name in enumerate(names):
+            index.setdefault(name, i)
+        if not all(j in index for j in ARM_JOINTS) or len(velocities) != len(names):
+            continue
+        times.append(float(arrived))
+        rows.append([float(velocities[index[j]]) for j in ARM_JOINTS])
+    return np.asarray(times, dtype=float), np.asarray(rows, dtype=float).reshape(-1, 6)
+
+
+def command_velocity_series(messages, velocities) -> dict:
+    """
+    Return the arm joints' velocity of MoveIt Servo's output over time, and where it came from.
+
+    ``messages`` holds ``(arrival, stamp_ns, names, points)`` as ``data['command']`` and
+    ``velocities`` the velocities of each message's points, ``[(v, ...), ...]`` per message
+    in the same order (empty tuples where a point has none). When every message with all
+    six arm joints carries the first point's velocities (one per name), those are used, at the
+    header stamp plus the point's ``time_from_start`` ('velocities'). Otherwise the velocity
+    is the central difference of the merged position path (``command_points``, 'positions';
+    NaN at the ends). Returns ``{'source', 't', 'v', 'messages'}``; ``source`` is None when
+    there is no usable message.
+    """
+    out = {'source': None, 't': np.zeros(0), 'v': np.zeros((0, 6)), 'messages': len(messages)}
+    usable, with_velocity = [], True
+    paired = len(velocities) == len(messages)
+    for k, (_arrival, stamp_ns, names, points) in enumerate(messages):
+        index = {}
+        for i, name in enumerate(names):
+            index.setdefault(name, i)
+        if not all(j in index for j in ARM_JOINTS) or not points:
+            continue
+        vel = velocities[k][0] if paired and len(velocities[k]) else ()
+        if len(vel) != len(names):
+            with_velocity = False
+            usable.append((stamp_ns, names, points, None))
+            continue
+        usable.append((stamp_ns, names, points, [float(vel[index[j]]) for j in ARM_JOINTS]))
+    if not usable:
+        return out
+    if with_velocity:
+        pairs = sorted(((stamp * 1e-9 + float(points[0][0]), v)
+                        for stamp, _n, points, v in usable), key=lambda x: x[0])
+        out['source'] = 'velocities'
+        out['t'] = np.asarray([p[0] for p in pairs])
+        out['v'] = np.asarray([p[1] for p in pairs])
+        return out
+    path = command_points([(stamp, names, points) for stamp, names, points, _v in usable])
+    if len(path['t']):
+        out['source'] = 'positions'
+        out['t'] = path['t']
+        out['v'] = joint_velocities(path['t'], path['p'])[0]
+    return out
+
+
+def still_windows(t: Sequence[float], p: Sequence[float], command_t: Sequence[float],
+                  span: float = STILL_SPAN_S, move: float = STILL_MOVE_RAD,
+                  min_len: float = STILL_MIN_S, max_gap: float = STILL_MAX_GAP_S
+                  ) -> List[Tuple[float, float]]:
+    """
+    Return the (start, end) times of the stretches where one joint is still.
+
+    A sample at ``t[i]`` is still when no entry of ``command_t`` (the times of nonzero
+    joint-jog commands) falls in ``[t[i] - span, t[i]]`` and the positions ``p`` there differ
+    by less than ``move`` (largest minus smallest; at least two samples). The look-back only
+    qualifies a sample: a stretch is a run of still samples with no gap above ``max_gap``, from
+    its first still sample to its last, and is kept when at least ``min_len`` long. A look-back
+    with a gap above ``max_gap`` in it, or none of whose samples is near its start, is not
+    still.
+    """
+    tt = np.asarray(t, dtype=float)
+    pp = np.asarray(p, dtype=float)
+    cmd = np.sort(np.asarray(command_t, dtype=float))
+    n = len(tt)
+    flags = np.zeros(n, dtype=bool)
+    if n == 0:
+        return []
+    lows = np.searchsorted(tt, tt - span, side='left')
+    first_cmd = np.searchsorted(cmd, tt - span, side='left')
+    lost = np.concatenate([[0], np.cumsum(np.diff(tt) > max_gap)])   # gaps up to each sample
+    for i in range(n):
+        if tt[i] - tt[0] < span or i - lows[i] < 1:
+            continue
+        # The look-back must be covered by samples: no gap in it, and one near its start.
+        if lost[i] != lost[lows[i]] or tt[lows[i]] - (tt[i] - span) > max_gap:
+            continue
+        if first_cmd[i] < len(cmd) and cmd[first_cmd[i]] <= tt[i]:
+            continue
+        seg = pp[lows[i]:i + 1]
+        if np.all(np.isfinite(seg)) and float(seg.max() - seg.min()) < move:
+            flags[i] = True
+    windows = []
+    i = 0
+    while i < n:
+        if not flags[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and flags[j + 1] and tt[j + 1] - tt[j] <= max_gap:
+            j += 1
+        if tt[j] - tt[i] >= min_len:
+            windows.append((float(tt[i]), float(tt[j])))
+        i = j + 1
+    return windows
+
+
+def still_noise(t: Sequence[float], v: Sequence[float], windows, min_speed: float,
+                window: float) -> dict:
+    """
+    Return the reported velocity's own noise over still ``windows`` (see ``still_windows``).
+
+    ``{'seconds', 'windows', 'samples', 'rms', 'peak', 'sign_changes'}``: the total time, the
+    root mean square and the largest magnitude of ``v`` in them, and the most sign changes
+    (|v| above ``min_speed``) in any ``window`` s inside one stretch. rms, peak and
+    sign_changes are None with no window.
+    """
+    tt = np.asarray(t, dtype=float)
+    vv = np.asarray(v, dtype=float)
+    out = {'seconds': float(sum(b - a for a, b in windows)), 'windows': len(windows),
+           'samples': 0, 'rms': None, 'peak': None, 'sign_changes': None}
+    chosen, changes = [], 0
+    for start, end in windows:
+        pick = (tt >= start) & (tt <= end) & np.isfinite(vv)
+        chosen.append(vv[pick])
+        changes = max(changes, sign_changes_per_window(tt[pick], vv[pick], min_speed, window))
+    values = np.concatenate(chosen) if chosen else np.zeros(0)
+    if len(values):
+        out.update(samples=int(len(values)), rms=float(np.sqrt(np.mean(values ** 2))),
+                   peak=float(np.max(np.abs(values))), sign_changes=changes)
+    return out
+
+
+_NUMBER = r'(\d+(?:\.\d+)?)'
+_HALF = (r'(\d+) steps(?:, median ' + _NUMBER + r' ms, p99 ' + _NUMBER + r' ms, longest '
+         + _NUMBER + r' ms)?')
+_SELF_PAIR = re.compile(r'link keep-out by self pair:\s+active\s+' + _HALF
+                        + r'\s*;\s*not active\s+' + _HALF)
+_CYCLES = re.compile(r'teleop cycle computation:\s+(\d+) cycles(?:, median ' + _NUMBER
+                     + r' ms, p99 ' + _NUMBER + r' ms, longest ' + _NUMBER + r' ms, (\d+) over '
+                     r'the ' + _NUMBER + r' ms period)?')
+
+
+def _half(groups) -> dict:
+    steps, median_ms, p99_ms, longest_ms = groups
+    return {'steps': int(steps), 'median_ms': None if median_ms is None else float(median_ms),
+            'p99_ms': None if p99_ms is None else float(p99_ms),
+            'longest_ms': None if longest_ms is None else float(longest_ms)}
+
+
+def parse_teleop_summary(text: str) -> dict:
+    """
+    Return what the teleop node's periodic log line says about its step times.
+
+    Looks for the sentences ``link keep-out by self pair: active N steps, median A ms, p99 B
+    ms, longest C ms; not active M steps, median D ms, p99 E ms, longest F ms.`` (a half with
+    no steps has no numbers after its count) and ``teleop cycle computation: K cycles, median
+    G ms, p99 H ms, longest I ms, J over the P ms period.``, wherever they stand in ``text``.
+    Returns ``{'pair': None or {'active': half, 'inactive': half}, 'cycles': None or {...}}``
+    with ``half = {'steps', 'median_ms', 'p99_ms', 'longest_ms'}`` (None where absent).
+    """
+    out = {'pair': None, 'cycles': None}
+    found = _SELF_PAIR.search(text)
+    if found:
+        g = found.groups()
+        out['pair'] = {'active': _half(g[:4]), 'inactive': _half(g[4:])}
+    found = _CYCLES.search(text)
+    if found:
+        k, median_ms, p99_ms, longest_ms, over, period = found.groups()
+        out['cycles'] = {
+            'cycles': int(k), 'median_ms': None if median_ms is None else float(median_ms),
+            'p99_ms': None if p99_ms is None else float(p99_ms),
+            'longest_ms': None if longest_ms is None else float(longest_ms),
+            'over': None if over is None else int(over),
+            'period_ms': None if period is None else float(period)}
     return out

@@ -56,7 +56,8 @@ RESERVED = ('limits_are_simulation_only', 'motion_enabled', 'max_offset_translat
             'max_offset_rotation_deg', 'view_cone_half_angle_deg', 'step_translation_limit_m',
             'step_rotation_limit_deg', 'linear_speed_cap_m_s', 'angular_speed_cap_rad_s',
             'max_lead_translation_m', 'max_lead_rotation_deg', 'max_translation_scale',
-            'link_keepout_margin_m', 'link_keepout_cell_m', 'tool_pose_timeout_s',
+            'link_keepout_margin_m', 'arm_self_margin_m', 'link_keepout_cell_m',
+            'tool_pose_timeout_s',
             'joint_velocity_limit_names', 'joint_velocity_limits',
             # Gripper teleop: its switch and its safety values.
             'gripper_enabled', 'gripper_joint', 'gripper_open_position',
@@ -109,7 +110,7 @@ def check_limits_file(path: str, simulation: bool) -> dict:
             'launch files)')
     for name in ('linear_speed_cap_m_s', 'angular_speed_cap_rad_s', 'max_lead_translation_m',
                  'max_lead_rotation_deg', 'max_translation_scale', 'link_keepout_margin_m',
-                 *joint_accel.NAMES):
+                 'arm_self_margin_m', *joint_accel.NAMES):
         if not isinstance(values.get(name), (int, float)) or isinstance(values.get(name), bool):
             raise ValueError(f'{path}: {name} is required and has no default')
     try:
@@ -160,6 +161,7 @@ HARDWARE_REQUIRED = (
     'max_lead_rotation_deg',
     'max_translation_scale',
     'link_keepout_margin_m',
+    'arm_self_margin_m',
     'tool_pose_timeout_s',
 )
 
