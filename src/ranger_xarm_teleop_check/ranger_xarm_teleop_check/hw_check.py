@@ -351,7 +351,7 @@ def _subscribe_stack(stage, opts, data, subscribe, system_clock):
                 r['overrun_examples'].append(f'{msg.name}: {msg.msg}')
         if IMMEDIATE_STOP_LOG in msg.msg:     # the teleop node's stop without a ramp
             r['immediate_stops'] += 1
-        if msg.name.rsplit('.', 1)[-1] == TELEOP_NODE_NAME and (
+        if TELEOP_NODE_NAME in msg.name.split('.') and (
                 'link keep-out by self pair' in msg.msg
                 or 'teleop cycle computation' in msg.msg):
             r['teleop_summaries'].append(msg.msg)     # parsed in rules.keepout_step_measures

@@ -18,11 +18,14 @@ Reversals of the command and of Servo's output; the reported velocity with the a
 teleop node's step times split by whether a self pair is active.
 """
 
+import datetime
+import json
 import math
 
 import numpy as np
 import pytest
 
+from ranger_xarm_teleop_check import report as rep
 from ranger_xarm_teleop_check import rules, stats
 from ranger_xarm_teleop_check.rules import Options
 
@@ -52,9 +55,9 @@ def test_the_still_windows_need_no_command_and_less_than_2_mm_over_each_half_sec
     p = np.zeros(len(t))
     p[t >= 3.0] = 0.01                         # a step at 3 s
     windows = stats.still_windows(t, p, [])
-    assert [(round(a, 2), round(b, 2)) for a, b in windows] == [(0.0, 2.99), (3.0, 4.99)]
+    assert [(round(a, 2), round(b, 2)) for a, b in windows] == [(0.5, 2.99), (3.5, 4.99)]
     commanded = stats.still_windows(t, np.zeros(len(t)), [1.0])
-    assert [(round(a, 2), round(b, 2)) for a, b in commanded] == [(1.01, 4.99)]
+    assert [(round(a, 2), round(b, 2)) for a, b in commanded] == [(1.51, 4.99)]
     drift = stats.still_windows(t, 0.01 * t, [])         # 5 mm in 0.5 s
     assert drift == []
 
@@ -62,7 +65,7 @@ def test_the_still_windows_need_no_command_and_less_than_2_mm_over_each_half_sec
 def test_a_gap_in_the_samples_ends_a_still_stretch():
     t = np.concatenate([np.arange(0, 2, 0.01), np.arange(2.5, 4.5, 0.01)])
     windows = stats.still_windows(t, np.zeros(len(t)), [])
-    assert len(windows) == 2 and windows[0][1] < 2.0 and windows[1][0] > 2.4
+    assert len(windows) == 2 and windows[0][1] < 2.0 and windows[1][0] > 2.8
 
 
 def test_noise_is_measured_inside_the_still_windows_only():
@@ -119,13 +122,13 @@ def test_reversals_count_the_command_the_servo_output_and_the_joint_states():
     mm = rules.motion_measures(data)
     rm = rules.reversal_measures(data, mm)
     assert rm['command_source'] == 'velocities'
-    assert rm['command'][5] > 0 and rm['command'][3] == 0
-    assert rm['servo'][3] > 0 and rm['servo'][5] == 0
+    assert rm['command']['xarm_joint6'] > 0 and rm['command']['xarm_joint4'] == 0
+    assert rm['servo']['xarm_joint4'] > 0 and rm['servo']['xarm_joint6'] == 0
     # the same counting as the oscillation rule: joint 4 of the joint states, 0.15 s flips
-    assert rm['joint_states'][3] == mm['wrist_sign_changes_per_s']['xarm_joint4'] == 7
-    assert rm['jog_messages'] == 200 and rm['joint_states'][5] == 0
+    assert rm['joint_states']['xarm_joint4'] == mm['wrist_sign_changes_per_s']['xarm_joint4'] == 7
+    assert rm['jog_messages'] == 200 and rm['joint_states']['xarm_joint6'] == 0
     # a flip every 0.16 s: 7 fit in under 1 s
-    assert rm['servo'][3] == 7 and rm['command'][5] == 7
+    assert rm['servo']['xarm_joint4'] == 7 and rm['command']['xarm_joint6'] == 7
     result = rules.info_reversals_command_servo(rm, Options())
     assert result.verdict == rules.INFO
     assert result.measured.startswith(
@@ -141,7 +144,7 @@ def test_servo_output_without_velocities_is_differenced_from_positions():
     data = reversal_data(command=(messages, velocities))
     rm = rules.reversal_measures(data, rules.motion_measures(data))
     assert rm['command_source'] == 'positions'
-    assert rm['servo'][3] > 0
+    assert rm['servo']['xarm_joint4'] > 0
     text = rules.info_reversals_command_servo(rm, Options()).measured
     assert 'no velocities in the points, central difference of the positions' in text
 
@@ -193,24 +196,24 @@ def test_still_noise_is_reported_for_joints_4_and_6_with_the_rule_stated():
     sm = rules.still_noise_measures(still_data(noise=0.03))
     result = rules.info_still_velocity_noise(sm)
     assert result.verdict == rules.INFO
-    assert result.measured.startswith('joint 4: still 4.0 s in 1 window, RMS 0.0300 rad/s, '
+    assert result.measured.startswith('joint 4: still 3.5 s in 1 window, RMS 0.0300 rad/s, '
                                       'peak 0.0300 rad/s, most sign changes above 0.02 rad/s '
                                       'in any 1 s window ')
     assert 'joint 6: still' in result.measured and 'no joint-jog message' in result.measured
     assert 'no nonzero joint-jog command for 0.5 s before and during' in result.threshold
     assert 'within 0.002 rad over each 0.5 s span' in result.threshold
     # alternating every 30 ms: 34 flips fit in one 1 s window
-    assert sm['joints'][3]['sign_changes'] == 34
+    assert sm['joints']['xarm_joint4']['sign_changes'] == 34
 
 
 def test_a_command_early_in_the_run_leaves_the_rest_as_still_time():
     sm = rules.still_noise_measures(still_data(jog_until=1.0))
-    s = sm['joints'][3]
-    assert s['windows'] == 1 and s['seconds'] == pytest.approx(3.0, abs=0.02)
+    s = sm['joints']['xarm_joint4']
+    assert s['windows'] == 1 and s['seconds'] == pytest.approx(2.5, abs=0.02)
 
 
 def test_no_still_window_of_one_second_is_said():
-    sm = rules.still_noise_measures(still_data(jog_until=3.5, seconds=4.0))
+    sm = rules.still_noise_measures(still_data(jog_until=3.0, seconds=4.0))
     text = rules.info_still_velocity_noise(sm).measured
     assert text.startswith('joint 4: no still window of at least 1 s; joint 6: no still '
                            'window of at least 1 s')
@@ -323,3 +326,29 @@ def test_the_teleop_stage_reports_the_three_and_judges_nothing_by_them():
     for stage in ('motion', 'idle'):
         _, other = rules.evaluate(stage, data, Options())
         assert rules.REVERSALS_INFO not in {r.rule for r in other}
+
+
+def test_a_cycle_sentence_alone_is_shown_with_the_missing_keep_out_summary():
+    km = rules.keepout_step_measures({'rosout': {'teleop_summaries': [CYCLE]}})
+    text = rules.info_keepout_step_time(km).measured
+    assert text.startswith('no keep-out summary from the teleop node in this run')
+    assert '3000 cycles, median 0.80 ms' in text
+
+
+def test_the_still_stretch_starts_at_its_first_qualified_sample():
+    t = np.arange(0, 5, 0.01)
+    windows = stats.still_windows(t, np.zeros(len(t)), [2.0])
+    assert [(round(a, 2), round(b, 2)) for a, b in windows] == [(0.5, 1.99), (2.51, 4.99)]
+    assert stats.still_windows(t, np.zeros(len(t)), [2.0], min_len=3.0) == []
+
+
+def test_the_measures_are_written_into_the_report(tmp_path):
+    data = reversal_data(command=servo_messages(True))
+    data['rosout'] = {'teleop_summaries': [FULL + ' ' + CYCLE]}
+    measures, results = rules.evaluate('teleop', data, Options())
+    when = datetime.datetime(2026, 1, 1)
+    document = rep.build_report('teleop', when, when, measures, results, {}, [], [], 'x', 0)
+    path = rep.write_report(str(tmp_path / 'r.json'), document)
+    written = json.load(open(path))
+    assert written['measures']['reversals']['servo']['xarm_joint4'] == 7
+    assert 'xarm_joint4' in written['measures']['still_velocity_noise']['joints']
