@@ -1072,7 +1072,7 @@ class TeleopNode(Node):
         kinds = [kind for kind, _, _ in model.pair_list]
         log.info(
             f'link keep-out: margin {model.margin * 1000.0:.1f} mm from the fixed structure, '
-            f'{model.self_margin * 1000.0:.1f} mm between the arm\'s own links; '
+            f"{model.self_margin * 1000.0:.1f} mm between the arm's own links; "
             f'{model.sphere_count} spheres on {len(model.bodies)} moving links, largest radius '
             f'{model.largest_radius * 1000.0:.1f} mm (inflation below twice that per covered '
             f'side); {kinds.count("fixed")} pairs with the fixed links {model.units.names}, '
@@ -1437,7 +1437,7 @@ class TeleopNode(Node):
         if joints is None or self.arm is None:
             return math.nan
         if self.keepout_building:
-            self.get_logger().error('arm refused: the link keep-out\'s clearance tables are '
+            self.get_logger().error("arm refused: the link keep-out's clearance tables are "
                                     'still being built (first start)')
             return math.nan
         if self.keepout_fault:
@@ -1801,7 +1801,7 @@ class TeleopNode(Node):
         else:
             words = f'{clearance * 1000.0:.1f} mm ({pair[0]} - {pair[1]})'
         self.get_logger().info(
-            f'preview: least clearance between the arm\'s own links {words}, from the model '
+            f"preview: least clearance between the arm's own links {words}, from the model "
             f'(never more than the geometry has); arm_self_margin_m is '
             f'{self.self_margin * 1000.0:.1f} mm')
 
@@ -1963,7 +1963,7 @@ class TeleopNode(Node):
             return response
         kinds = [kind for kind, _, _ in model.pair_list]
         lines = [f'margin {model.margin * 1000.0:.1f} mm from the fixed structure, '
-                 f'{model.self_margin * 1000.0:.1f} mm between the arm\'s own links; cell '
+                 f"{model.self_margin * 1000.0:.1f} mm between the arm's own links; cell "
                  f'{model.cell * 1000.0:.0f} mm; '
                  f'{model.sphere_count} spheres; largest radius '
                  f'{model.largest_radius * 1000.0:.1f} mm (inflation below twice that per '
@@ -2255,7 +2255,7 @@ class TeleopNode(Node):
             f'link keep-out at the start posture: no pair is inside a margin up to {near}, '
             f'here and {ko.ROOM_STEP:g} rad either way of each joint; the margin is '
             f'{self.keepout_margin * 1000.0:.1f} mm from the fixed structure, '
-            f'{self.self_margin * 1000.0:.1f} mm between the arm\'s own links (looked up in '
+            f"{self.self_margin * 1000.0:.1f} mm between the arm's own links (looked up in "
             f'{took * 1000.0:.0f} ms)')
 
     # ---- MoveIt Servo ----

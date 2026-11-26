@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Clearance tables of the link keep-out (G-15) for arm bodies two joints apart, and the check of
-bodies one joint apart. No ROS.
+Clearance tables of the link keep-out (G-15).
+
+For arm bodies two joints apart, and the check of bodies one joint apart. No ROS.
 
 **Why tables.** Two moving bodies with exactly two arm joints between them (the inner body A,
 the outer body B) have a relative pose that depends on those two joints only, and on the
@@ -61,8 +62,8 @@ import io
 import json
 import math
 import os
-import zipfile
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
+import zipfile
 
 import numpy as np
 
@@ -162,8 +163,11 @@ def tail_pose(tail: Sequence[TailJoint], drive: float) -> np.ndarray:
 
 @dataclass
 class PairSpec:
-    """Two moving bodies with two arm joints (a, b) between them; B's pose in A's frame is
-    ``s0 R(axis_a, qa) s1 R(axis_b, qb) s2 tail(drive)``."""
+    """
+    Two moving bodies with two arm joints (a, b) between them.
+
+    B's pose in A's frame is ``s0 R(axis_a, qa) s1 R(axis_b, qb) s2 tail(drive)``.
+    """
 
     inner: str
     outer: str
@@ -182,8 +186,11 @@ class PairSpec:
 
 @dataclass
 class OneJointSpec:
-    """Two moving bodies with one arm joint between them that it does not join directly;
-    B's pose in A's frame is ``s0 R(axis, q) s2 tail(drive)``."""
+    """
+    Two moving bodies with one arm joint between them that it does not join directly.
+
+    B's pose in A's frame is ``s0 R(axis, q) s2 tail(drive)``.
+    """
 
     inner: str
     outer: str
@@ -270,8 +277,8 @@ def _finish_cover(c: np.ndarray, r: np.ndarray, group: float) -> dict:
     for g, (s0, k) in enumerate(zip(start, count)):
         pad[g, :k] = np.arange(s0, s0 + k)
     centre = (c.min(0) + c.max(0)) / 2.0
-    return dict(c=c, r=r, gc=gc, gr=gr, start=start, count=count, pad=pad, bc=centre,
-                br=float((np.linalg.norm(c - centre, axis=1) + r).max()))
+    return {'c': c, 'r': r, 'gc': gc, 'gr': gr, 'start': start, 'count': count, 'pad': pad,
+            'bc': centre, 'br': float((np.linalg.norm(c - centre, axis=1) + r).max())}
 
 
 def cover(tris: np.ndarray, cell: float, spacing: float, group: float) -> dict:
@@ -281,7 +288,8 @@ def cover(tris: np.ndarray, cell: float, spacing: float, group: float) -> dict:
 
 
 def drive_rate(tail: Sequence[TailJoint], reach: float) -> float:
-    """Upper bound of a B point's speed per unit of drive (m per unit), from the description.
+    """
+    Upper bound of a B point's speed per unit of drive (m per unit), from the description.
 
     A point at most ``reach`` from B's origin; for each moving joint of the tail its speed is at
     most ``|mult|`` times the point's distance from that joint, bounded by the offsets of the
@@ -302,7 +310,8 @@ def drive_rate(tail: Sequence[TailJoint], reach: float) -> float:
 def swept_cover(tris: np.ndarray, s2: np.ndarray, tail: Sequence[TailJoint],
                 drive: Tuple[float, float], cell: float, s: float, pad: float, group: float,
                 chunk: int = 2000) -> Tuple[dict, float]:
-    """Cover of B over the whole drive range, in the frame after joint b (module docstring).
+    """
+    Cover of B over the whole drive range, in the frame after joint b (module docstring).
 
     Returns (cover, rate): drive samples are close enough that no surface point moves more
     than ``pad`` from one to the nearest.
@@ -331,7 +340,8 @@ def swept_cover(tris: np.ndarray, s2: np.ndarray, tail: Sequence[TailJoint],
 # --- evaluation ----------------------------------------------------------------------------
 
 def node_values(F: Field, cov: dict, R: np.ndarray, t: np.ndarray, ceiling: float) -> np.ndarray:
-    """Least lower-bounded clearance of B's spheres posed (R, t) in A's frame, at most ``ceiling``.
+    """
+    Least lower-bounded clearance of B's spheres posed (R, t) in A's frame, at most ``ceiling``.
 
     ``F.lower`` is 1-Lipschitz up to its nearest-voxel rounding (``g sqrt3``), so every sphere
     of a group (or of the body) reads at least the group's centre reading less its radius and
@@ -377,7 +387,8 @@ def _node_values(F, cov, R, t, ceiling, sl):
         kk_, gg_ = k_i[lo:hi], g_i[lo:hi]
         nn = cov['count'][gg_]
         rep = np.repeat(np.arange(len(kk_)), nn)
-        ib = cov['start'][gg_][rep] + (np.arange(int(nn.sum())) - np.repeat(np.cumsum(nn) - nn, nn))
+        ib = cov['start'][gg_][rep] + (np.arange(int(nn.sum()))
+                                       - np.repeat(np.cumsum(nn) - nn, nn))
         kk = kk_[rep]
         c = cov['c'][ib]
         pp = np.empty_like(c)
@@ -441,7 +452,8 @@ class Table:
 
 
 def lever_arms(spec: PairSpec, cov: dict, s2: np.ndarray, tail_drive: Optional[float]):
-    """Upper bounds (La, Lb) of B's points' distance from axis a (any qb) and from axis b.
+    """
+    Upper bounds (La, Lb) of B's points' distance from axis a (any qb) and from axis b.
 
     In the frame after s0 (axis a through its origin), a point y of the frame after joint b
     sits at ``s1 (R(b) y)``; with y = y_par + y_perp about axis b, its distance from axis a is at
@@ -504,7 +516,8 @@ def _evaluate(F, cov, spec, s2tail, QA, QB, ceiling, batch=2000):
     return out
 
 
-def build_table(spec: PairSpec, cfg: TableConfig, coarse: Field, fine: Field) -> Tuple[Table, dict]:
+def build_table(spec: PairSpec, cfg: TableConfig, coarse: Field,
+                fine: Field) -> Tuple[Table, dict]:
     """Build one pair's table (module docstring, "Cost"); returns it and a few counts."""
     if spec.drive is not None:
         cov_c, _ = swept_cover(spec.tris_outer, spec.s2, spec.tail, spec.drive, cfg.coarse_cell,
@@ -568,15 +581,16 @@ def build_table(spec: PairSpec, cfg: TableConfig, coarse: Field, fine: Field) ->
     # How far the read may be below the truth inside the band: A's grid on both sides of the
     # nearest-voxel step, B's cover and the slack (for the selection of pairs held at work).
     error = 2.0 * fine.loss + fine.g * SQ3 + 2.0 * float(cov_f['r'].max()) + slack_f
-    stats = dict(error=float(error), coarse=int(na * nb), coarse_far=int(far.sum()), fine=int(len(vf)),
-                 fine_evaluated=int(inb.sum()), slack_mm=round(slack_f * 1000.0, 3),
-                 lever_m=[round(la, 4), round(lb, 4)],
-                 spheres=[int(len(cov_c['r'])), int(len(cov_f['r']))])
+    stats = {'error': float(error), 'coarse': int(na * nb), 'coarse_far': int(far.sum()),
+             'fine': int(len(vf)), 'fine_evaluated': int(inb.sum()),
+             'slack_mm': round(slack_f * 1000.0, 3), 'lever_m': [round(la, 4), round(lb, 4)],
+             'spheres': [int(len(cov_c['r'])), int(len(cov_f['r']))]}
     return tf, stats
 
 
 def one_joint_check(spec: OneJointSpec, cfg: TableConfig, fine: Field) -> dict:
-    """Least and largest lower-bounded clearance over the joint's range (and the gripper's).
+    """
+    Least and largest lower-bounded clearance over the joint's range (and the gripper's).
 
     Returns ``low``, ``high`` (m, lower bounds at the samples less the slack between them) and
     ``error`` (m): how far the check may read below the truth (A's grid, B's cover, the step).
@@ -603,14 +617,16 @@ def one_joint_check(spec: OneJointSpec, cfg: TableConfig, fine: Field) -> dict:
     vals = node_values(fine, cov, R, t, fine.cap - float(cov['gr'].max()) - fine.g * SQ3)
     step = lever * h / 2.0
     error = fine.loss + fine.g * SQ3 / 2.0 + 2.0 * float(cov['r'].max()) + step
-    return dict(low=float(vals.min() - step), high=float(vals.max()), error=float(error),
-                capped=bool(vals.max() >= fine.cap - float(cov['gr'].max()) - fine.g * SQ3 - 1e-9))
+    capped = bool(vals.max() >= fine.cap - float(cov['gr'].max()) - fine.g * SQ3 - 1e-9)
+    return {'low': float(vals.min() - step), 'high': float(vals.max()), 'error': float(error),
+            'capped': capped}
 
 
 # --- per-cycle read of every table at once ---------------------------------------------------
 
 class TableStack:
-    """The tables of a model, read together each cycle (one gather for all pairs).
+    """
+    The tables of a model, read together each cycle (one gather for all pairs).
 
     The value is the table's read (a lower bound everywhere); the rows' direction is a central
     difference of the same read over ``GRADIENT_BASELINE`` of B's motion each way per joint: the
@@ -626,16 +642,20 @@ class TableStack:
                     if tables else np.zeros(0, np.float32))
             offset = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.int64) \
                 if tables else np.zeros(0, np.int64)
-            arr = lambda f, shape: (np.array([f(t) for t in tables], dtype=float).reshape(shape)
-                                    if tables else np.zeros(shape))
-            _shared = dict(
-                flat=flat, offset=offset,
-                lo=arr(lambda t: t.lo, (-1, 2)), h=arr(lambda t: t.h, (-1, 2)),
-                n=arr(lambda t: t.n, (-1, 2)).astype(np.int64),
-                per=arr(lambda t: t.periodic, (-1, 2)).astype(bool),
-                slack=arr(lambda t: t.slack, (-1,)), lever=arr(lambda t: t.lever, (-1, 2)),
-                cap=arr(lambda t: t.cap, (-1,)),
-                joints=np.array(joints, dtype=np.int64).reshape(-1, 2))
+
+            def arr(f, shape):
+                return (np.array([f(t) for t in tables], dtype=float).reshape(shape)
+                        if tables else np.zeros(shape))
+
+            _shared = {
+                'flat': flat, 'offset': offset,
+                'lo': arr(lambda t: t.lo, (-1, 2)), 'h': arr(lambda t: t.h, (-1, 2)),
+                'n': arr(lambda t: t.n, (-1, 2)).astype(np.int64),
+                'per': arr(lambda t: t.periodic, (-1, 2)).astype(bool),
+                'slack': arr(lambda t: t.slack, (-1,)),
+                'lever': arr(lambda t: t.lever, (-1, 2)),
+                'cap': arr(lambda t: t.cap, (-1,)),
+                'joints': np.array(joints, dtype=np.int64).reshape(-1, 2)}
             _index = np.arange(len(tables))
         self._shared = _shared
         self.index = np.asarray(_index, dtype=np.int64)
@@ -699,8 +719,12 @@ class TableStack:
 
 @dataclass
 class Plan:
-    """The self pairs of one description that tables (two joints apart) or the one-joint check
-    (one joint apart, not direct neighbours) cover, and their cache keys."""
+    """
+    The self pairs of one description that the tables or the one-joint check cover.
+
+    Tables cover two joints apart; the one-joint check covers one joint apart, not direct
+    neighbours. The cache keys of the pairs are kept as well.
+    """
 
     pairs: List[PairSpec]
     one: List[OneJointSpec]
@@ -826,7 +850,7 @@ def make_plan(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str,
 # --- the cache -------------------------------------------------------------------------------
 
 def cache_directory() -> str:
-    """The user's cache directory for the tables (outside any checkout)."""
+    """Return the user's cache directory for the tables (outside any checkout)."""
     root = os.environ.get('XDG_CACHE_HOME') or os.path.join(os.path.expanduser('~'), '.cache')
     return os.path.join(root, 'ranger_xarm_teleop', 'keepout_tables')
 
@@ -978,9 +1002,9 @@ def _work(item):
         spec = plan.one[index]
         (fine,) = _fields(spec, ('fine',))
         result = one_joint_check(spec, plan.cfg, fine)
-        arrays = dict(kind=np.array('one'), low=np.array(result['low']),
-                      high=np.array(result['high']), error=np.array(result['error']),
-                      capped=np.array(result['capped']))
+        arrays = {'kind': np.array('one'), 'low': np.array(result['low']),
+                  'high': np.array(result['high']), 'error': np.array(result['error']),
+                  'capped': np.array(result['capped'])}
     _write(cache, plan.keys[(spec.outer, spec.inner)], arrays)
     return f'{spec.outer} - {spec.inner}', time.perf_counter() - started
 
@@ -1027,7 +1051,8 @@ def build_missing(plan: Plan, cache: str, workers: int,
     global _POOL_PLAN
     with BuildLock(cache):
         todo = set(missing(plan, cache))     # again under the lock: another builder may have run
-        items = [('pair', i, cache) for i, s in enumerate(plan.pairs) if (s.outer, s.inner) in todo]
+        items = [('pair', i, cache) for i, s in enumerate(plan.pairs)
+                 if (s.outer, s.inner) in todo]
         items += [('one', i, cache) for i, s in enumerate(plan.one) if (s.outer, s.inner) in todo]
         name = (lambda it: (plan.pairs if it[0] == 'pair' else plan.one)[it[1]].inner)
         items.sort(key=name)

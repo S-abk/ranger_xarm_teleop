@@ -601,12 +601,12 @@ def test_self_pairs_get_tables_and_their_own_margin(node):
     assert kinds.count('table') == 8 and 'tool' in kinds
     assert n.keepout.self_margin == 0.03 and n.keepout.margin == 0.025
     info = n._on_keepout_info(Trigger.Request(), Trigger.Response()).message
-    assert '30.0 mm between the arm\'s own links' in info and '8 from clearance tables' in info
+    assert "30.0 mm between the arm's own links" in info and '8 from clearance tables' in info
     assert 'one joint apart (xarm_joint6' in info
 
 
 def _file_meshes(urdf, folder):
-    """The made-up robot with its meshes as files (the builder process reads them itself)."""
+    """Return the made-up robot with its meshes as files (the builder reads them itself)."""
     from keepout_robot import MESHES
     for name, data in MESHES.items():
         path = os.path.join(str(folder), name.rsplit('/', 1)[-1])

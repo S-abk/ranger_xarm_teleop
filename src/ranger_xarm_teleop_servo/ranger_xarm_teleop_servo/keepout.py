@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Link keep-out model (G-15): clearance of the arm from the robot's own fixed structure and between
-the arm's own links. No ROS.
+Link keep-out model (G-15).
+
+Clearance of the arm from the robot's own fixed structure and between the arm's own links.
+No ROS.
 
 Built at start-up from the robot description, never written by hand:
 
@@ -519,7 +521,7 @@ def excluded_text(item: Excluded, margin: float) -> str:
         if not math.isfinite(item.low):
             return text + f' ({item.joint}; not checked)'
         text += (f' ({item.joint}: least clearance {item.low * 1000.0:.1f} mm, largest '
-                 f'{item.high * 1000.0:.1f} mm over its whole range and the gripper\'s, from the '
+                 f"{item.high * 1000.0:.1f} mm over its whole range and the gripper's, from the "
                  f'covers, which may read up to {item.error * 1000.0:.1f} mm low)')
         if item.low <= 0.0:
             return text + '; the two can touch'
@@ -1403,10 +1405,10 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
             if not (math.isfinite(lo) and math.isfinite(hi)):
                 lo, hi = -math.pi, math.pi
             limits.append((float(lo), float(hi)))
-        return dict(segments=list(chain.segments), seg_joint=seg_joint, limits=limits,
-                    bodies=bodies, tris=body_tris, extra=extra_joints,
-                    adjacent={(j.child, j.parent) for j in joints.values()
-                              if j.name in arm_set and j.child in moving_set})
+        return {'segments': list(chain.segments), 'seg_joint': seg_joint, 'limits': limits,
+                'bodies': bodies, 'tris': body_tris, 'extra': extra_joints,
+                'adjacent': {(j.child, j.parent) for j in joints.values()
+                             if j.name in arm_set and j.child in moving_set}}
     if _fingerprint_only:
         # The hash covers every input above; the covers and the sampling follow from them.
         hasher.update(f'{sorted(extra_joints.items())}'.encode())

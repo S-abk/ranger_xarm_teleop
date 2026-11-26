@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
+r"""
 Build the link keep-out's clearance tables of a robot description into the cache (G-15).
 
 One process, under an exclusive lock on the cache directory: a second builder for the same
@@ -19,7 +19,7 @@ cache waits, then finds the entries written and builds nothing. Every entry is w
 (a reader sees all of it or none). The teleop node starts this when an entry is missing and
 only loads the cache; it can also be run ahead of time (a first start then needs no build)::
 
-    ros2 run ranger_xarm_teleop_servo keepout_tables_build --description robot.urdf \\
+    ros2 run ranger_xarm_teleop_servo keepout_tables_build --description robot.urdf \
         --base link_base --tip link_eef
 
 Progress lines go to standard output; exit status 0 when every entry is in the cache.

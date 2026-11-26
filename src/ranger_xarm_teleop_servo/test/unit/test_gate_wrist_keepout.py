@@ -23,8 +23,8 @@ from ranger_xarm_teleop_servo.rotations import Pose, q_from_axis_angle, q_mul
 
 
 def _env(now, **kw):
-    base = dict(now=now, owner_is_teleop=True, tool_pose=TOOL_START, tool_pose_age=0.0,
-                servo_active=True)
+    base = {'now': now, 'owner_is_teleop': True, 'tool_pose': TOOL_START, 'tool_pose_age': 0.0,
+            'servo_active': True}
     base.update(kw)
     return Env(**base)
 

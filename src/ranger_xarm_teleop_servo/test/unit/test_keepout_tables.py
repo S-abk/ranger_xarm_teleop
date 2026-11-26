@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Link keep-out between the arm's own links (G-15): the clearance tables, their cache, self pairs."""
+"""
+Link keep-out between the arm's own links (G-15).
+
+The clearance tables, their cache, self pairs.
+"""
 
 import math
 import os
@@ -100,7 +104,7 @@ def _points(tris, spacing, most=2500):
 
 def _sampled_distance(a, b):
     """
-    The least distance between two sample sets: never less than the surfaces' distance.
+    Return the least distance between two sample sets: never less than the surfaces' distance.
 
     Any subset of the surfaces gives an upper bound of their distance, coarse ones included.
     """
@@ -120,14 +124,14 @@ def test_a_table_never_reads_more_than_the_geometry_between_its_grid_points(buil
         outer = _points(spec.tris_outer, 0.01)
         (la, ha), (lb, hb) = spec.limits
         for _ in range(8):
-            qa, qb = rng.uniform(max(la, -3.0), min(ha, 3.0)), rng.uniform(max(lb, -3.0),
-                                                                          min(hb, 3.0))
+            qa = rng.uniform(max(la, -3.0), min(ha, 3.0))
+            qb = rng.uniform(max(lb, -3.0), min(hb, 3.0))
             drive = rng.uniform(*spec.drive) if spec.drive else 0.0
             rot, pos = kt._relative(spec, spec.s2 @ kt.tail_pose(spec.tail, drive),
                                     np.array([qa]), np.array([qb]))
             truth_or_more = _sampled_distance(inner, outer @ rot[0].T + pos[0])
-            assert table.read(qa, qb)[0] <= truth_or_more + 1e-9, (spec.outer, spec.inner,
-                                                                    qa, qb)
+            assert table.read(qa, qb)[0] <= truth_or_more + 1e-9, (
+                spec.outer, spec.inner, qa, qb)
 
 
 def test_the_stack_reads_what_each_table_reads_and_its_direction_follows_the_read(built):
