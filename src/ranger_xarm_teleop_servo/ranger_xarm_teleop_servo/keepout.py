@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Link keep-out model (G-15): clearance of the arm from the robot's own fixed structure. No ROS.
+Link keep-out model (G-15): clearance of the arm from the robot's own fixed structure and between
+the arm's own links. No ROS.
 
 Built at start-up from the robot description, never written by hand:
 
@@ -23,13 +24,17 @@ Built at start-up from the robot description, never written by hand:
   cameras, any tool a project attaches. Each is covered by spheres (below). Links moved by
   joints that are not arm joints (gripper fingers; ``<mimic>`` resolved) are placed with
   those joints' measured values.
-* **Pairs:** every moving body against every fixed body, and the tool (bodies moved by the
-  last arm joint) against arm links at least ``TOOL_ARM_JOINTS`` joints up the chain.
-  Excluded, and reported: a moving link attached directly to a fixed link (adjacent), and
-  a pair whose clearance stays below the margin over the whole sampled range of the
-  joints it depends on (structurally near: it cannot be kept clear at this margin). When
-  some sampled posture had positive clearance, a smaller margin would keep the pair
-  (``kept_by_smaller_margin``); the hardware path refuses to start then.
+* **Pairs:** every moving body against every fixed body (at ``margin``), and every two moving
+  bodies with at least two arm joints between them (self pairs, at ``self_margin``): with
+  exactly two, from a clearance table over those two joints (``keepout_tables``), read per
+  cycle; with three or more, from the sphere covers. Excluded, and reported: a moving link
+  attached directly to a fixed link (adjacent), two moving bodies one arm joint apart (their
+  relative motion is that one joint, which no command of the others changes: direct
+  neighbours are listed only; any other such pair is checked over the joint's whole range,
+  ``one_joint_refused``), and a pair whose clearance stays below its margin over the whole
+  sampled range of the joints it depends on (structurally near: it cannot be kept clear at
+  this margin). When some sampled posture had positive clearance, a smaller margin would keep
+  the pair (``kept_by_smaller_margin``); the hardware path refuses to start then.
 
 **Sphere cover, and why the model never reports more clearance than the geometry has.**
 Every collision shape of a moving body (and every fixed mesh) is turned into triangles; a
@@ -79,7 +84,8 @@ import numpy as np
 
 from .kinematics import chain_from_urdf
 
-TOOL_ARM_JOINTS = 3            # tool against arm links at least this many joints up
+SELF_TABLE_GAP = 2             # self pairs this many arm joints apart: from a table
+SELF_SPHERE_GAP = 3            # this many or more: from the sphere covers
 DEFAULT_CELL = 0.025           # m (20 mm was 50 % slower per cycle in the node)
 DEFAULT_SPACING = 0.002        # m
 NEAR_SAMPLES = 3000            # postures sampled to find structurally near pairs
@@ -464,12 +470,16 @@ class Excluded:
 
     moving: str
     other: str
-    reason: str                      # 'adjacent' or 'structurally near'
+    reason: str                      # 'adjacent', 'structurally near' or 'one joint apart'
     low: float = math.nan            # clearance range over the sampled postures (m)
     high: float = math.nan
+    self_pair: bool = False          # two moving bodies (judged at the self margin)
+    error: float = math.nan          # one joint apart: how far the check may read low (m)
+    joint: str = ''                  # one joint apart: the arm joint between them
 
 
 NEAR = 'structurally near'
+ONE_JOINT = 'one joint apart'
 
 
 def kept_by_smaller_margin(item: Excluded) -> bool:
@@ -483,9 +493,42 @@ def kept_by_smaller_margin(item: Excluded) -> bool:
     return item.reason == NEAR and item.high > 0.0
 
 
+def one_joint_refused(item: Excluded, margin: float) -> bool:
+    """
+    Return whether a pair one joint apart (not direct neighbours) must refuse the start.
+
+    Its least clearance over the joint's whole range (and the gripper's) is below ``margin``
+    and the joint changes it by more than the check's own error, or it can touch (its lower
+    bound is not positive). Below the margin but constant within the error: no motion changes
+    it, it is listed, not refused. Not checked (no value): refused.
+    """
+    if item.reason != ONE_JOINT:
+        return False
+    if not (math.isfinite(item.low) and math.isfinite(item.high)):
+        return True
+    if item.low <= 0.0:
+        return True
+    return item.low < margin and item.high - item.low > item.error
+
+
 def excluded_text(item: Excluded, margin: float) -> str:
     """Return one line on a left-out pair: why, its clearance range, and what would keep it."""
     text = f'{item.moving} - {item.other} left out: {item.reason}'
+    if item.reason == ONE_JOINT:
+        if not math.isfinite(item.low):
+            return text + f' ({item.joint}; not checked)'
+        text += (f' ({item.joint}: least clearance {item.low * 1000.0:.1f} mm, largest '
+                 f'{item.high * 1000.0:.1f} mm over its whole range and the gripper\'s, from the '
+                 f'covers, which may read up to {item.error * 1000.0:.1f} mm low)')
+        if item.low <= 0.0:
+            return text + '; the two can touch'
+        if item.low >= margin:
+            return text
+        if item.high - item.low <= item.error:
+            return text + (f'; below the margin of {margin * 1000.0:.1f} mm but constant over '
+                           f'{item.joint}: no motion changes it')
+        return text + (f'; below the margin of {margin * 1000.0:.1f} mm and {item.joint} '
+                       'changes it')
     if item.reason != NEAR:
         return text
     text += (f' (clearance {item.low * 1000.0:.1f} to {item.high * 1000.0:.1f} mm over the '
@@ -505,6 +548,7 @@ class Held:
     low: float                       # clearance range over them (m)
     high: float
     free_up_to: float                # the largest margin at which the share is HELD_SHARE
+    self_pair: bool = False          # two moving bodies (judged at the self margin)
 
 
 def held_text(item: Held, margin: float) -> str:
@@ -526,6 +570,10 @@ class Rows:
     clearance: float                 # smallest clearance over all pairs (m)
     nearest: Tuple[str, str]         # the pair with that clearance, ('', '') if not exact
     exact: bool = True               # False: nothing within ``report``; clearance is a bound
+    margin: Optional[np.ndarray] = None   # k, each row's margin (its pair's)
+    self_active: bool = False        # a self pair on the sphere covers gave a row (the
+    #                                  tables are read every cycle at a fixed cost)
+    nearest_margin: float = math.nan  # the margin of ``nearest`` (the fixed margin if none)
 
 
 @dataclass
@@ -561,6 +609,12 @@ class Model:
     refined_by: List[Tuple[str, str]] = field(default_factory=list)  # the pairs that chose them
     fine_cell: Optional[float] = None
     held: List[Held] = field(default_factory=list)
+    self_margin: float = math.nan                # self pairs (two moving bodies); NaN: margin
+    self_influence: float = math.nan             # rows for self pairs closer than this
+    tables: Optional[object] = None              # keepout_tables.TableStack of every table pair
+    table_of: Dict[Tuple[int, int], int] = field(default_factory=dict)  # (b, a) -> stack row
+    table_error: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    unsupported: List[Tuple[str, str, str]] = field(default_factory=list)  # tables: on spheres
 
     @property
     def pairs(self) -> List[Tuple[str, str]]:
@@ -571,6 +625,19 @@ class Model:
         kind, a, b = pair
         other = self.units.names[b] if kind == 'fixed' else self.bodies[b].name
         return self.bodies[a].name, other
+
+    def is_self(self, index: int) -> bool:
+        """Return whether pair ``index`` is two moving bodies (held at the self margin)."""
+        return self.pair_list[index][0] != 'fixed'
+
+    def margin_of(self, index: int) -> float:
+        """Return the margin pair ``index`` is kept at (m)."""
+        return self.self_margin if self.is_self(index) else self.margin
+
+    @property
+    def table_bytes(self) -> int:
+        """Return the memory the tables' values take (bytes)."""
+        return self.tables.nbytes if self.tables is not None else 0
 
     @property
     def sphere_count(self) -> int:
@@ -650,19 +717,37 @@ class Model:
     def _index(self) -> None:
         """Build the flat lookups the per-cycle evaluation uses, from ``pair_list``."""
         nb, nf = len(self.bodies), len(self.units.names)
+        if not math.isfinite(self.self_margin):
+            self.self_margin = self.margin
+        if not math.isfinite(self.self_influence):
+            self.self_influence = self.self_margin + (self.influence - self.margin)
         self._allowed_fixed = np.zeros((nb, nf), dtype=bool)
         self._allowed_tool = np.zeros((nb, nb), dtype=bool)
         self._pair_index = {}
+        table_pairs, table_rows = [], []
         for i, (kind, a, b) in enumerate(self.pair_list):
             self._pair_index[(kind, a, b)] = i
             if kind == 'fixed':
                 self._allowed_fixed[a, b] = True
-            else:
+            elif kind == 'tool':
                 self._allowed_tool[a, b] = True
+            else:
+                table_pairs.append(i)
+                table_rows.append(self.table_of[(a, b)])
+        self._pair_self = np.array([kind != 'fixed' for kind, _, _ in self.pair_list], dtype=bool)
+        self._pair_margin = np.where(self._pair_self, self.self_margin, self.margin)
+        self._pair_sphere_self = np.array([kind == 'tool' for kind, _, _ in self.pair_list],
+                                          dtype=bool)
+        self._table_pairs = np.array(table_pairs, dtype=int)
+        self._tables = (self.tables.select(table_rows) if table_pairs and self.tables is not None
+                        else None)
         self._pair_of_fixed = np.full((nb, max(nf, 1)), -1, dtype=int)
         self._pair_of_tool = np.full((nb, nb), -1, dtype=int)
         for (kind, a, b), i in self._pair_index.items():
-            (self._pair_of_fixed if kind == 'fixed' else self._pair_of_tool)[a, b] = i
+            if kind == 'fixed':
+                self._pair_of_fixed[a, b] = i
+            elif kind == 'tool':
+                self._pair_of_tool[a, b] = i
         # All spheres and groups of all bodies, flat.
         sphere_body, centres, radii, group_of = [], [], [], []
         group_body, group_centre, group_radius = [], [], []
@@ -787,13 +872,26 @@ class Model:
                 out_n.append(normal)
                 out_p.append(world)
                 out_o.append(np.full((len(d), 3), np.nan))
-        if self._allowed_tool.any():
-            tool_groups = np.nonzero(self._allowed_tool[gb].any(axis=1))[0]
-            arm_groups = np.nonzero(self._allowed_tool[:, gb].any(axis=0))[0]
+        allowed_b = self._allowed_tool
+        if allowed_b.any():
+            # Pairs of bodies first, by their bounding spheres: a pair farther than the limit
+            # gives its lower bound and none of its groups is looked at.
+            bcw = np.einsum('bij,bj->bi', rot, self._body_centre) + pos
+            tb, ab = np.nonzero(allowed_b)
+            bgap = (np.linalg.norm(bcw[tb] - bcw[ab], axis=1) - self._body_radius[tb]
+                    - self._body_radius[ab])
+            near_b = bgap <= limit
+            if (~near_b).any():
+                lower = min(lower, float(bgap[~near_b].min()))
+            allowed_b = np.zeros_like(allowed_b)
+            allowed_b[tb[near_b], ab[near_b]] = True
+        if allowed_b.any():
+            tool_groups = np.nonzero(allowed_b[gb].any(axis=1))[0]
+            arm_groups = np.nonzero(allowed_b[:, gb].any(axis=0))[0]
             gap = (np.linalg.norm(gc[tool_groups][:, None] - gc[arm_groups][None], axis=2)
                    - self._group_radius[tool_groups][:, None]
                    - self._group_radius[arm_groups][None])
-            allowed = self._allowed_tool[gb[tool_groups]][:, gb[arm_groups]]
+            allowed = allowed_b[gb[tool_groups]][:, gb[arm_groups]]
             gap = np.where(allowed, gap, np.inf)
             ti, ai = np.nonzero(gap <= limit)
             far = gap[gap > limit]
@@ -841,44 +939,77 @@ class Model:
                 out[moving, :, i] = np.cross(frames.axes[i], points[moving] - frames.points[i])
         return out
 
+    def _table_values(self, q: np.ndarray, limit: float):
+        """
+        Return the table pairs' reads at ``q``: ``(pair, value, grad k x n, lower)``.
+
+        Only reads below ``limit`` (and below each table's cap less its slack, where a read is
+        only a bound) are listed; ``lower`` bounds the rest.
+        """
+        n = len(self.joint_names)
+        if self._tables is None:
+            return np.zeros(0, dtype=int), np.zeros(0), np.zeros((0, n)), math.inf
+        value, ga, gb = self._tables.read(q)
+        valid = (value <= limit) & (value < self._tables.cap - self._tables.slack)
+        lower = float(value[~valid].min()) if (~valid).any() else math.inf
+        idx = np.nonzero(valid)[0]
+        grad = np.zeros((len(idx), n))
+        grad[np.arange(len(idx)), self._tables.ja[idx]] = ga[idx]
+        grad[np.arange(len(idx)), self._tables.jb[idx]] += gb[idx]
+        return self._table_pairs[idx], value[idx], grad, lower
+
     def evaluate(self, q: Sequence[float], extra: Optional[Mapping[str, float]] = None,
                  influence: Optional[float] = None, per_pair: int = 16) -> Rows:
         """
         Return the keep-out rows at ``q`` and the smallest clearance.
 
         Rows: per pair of bodies the up to ``per_pair`` closest sphere pairs (a sphere and
-        a fixed shape, or two spheres) nearer than
-        ``influence`` (default: the model's). The clearance is exact when it is within
-        ``influence``; otherwise it is a lower bound (``Rows.exact`` False).
+        a fixed shape, or two spheres) nearer than its influence distance (``influence`` for
+        every pair when given, else the model's: the margin, or the self margin for two moving
+        bodies, plus the same extra), and one row per table pair within it. The clearance is
+        exact when it is within the larger influence distance; otherwise it is a lower bound
+        (``Rows.exact`` False). Every clearance is a lower bound of the geometry's.
         """
         n = len(self.joint_names)
         if not self.pair_list:
             # Nothing to keep apart (no collision geometry on one side).
             return Rows(np.zeros((0, n)), np.zeros(0), np.zeros(0, dtype=int), math.inf,
-                        ('', ''), False)
-        frames = self._frames(np.asarray(q, dtype=float), extra)
-        reach = self.influence if influence is None else influence
+                        ('', ''), False, np.zeros(0), False, self.margin)
+        q = np.asarray(q, dtype=float)
+        frames = self._frames(q, extra)
+        reach_f = self.influence if influence is None else influence
+        reach_s = self.self_influence if influence is None else influence
+        reach = max(reach_f, reach_s)
         pair, d, normal, point, other, lower = self._compute(frames, reach)
-        if len(d) and d.min() <= reach:
-            k = int(np.argmin(d))
-            best, nearest, exact = float(d[k]), self.pairs[pair[k]], True
+        t_pair, t_d, t_grad, t_lower = self._table_values(q, reach)
+        lower = min(lower, t_lower)
+        every = np.concatenate([d, t_d])
+        if len(every) and every.min() <= reach:
+            k = int(np.argmin(every))
+            best = float(every[k])
+            index = int(pair[k]) if k < len(d) else int(t_pair[k - len(d)])
+            nearest, exact, nearest_margin = self.pairs[index], True, float(
+                self._pair_margin[index])
         else:
-            best = float(min(lower, d.min() if len(d) else math.inf))
-            nearest, exact = ('', ''), False
-        near = np.nonzero(d < reach)[0]
-        if len(near) == 0:
+            best = float(min(lower, every.min() if len(every) else math.inf))
+            nearest, exact, nearest_margin = ('', ''), False, self.margin
+        own = np.where(self._pair_self[pair], reach_s, reach_f) if len(pair) else np.zeros(0)
+        near = np.nonzero(d < own)[0]
+        t_near = t_d < reach_s
+        t_pair, t_d, t_grad = t_pair[t_near], t_d[t_near], t_grad[t_near]
+        if len(near) == 0 and len(t_d) == 0:
             return Rows(np.zeros((0, n)), np.zeros(0), np.zeros(0, dtype=int), best, nearest,
-                        exact)
+                        exact, np.zeros(0), False, nearest_margin)
         # Up to per_pair rows per pair, closest first, and up to CRITICAL_ROWS per pair of
-        # those within CRITICAL of the margin (a farther row can approach faster and bind).
+        # those within CRITICAL of its margin (a farther row can approach faster and bind).
         # Bounded, so a posture deep in contact does not make the correction large.
         order = near[np.lexsort((d[near], pair[near]))]
         p = pair[order]
-        start = np.concatenate([[True], p[1:] != p[:-1]])
+        start = np.concatenate([[True], p[1:] != p[:-1]]) if len(p) else np.zeros(0, bool)
         rank = np.arange(len(order)) - np.maximum.accumulate(
-            np.where(start, np.arange(len(order)), 0))
+            np.where(start, np.arange(len(order)), 0)) if len(p) else np.zeros(0, int)
         keep = order[(rank < per_pair)
-                     | ((d[order] < self.margin + CRITICAL) & (rank < CRITICAL_ROWS))]
+                     | ((d[order] < self._pair_margin[p] + CRITICAL) & (rank < CRITICAL_ROWS))]
         body = np.array([self.pair_list[i][1] for i in pair[keep]], dtype=int)
         jac = self._jacobian(self._depth[body], point[keep], frames)
         tool = ~np.isnan(other[keep, 0])
@@ -886,7 +1017,10 @@ class Model:
             arm = np.array([self.pair_list[i][2] for i in pair[keep][tool]], dtype=int)
             jac[tool] -= self._jacobian(self._depth[arm], other[keep][tool], frames)
         grad = np.einsum('ki,kin->kn', normal[keep], jac)
-        return Rows(grad, d[keep], pair[keep], best, nearest, exact)
+        rows_pair = np.concatenate([pair[keep], t_pair]).astype(int)
+        return Rows(np.vstack([grad, t_grad]), np.concatenate([d[keep], t_d]), rows_pair,
+                    best, nearest, exact, self._pair_margin[rows_pair],
+                    bool(self._pair_sphere_self[rows_pair].any()), nearest_margin)
 
     def clearance(self, q: Sequence[float],
                   extra: Optional[Mapping[str, float]] = None,
@@ -926,15 +1060,21 @@ class Model:
         out = np.full(len(self.pair_list), limit if math.isfinite(limit) else math.inf)
         if not self.pair_list:
             return out
-        frames = self._frames(np.asarray(q, dtype=float), extra)
+        q = np.asarray(q, dtype=float)
+        frames = self._frames(q, extra)
         pair, d, _, _, _, _ = self._compute(frames, limit)
         if len(d):
             np.minimum.at(out, pair, d)
+        if self._tables is not None:
+            value = self._tables.read(q)[0]
+            out[self._table_pairs] = np.minimum(out[self._table_pairs], value)
         return out
 
     def cover_error(self, index: int) -> float:
         """Return ``E`` of pair ``index``: each covered side's largest sphere radius, added."""
         kind, a, b = self.pair_list[index]
+        if kind == 'table':
+            return float(self.table_error[(a, b)])
         out = float(self.bodies[a].radii.max()) if len(self.bodies[a].radii) else 0.0
         if kind == 'tool':
             return out + (float(self.bodies[b].radii.max()) if len(self.bodies[b].radii)
@@ -950,12 +1090,13 @@ class Model:
 
     def held_by_model(self, samples: np.ndarray):
         """
-        Return the pairs whose clearance stays below ``margin + E`` at every posture sampled.
+        Return the pairs whose clearance stays below their margin + ``E`` at every sample.
 
         ``(indices, values)``: the pairs, and their clearance at each sample (samples x pairs;
         exact, as every one is below ``margin + E``).
         """
-        limit = np.array([self.margin + self.cover_error(i) for i in range(len(self.pair_list))])
+        limit = np.array([self._pair_margin[i] + self.cover_error(i)
+                          for i in range(len(self.pair_list))])
         candidates = np.arange(len(self.pair_list))
         values = np.full((len(samples), len(self.pair_list)), math.nan)
         sub = self
@@ -970,18 +1111,32 @@ class Model:
                 sub = self.subset(candidates)
         return candidates, values[:, candidates]
 
+    def least_excess(self, q: Sequence[float], extra: Optional[Mapping[str, float]] = None,
+                     within: float = 0.06) -> float:
+        """
+        Return the least clearance less its pair's margin (m), over every pair.
+
+        Exact while it is below ``within``; otherwise a value at least ``within``.
+        """
+        if not self.pair_list:
+            return math.inf
+        values = self.pair_minima(q, extra, float(self._pair_margin.max()) + within)
+        return float((values - self._pair_margin).min())
+
     def pairs_moved_by(self, joint: str) -> List[int]:
         """
         Return the indices of the pairs whose moving body moves with the non-arm ``joint``.
 
         A body moves with it when the joint, or a joint that mimics it, is on the body's
-        path beyond the arm chain (for a gripper: its fingers and knuckles).
+        path beyond the arm chain (for a gripper: its fingers and knuckles). Table pairs are
+        not listed: their tables hold the least clearance over the joint's whole range.
         """
         moved = {joint} | {name for name, (source, _, _) in self.extra_joints.items()
                            if source == joint}
         bodies = {i for i, body in enumerate(self.bodies)
                   if any(j.name in moved for j in body.tail)}
-        return [i for i, pair in enumerate(self.pair_list) if pair[1] in bodies]
+        return [i for i, pair in enumerate(self.pair_list)
+                if pair[1] in bodies and pair[0] != 'table']
 
     def subset(self, indices: Sequence[int]) -> 'Model':
         """Return a copy of the model that evaluates only the pairs ``indices``."""
@@ -1051,7 +1206,7 @@ def _cover_body(body: _Body, tris: np.ndarray, cell: float, spacing: float) -> _
 
 
 def _held_at_work(model: Model, lower: np.ndarray, upper: np.ndarray, joint_margin: float,
-                  count: int, seed: int) -> List[Held]:
+                  count: int, seed: int) -> List[Held]:  # noqa: D103
     """Return the kept pairs held at work (module docstring), sampled in the solver's range."""
     low = np.where(upper - lower > 2.0 * joint_margin, lower + joint_margin, lower)
     high = np.where(upper - lower > 2.0 * joint_margin, upper - joint_margin, upper)
@@ -1059,12 +1214,13 @@ def _held_at_work(model: Model, lower: np.ndarray, upper: np.ndarray, joint_marg
     candidates, values = model.held_by_model(samples)
     out = []
     for column, i in enumerate(candidates):
-        share = float((values[:, column] < model.margin).mean())
+        share = float((values[:, column] < model.margin_of(i)).mean())
         if share > HELD_SHARE:
             moving, other = model.pairs[i]
             out.append(Held(moving, other, share, float(values[:, column].min()),
                             float(values[:, column].max()),
-                            float(np.quantile(values[:, column], HELD_SHARE))))
+                            float(np.quantile(values[:, column], HELD_SHARE)),
+                            model.is_self(i)))
     return out
 
 
@@ -1074,7 +1230,8 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
           spacing: float = DEFAULT_SPACING, near_samples: int = NEAR_SAMPLES,
           seed: int = 0, fine_cell_ratio: Optional[float] = FINE_CELL_RATIO,
           refine_samples: int = REFINE_SAMPLES, joint_margin: float = JOINT_MARGIN,
-          _fingerprint_only: bool = False) -> Model:
+          self_margin: Optional[float] = None, tables=None,
+          _fingerprint_only: bool = False, _parts_only: bool = False) -> Model:
     """
     Build the keep-out model of the arm ``base`` -> ``tip`` in URDF text.
 
@@ -1083,8 +1240,17 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
     ``fine_cell_ratio``; None covers nothing finer), the structurally near pairs and the pairs
     held at work. ``near_samples`` postures are sampled for the last two (0: neither is
     looked for), within the joint limits less ``joint_margin`` for the pairs held at work.
-    With ``_fingerprint_only`` it returns the fingerprint string alone (no covers are made).
+    ``self_margin`` (default: ``margin``) is the margin of the self pairs. ``tables``
+    (``keepout_tables.Loaded``) holds the tables of the pairs two joints apart and the check of
+    the pairs one joint apart; without it those pairs are on the sphere covers and the one-joint
+    pairs are listed unchecked (offline use and tests; the node always gives it).
+    With ``_fingerprint_only`` it returns the fingerprint string alone (no covers are made);
+    with ``_parts_only`` the bodies, their triangles and the chain (for ``keepout_tables``).
     """
+    if self_margin is None:
+        self_margin = margin
+    if not (math.isfinite(self_margin) and self_margin > 0.0):
+        raise ModelError('the self margin must be a positive number')
     if fine_cell_ratio is not None and not 0.0 < fine_cell_ratio <= 1.0:
         raise ModelError('fine_cell_ratio must be within (0, 1]')
     if not (math.isfinite(margin) and margin > 0.0):
@@ -1105,7 +1271,7 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
     links = {link.get('name'): link for link in root.findall('link')}
     hasher = hashlib.sha256()
     hasher.update(f'{base}|{tip}|{arm_names}|{cell}|{fixed_cell}|{spacing}|'
-                  f'{TOOL_ARM_JOINTS}'.encode())
+                  f'self {SELF_TABLE_GAP} {SELF_SPHERE_GAP}'.encode())
     if fine_cell_ratio is not None:
         # The finer cover's rule; the margin it is sampled at is not geometry (left out).
         hasher.update(f'|fine {fine_cell_ratio}|{refine_samples}|{seed}'.encode())
@@ -1180,7 +1346,9 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
             local, _ = _shape_triangles(geometry[0], resolve, hasher)
             tris.append(_apply(pose, local))
         body_tris[link] = np.concatenate(tris)
-        if not _fingerprint_only:
+        if _parts_only:
+            bodies.append(_Body(link, depth, prefix, tail, *([None] * 7)))
+        elif not _fingerprint_only:
             bodies.append(_cover_body(_Body(link, depth, prefix, tail, *([None] * 7)),
                                       body_tris[link], cell, spacing))
 
@@ -1223,6 +1391,21 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
                 spheres.append((f, np.eye(3), pose[:3, 3], exact[1]))
         return _Units.make(fixed_names, boxes, cylinders, spheres)
 
+    if _parts_only:
+        seg_joint, k = [], 0
+        for seg in chain.segments:
+            seg_joint.append(k if seg.axis is not None else None)
+            k += seg.axis is not None
+        limits = []
+        for j in chain.joints:
+            lo, hi = j.lower, j.upper
+            if not (math.isfinite(lo) and math.isfinite(hi)):
+                lo, hi = -math.pi, math.pi
+            limits.append((float(lo), float(hi)))
+        return dict(segments=list(chain.segments), seg_joint=seg_joint, limits=limits,
+                    bodies=bodies, tris=body_tris, extra=extra_joints,
+                    adjacent={(j.child, j.parent) for j in joints.values()
+                              if j.name in arm_set and j.child in moving_set})
     if _fingerprint_only:
         # The hash covers every input above; the covers and the sampling follow from them.
         hasher.update(f'{sorted(extra_joints.items())}'.encode())
@@ -1240,17 +1423,55 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
                 excluded.append(Excluded(body.name, name, 'adjacent'))
             else:
                 pair_list.append(('fixed', b, f))
-    for t, tool in enumerate(bodies):
-        if tool.depth != n_arm:
-            continue
-        for a, other in enumerate(bodies):
-            if 1 <= other.depth <= n_arm - TOOL_ARM_JOINTS:
+    # Self pairs: the deeper body first. Every moving body hangs off the arm chain, so the arm
+    # joints between two of them are the difference of their depths.
+    table_rows, table_of, table_error, unsupported = [], {}, {}, []
+    if tables is not None:
+        unsupported = list(tables.unsupported)
+    left_on_spheres = {(o, i) for o, i, _ in unsupported}
+    for t, outer in enumerate(bodies):
+        for a, inner in enumerate(bodies):
+            gap = outer.depth - inner.depth
+            if inner.depth < 1 or gap < 1:
+                continue
+            names = (outer.name, inner.name)
+            if gap == 1:
+                arm_joint = arm_names[inner.depth]
+                if names in adjacent:
+                    excluded.append(Excluded(*names, 'adjacent', self_pair=True,
+                                             joint=arm_joint))
+                    continue
+                entry = tables.one.get(names) if tables is not None else None
+                if entry is None:
+                    excluded.append(Excluded(*names, ONE_JOINT, self_pair=True, joint=arm_joint))
+                else:
+                    excluded.append(Excluded(*names, ONE_JOINT, entry.low, entry.high, True,
+                                             entry.error, arm_joint))
+            elif gap == SELF_TABLE_GAP and tables is not None and names not in left_on_spheres:
+                entry = tables.tables.get(names)
+                if entry is None:
+                    raise ModelError(f'{names[0]} - {names[1]}: no clearance table')
+                table_of[(t, a)] = len(table_rows)
+                table_error[(t, a)] = entry.error
+                table_rows.append(entry)
+                pair_list.append(('table', t, a))
+            else:
                 pair_list.append(('tool', t, a))
+    stack = None
+    if table_rows:
+        from .keepout_tables import TableStack
+        stack = TableStack([e.table for e in table_rows], [e.joints for e in table_rows])
+        room = min(e.table.cap - e.table.slack for e in table_rows)
+        if self_margin + influence_extra >= room:
+            raise ModelError(f'the self margin plus {influence_extra * 1000.0:.0f} mm reaches '
+                             f'beyond what the clearance tables hold ({room * 1000.0:.0f} mm)')
     model = Model(base=base, joint_names=list(arm_names), margin=margin,
                   influence=margin + influence_extra, bodies=bodies, units=units,
                   pair_list=pair_list, extra_joints=extra_joints, excluded=excluded,
                   not_covered=not_covered, fingerprint='', cell=cell, spacing=spacing,
-                  chain_segments=list(chain.segments))
+                  chain_segments=list(chain.segments), self_margin=self_margin,
+                  self_influence=self_margin + influence_extra, tables=stack,
+                  table_of=table_of, table_error=table_error, unsupported=unsupported)
     model._index()
     lower = np.array([j.lower for j in chain.joints])
     upper = np.array([j.upper for j in chain.joints])
@@ -1262,6 +1483,7 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
         samples = np.random.default_rng([seed, 1]).uniform(lower, upper,
                                                            size=(refine_samples, n_arm))
         chosen, _ = model.held_by_model(samples)
+        chosen = np.array([i for i in chosen if pair_list[i][0] != 'table'], dtype=int)
         fine_bodies, fine_fixed = set(), set()
         for i in chosen:
             kind, a, b = pair_list[i]
@@ -1287,11 +1509,13 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
         rng = np.random.default_rng(seed)
         samples = rng.uniform(lower, upper, size=(near_samples, n_arm))
         candidates = np.arange(len(pair_list))
+        margins = model._pair_margin
         for q in samples:
             if len(candidates) == 0:
                 break
             sub = model.subset(candidates)
-            candidates = candidates[sub.pair_minima(q, limit=margin) < margin]
+            here = margins[candidates]
+            candidates = candidates[sub.pair_minima(q, limit=float(here.max())) < here]
         if len(candidates):
             sub = model.subset(candidates)
             values = np.array([sub.pair_minima(q) for q in samples])
@@ -1299,7 +1523,7 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
                 moving_name, other = model.pairs[i]
                 excluded.append(Excluded(moving_name, other, NEAR,
                                          float(values[:, column].min()),
-                                         float(values[:, column].max())))
+                                         float(values[:, column].max()), model.is_self(i)))
         drop = {int(i) for i in candidates}
         model.pair_list = [p for i, p in enumerate(pair_list) if i not in drop]
         model._index()
