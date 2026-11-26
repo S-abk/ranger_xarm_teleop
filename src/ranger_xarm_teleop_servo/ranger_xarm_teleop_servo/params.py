@@ -57,6 +57,9 @@ MOTION_REQUIRED = joint_accel.NAMES
 
 # Set in the gate document.
 INPUT_TIMEOUT_S = 0.1
+# The feedforward's rotation low-pass (GateParams.feedforward_rotation_cutoff_hz); chosen by
+# measurement (docs: README, "Wrist reversals").
+FEEDFORWARD_ROTATION_CUTOFF_HZ = 0.0
 TARGET_RATE_HZ = 50.0
 
 # Not safety limits: defaults that a deployment may tune.
@@ -131,6 +134,10 @@ class GateParams:
     base_driving: bool = False
     # After a drive, the clutch waits this long for the base to come to rest, then refuses.
     base_rest_wait_s: float = 2.0
+    # The target's rotation rate in the feedforward is low-passed at this cutoff (Hz; 0: not
+    # filtered); its translation is not. The hand's small fast rotations otherwise pass into
+    # joints 4 and 6 as reversals of the command; the pose term still closes the rotation.
+    feedforward_rotation_cutoff_hz: float = FEEDFORWARD_ROTATION_CUTOFF_HZ
 
     def translation_scale(self, coarse: bool) -> float:
         """Return the coarse or the fine translation scale."""

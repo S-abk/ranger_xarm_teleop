@@ -210,6 +210,8 @@ class GateState:
     scale: float = 1.0                # translation scale the engagement's anchor is built for
     filtered: Optional[Pose] = None
     last_target: Optional[Pose] = None
+    ff_rotation: Tuple[float, float, float] = (0.0, 0.0, 0.0)   # the feedforward's low-passed
+    #                                                             rotation rate (rad/s)
     events: Tuple[str, ...] = ()
 
 
@@ -550,6 +552,16 @@ def absorb(anchor: Pose, filtered: Pose, mapped_turn: Quat, before: Pose,
             Pose(v_add(filtered.p, shift), q_normalize(q_mul(turn, filtered.q))))
 
 
+def rotation_low_pass(previous: Sequence[float], rate: Sequence[float],
+                      params: GateParams) -> Tuple[float, float, float]:
+    """Return the feedforward's rotation rate after a first-order low-pass (wrist reversals)."""
+    cutoff = params.feedforward_rotation_cutoff_hz
+    if not cutoff > 0.0:
+        return tuple(float(v) for v in rate)
+    alpha = 1.0 - math.exp(-2.0 * math.pi * cutoff * params.target_period)
+    return tuple(float(p + alpha * (r - p)) for p, r in zip(previous, rate))
+
+
 def twist(previous: Pose, current: Pose, period: float) -> Tuple[float, ...]:
     """Return the twist taking ``previous`` to ``current`` in ``period`` (base frame)."""
     v = v_scale(v_sub(current.p, previous.p), 1.0 / period)
@@ -714,7 +726,8 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
                         tool0=env.tool_pose, anchor=env.tool_pose,
                         heading=state.calibration.heading,
                         scale=params.translation_scale(state.coarse),
-                        filtered=env.tool_pose, last_target=env.tool_pose)
+                        filtered=env.tool_pose, last_target=env.tool_pose,
+                        ff_rotation=(0.0, 0.0, 0.0))
         events.append(f'clutch engaged at seq {frame.seq}')
 
     controller = apply_pivot(frame.controller, params.pivot_offset)
@@ -736,6 +749,8 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
         return out(_released(state, Hold.STEP_REJECTED), None, Hold.STEP_REJECTED,
                    Limit.NONE, False)
     feedforward = twist(state.last_target, target, params.target_period)
+    rotation = rotation_low_pass(state.ff_rotation, feedforward[3:], params)
+    feedforward = feedforward[:3] + rotation
     final, leading = clamp_lead(target, env.tool_pose, params)
     final, absorbed = absorb_blocked(final, env.tool_pose, env.blocked)
     leading = leading or absorbed
@@ -745,11 +760,12 @@ def tick(state: GateState, env: Env, params: GateParams) -> Tuple[GateState, Out
             # G-6 outranks: the last accepted target is kept, and so is the arm.
             final, limit = state.last_target, Limit.KEEP_OUT
             feedforward = (0.0,) * 6
+            rotation = (0.0, 0.0, 0.0)
     anchor, filtered = state.anchor, filtered
     if final != target:
         mapped_turn = clutch_relative(controller, state.clutch, state.heading,
                                       Pose(state.anchor.p, IDENTITY_Q)).q
         anchor, filtered = absorb(state.anchor, filtered, mapped_turn, target, final)
     state = replace(state, anchor=anchor, filtered=filtered, last_target=final,
-                    latched=Hold.NONE, events=())
+                    ff_rotation=tuple(rotation), latched=Hold.NONE, events=())
     return out(state, final, Hold.NONE, limit, True, feedforward)
