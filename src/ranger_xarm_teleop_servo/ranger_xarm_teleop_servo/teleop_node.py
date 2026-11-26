@@ -160,6 +160,7 @@ LATE_START_S = 0.03         # a cycle starting this long after the previous one 
 CYCLE_REPORT_S = 60.0       # how often the slow and late cycles are summed up in the log
 KEEPOUT_BUILD_POLL_S = 0.5  # how often a running table build is looked at
 PREVIEW_SELF_WITHIN = 0.15  # m: the preview's arm-to-arm clearance is exact up to this
+TABLE_CONFIG = kt.TableConfig()   # the clearance tables' resolution (unit tests: TEST_CONFIG)
 INPUT_GAP_WINDOW_S = 0.2    # the longest gap between input callbacks is kept this long
 OWNER_TIMEOUT_S = 0.5       # mux state older than this counts as "no owner"
 SERVICE_TIMEOUT_S = 1.0     # a Servo or mux call without an answer is abandoned
@@ -595,7 +596,7 @@ class TeleopNode(Node):
         self.keepout_fault = ''
         self._keepout_tried = False
         self.keepout_building = False       # the table builder runs (HOLD_KEEPOUT_BUILDING)
-        self._table_config = kt.TableConfig()   # tests of made-up robots: kt.TEST_CONFIG
+        self._table_config = TABLE_CONFIG
         self._builder = None
         self.keepout_floor = math.inf       # clearance the next cycle may not fall below
         self.servo_description_compared = False
@@ -1960,22 +1961,34 @@ class TeleopNode(Node):
             response.success = False
             response.message = 'no link keep-out model yet (no robot description)'
             return response
-        lines = [f'margin {model.margin * 1000.0:.1f} mm; cell {model.cell * 1000.0:.0f} mm; '
+        kinds = [kind for kind, _, _ in model.pair_list]
+        lines = [f'margin {model.margin * 1000.0:.1f} mm from the fixed structure, '
+                 f'{model.self_margin * 1000.0:.1f} mm between the arm\'s own links; cell '
+                 f'{model.cell * 1000.0:.0f} mm; '
                  f'{model.sphere_count} spheres; largest radius '
                  f'{model.largest_radius * 1000.0:.1f} mm (inflation below twice that per '
                  f'covered side); fingerprint {model.fingerprint}',
                  f'fixed links: {model.units.names}',
-                 f'pairs: {len(model.pair_list)}']
+                 f'pairs: {len(model.pair_list)} ({kinds.count("fixed")} with the fixed '
+                 f'structure, {kinds.count("tool")} self pairs on spheres, '
+                 f'{kinds.count("table")} from clearance tables, '
+                 f'{model.table_bytes / 2 ** 20:.1f} MB)']
         for item in model.excluded:
-            lines.append(f'left out: {item.moving} - {item.other}: {item.reason}'
-                         + ('' if item.reason == 'adjacent' else
-                            f' (clearance {item.low * 1000.0:.1f} to '
-                            f'{item.high * 1000.0:.1f} mm)'))
+            margin = model.self_margin if item.self_pair else model.margin
+            if item.reason == 'adjacent':
+                lines.append(f'left out: {item.moving} - {item.other}: adjacent')
+            elif item.reason == ko.NEAR:
+                lines.append(f'left out: {item.moving} - {item.other}: {item.reason} '
+                             f'(clearance {item.low * 1000.0:.1f} to {item.high * 1000.0:.1f} '
+                             'mm)')
+            else:
+                lines.append(f'left out: {ko.excluded_text(item, margin)}')
         if model.refined:
             lines.append(f'finer cells ({model.fine_cell * 1000.0:.0f} mm): {model.refined}, '
                          f'for {model.refined_by}')
         for item in model.held:
-            lines.append(f'held at work: {ko.held_text(item, model.margin)}')
+            lines.append('held at work: ' + ko.held_text(
+                item, model.self_margin if item.self_pair else model.margin))
         if model.not_covered:
             lines.append(f'not covered: {model.not_covered}')
         if self.keepout_fault:
