@@ -1294,8 +1294,10 @@ def keepout_step_measures(data: dict) -> dict:
 
 def info_keepout_step_time(km: dict) -> Result:
     """INFO: step times of the link keep-out split by self pair active, and the cycle times."""
-    threshold = ('informational: totals over every summary of the run; the median is the '
-                 'median of the per-summary medians, p99 and longest the largest seen')
+    threshold = ('informational: "self pair active" means a pair of the arm\'s own links '
+                 'on the sphere covers (three or more joints apart) gave a keep-out row; '
+                 'totals over every summary of the run; the median is the median of the '
+                 'per-summary medians, p99 and longest the largest seen')
     pair, cycles = km['pair'], km['cycles']
     none = ('no keep-out summary from the teleop node in this run (it logs one every '
             f'{TELEOP_SUMMARY_PERIOD_S} s while commanding)')
