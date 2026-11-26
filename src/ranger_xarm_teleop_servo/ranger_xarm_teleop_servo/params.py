@@ -42,11 +42,12 @@ REQUIRED = (
 )
 
 # On the hardware path (``hardware_limits``, set by the launch whenever it is not a
-# simulation) these must also come from the limits file: the link keep-out margin (PENDING in
-# the gate document) and the joint-state age limit, which on a real arm depends on how often
-# its driver reports and is chosen from the stage 2 check, not taken from simulation.
-HARDWARE_REQUIRED = REQUIRED + ('link_keepout_margin_m', 'tool_pose_timeout_s',
-                                *joint_accel.NAMES)
+# simulation) these must also come from the limits file: the link keep-out margins from the
+# fixed structure and between the arm's own links (PENDING in the gate document) and the
+# joint-state age limit, which on a real arm depends on how often its driver reports and is
+# chosen from the stage 2 check, not taken from simulation.
+HARDWARE_REQUIRED = REQUIRED + ('link_keepout_margin_m', 'arm_self_margin_m',
+                                'tool_pose_timeout_s', *joint_accel.NAMES)
 
 # The joint speed cap and the joint acceleration limit of the joint command (G-18): required on
 # every path, simulation included, with no default. They are not gate values, so they are not

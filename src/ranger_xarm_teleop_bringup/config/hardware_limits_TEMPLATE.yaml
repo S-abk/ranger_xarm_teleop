@@ -77,6 +77,14 @@
     # in the preview at that posture (procedure step 3b') before arming; see
     # docs/HARDWARE_PROCEDURE.md, "Values you supply".
     link_keepout_margin_m: PENDING
+    # What it bounds: the clearance two of the arm's own links (and what is fixed to the wrist)
+    # keep from each other when at least two arm joints lie between them, by the keep-out model.
+    # Unit: metres. How to choose: above MoveIt Servo's self-collision threshold and the arm
+    # firmware's own self-collision envelope, plus the overshoot you measured; read the least
+    # arm-to-arm clearance in the preview while moving the arm slowly toward itself (procedure
+    # step 3c). Too large holds the arm over part of its range, and the start is refused; see
+    # docs/HARDWARE_PROCEDURE.md, "Values you supply".
+    arm_self_margin_m: PENDING
     # What it bounds: how old the measured tool pose may be before the gate stops motion.
     # Unit: seconds. How to choose: from the stage 2 joint-state check: at least 3 times the
     # largest gap it measured; see docs/HARDWARE_PROCEDURE.md, "Values you supply".

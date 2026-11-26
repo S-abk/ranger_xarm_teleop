@@ -42,6 +42,10 @@
     # retreat leaves the arm in can be planned from; 5 mm more for the simulated
     # controller's overshoot.
     link_keepout_margin_m: 0.025
+    # G-15 between the arm's own links (and what is fixed to the wrist): two of them with at
+    # least two arm joints between them keep this far apart. Above MoveIt Servo's 10 mm
+    # threshold; at 0.025 no self pair holds the arm over the working range of this arm.
+    arm_self_margin_m: 0.025
     # Gripper teleop (used only with gripper_enabled): the driven joint's open and closed
     # positions and its speed limit, in the joint's units (rad, rad/s). The URDF allows
     # 0 to 0.85 rad at 2 rad/s; MoveIt's joint_limits.yaml gives 1.0 rad/s, used here.
