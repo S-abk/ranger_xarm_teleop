@@ -71,9 +71,13 @@ CAMERA_GAP_FRACTION = 0.01
 # moving span must last at least this long (s) to be judged.
 MOVING_SPEED = 0.01
 MIN_MOVING_SPAN = 0.5
-# Wrist velocity sign changes only count above this speed (rad/s), within this window (s).
-OSCILLATION_SPEED = 0.02
+# Wrist velocity reversals (INV-4 as amended): a reversal is a change of joint speed from above
+# +OSCILLATION_SPEED to below -OSCILLATION_SPEED or the reverse (a dead band: changes inside it
+# are tremor and are not counted), within this window (s).
+OSCILLATION_SPEED = 0.1
 OSCILLATION_WINDOW = 1.0
+# The count before the dead band, reported beside the rule (INFO): every sign change above this.
+OSCILLATION_SPEED_UNBANDED = 0.02
 # A /teleop/state and a /teleop/target_pose stamp match within this many seconds (they share a
 # stamp when a target is published in the cycle).
 MATCH_TOLERANCE = 0.010
@@ -452,13 +456,15 @@ def motion_measures(data: dict) -> dict:
     pos = [s[3] for s in arm]
     vel, source = stats.joint_velocities(t, pos, [s[4] for s in arm])
     peaks = stats.peak_acceleration(t, vel)
-    osc = {stats.ARM_JOINTS[j]: stats.sign_changes_per_window(
-        t, vel[:, j], OSCILLATION_SPEED, OSCILLATION_WINDOW)
-           for j in WRIST_JOINTS} if len(arm) else {}
+
+    def wrist(band):
+        return {stats.ARM_JOINTS[j]: stats.sign_changes_per_window(
+            t, vel[:, j], band, OSCILLATION_WINDOW) for j in WRIST_JOINTS} if len(arm) else {}
     return {'stale': stats.stale_analysis(t, pos, MOVING_SPEED, MIN_MOVING_SPAN),
             'velocity_source': source,
             'peak_acceleration': dict(zip(stats.ARM_JOINTS, peaks)),
-            'wrist_sign_changes_per_s': osc}
+            'wrist_sign_changes_per_s': wrist(OSCILLATION_SPEED),
+            'wrist_sign_changes_unbanded': wrist(OSCILLATION_SPEED_UNBANDED)}
 
 
 def rule_stale(mm: dict) -> Result:
@@ -513,9 +519,12 @@ def rule_acceleration(mm: dict, opts: Options) -> Result:
 
 
 def rule_oscillation(mm: dict) -> Result:
-    """Wrist velocity sign changes: at most OSCILLATION_LIMIT in any second."""
+    """Wrist velocity reversals: at most OSCILLATION_LIMIT in any second, past a dead band."""
     name = 'wrist oscillation'
-    threshold = f'at most {OSCILLATION_LIMIT} sign changes per second on joint 4 and joint 6'
+    threshold = (f'at most {OSCILLATION_LIMIT} velocity reversals in any second on joint 4 and '
+                 f'joint 6, a reversal being a change of joint speed from above '
+                 f'+{OSCILLATION_SPEED:g} rad/s to below -{OSCILLATION_SPEED:g} rad/s or the '
+                 'reverse')
     osc = mm['wrist_sign_changes_per_s']
     if not osc:
         return Result(name, NOT_JUDGED, 'no six-joint message', threshold,
@@ -524,8 +533,21 @@ def rule_oscillation(mm: dict) -> Result:
     if all(n <= OSCILLATION_LIMIT for n in osc.values()):
         return Result(name, PASS, measured, threshold)
     return Result(name, FAIL, measured, threshold,
-                  'the wrist oscillates: release the grip / stop the motion; this is the '
-                  "solver's limit cycle near the wrist singularity")
+                  'the wrist reverses faster than the rule allows: release the grip / stop the '
+                  'motion; compare the command and Servo-output reversal counts (INFO) and the '
+                  'reported-velocity noise with the arm still')
+
+
+def info_wrist_reversals_unbanded(mm: dict) -> Result:
+    """INFO: the wrist's sign changes without the dead band, beside the rule."""
+    name = 'wrist sign changes without the dead band'
+    threshold = (f'informational: every velocity sign change above '
+                 f'{OSCILLATION_SPEED_UNBANDED:g} rad/s, most in any {OSCILLATION_WINDOW:g} s '
+                 f"(the count before the rule's +-{OSCILLATION_SPEED:g} rad/s dead band)")
+    osc = mm.get('wrist_sign_changes_unbanded') or {}
+    if not osc:
+        return Result(name, INFO, 'no six-joint message', threshold)
+    return Result(name, INFO, ', '.join(f'{j}: {n}/s' for j, n in osc.items()), threshold)
 
 
 # ---- teleop -----------------------------------------------------------------------------
@@ -1387,12 +1409,13 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
         mm = motion_measures(data)
         measures['motion'] = mm
         if stage == 'motion':
-            results += [rule_stale(mm), rule_acceleration(mm, opts), rule_oscillation(mm)]
+            results += [rule_stale(mm), rule_acceleration(mm, opts), rule_oscillation(mm),
+                        info_wrist_reversals_unbanded(mm)]
         else:
             jm = joint_state_acceleration(data)
             measures['joint_state_acceleration_20ms'] = jm
             results += [rule_stale(mm), info_joint_state_acceleration(jm, opts),
-                        rule_oscillation(mm)]
+                        rule_oscillation(mm), info_wrist_reversals_unbanded(mm)]
     if stage == 'teleop':
         tm = teleop_measures(data)
         measures['teleop'] = tm

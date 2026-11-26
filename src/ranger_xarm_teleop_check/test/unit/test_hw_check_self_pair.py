@@ -43,7 +43,7 @@ def arm_rows(n, pos_fn, vel_fn, start=0.0):
     return rows
 
 
-def flip(t, joint=3, speed=0.1, period=0.15):
+def flip(t, joint=3, speed=0.2, period=0.15):
     """Six velocities, one joint flipping sign every ``period`` s."""
     v = [0.0] * 6
     v[joint] = speed if int(t / period) % 2 == 0 else -speed
@@ -93,7 +93,7 @@ def reversal_data(jog=True, command=None):
     if jog:
         # 200 messages at 50 Hz: joint 6 flips every 8 messages (0.16 s), joint 4 does not
         data['jog'] = [(NAMES, tuple(0.1 if k < 100 else 0.0 for _ in range(3))
-                        + (0.1, 0.1, 0.1 if (k // 8) % 2 == 0 else -0.1)) for k in range(200)]
+                        + (0.1, 0.1, 0.2 if (k // 8) % 2 == 0 else -0.2)) for k in range(200)]
         data['jog_arrival'] = [k * 0.02 for k in range(200)]
     if command is not None:
         data['command'], data['command_velocities'] = command
@@ -107,7 +107,7 @@ def servo_messages(with_velocity, n=200):
     for k in range(n):
         t = k * 0.02
         v = [0.0] * 6
-        v[3] = 0.1 if (k // 8) % 2 == 0 else -0.1
+        v[3] = 0.2 if (k // 8) % 2 == 0 else -0.2
         angle += v[3] * 0.02
         pos = [0.0] * 6
         pos[3] = angle
@@ -172,11 +172,12 @@ def test_reversals_with_no_joint_states_say_so():
     assert 'joint states: no six-joint message' in result.measured
 
 
-def test_the_oscillation_rule_is_unchanged_by_the_new_data():
+def test_the_oscillation_rule_is_the_amended_one():
     data = reversal_data()
     mm = rules.motion_measures(data)
     assert rules.rule_oscillation(mm).verdict == rules.FAIL
-    assert rules.OSCILLATION_LIMIT == 4 and rules.OSCILLATION_SPEED == 0.02
+    assert rules.OSCILLATION_LIMIT == 4 and rules.OSCILLATION_SPEED == 0.1
+    assert rules.OSCILLATION_SPEED_UNBANDED == 0.02
 
 
 def still_data(noise=0.0, jog_until=None, seconds=4.0, velocities=True):
@@ -197,13 +198,13 @@ def test_still_noise_is_reported_for_joints_4_and_6_with_the_rule_stated():
     result = rules.info_still_velocity_noise(sm)
     assert result.verdict == rules.INFO
     assert result.measured.startswith('joint 4: still 3.5 s in 1 window, RMS 0.0300 rad/s, '
-                                      'peak 0.0300 rad/s, most sign changes above 0.02 rad/s '
+                                      'peak 0.0300 rad/s, most sign changes above 0.1 rad/s '
                                       'in any 1 s window ')
     assert 'joint 6: still' in result.measured and 'no joint-jog message' in result.measured
     assert 'no nonzero joint-jog command for 0.5 s before and during' in result.threshold
     assert 'within 0.002 rad over each 0.5 s span' in result.threshold
-    # alternating every 30 ms: 34 flips fit in one 1 s window
-    assert sm['joints']['xarm_joint4']['sign_changes'] == 34
+    # alternating every 30 ms at 0.03 rad/s: inside the rule's dead band, none counts
+    assert sm['joints']['xarm_joint4']['sign_changes'] == 0
 
 
 def test_a_command_early_in_the_run_leaves_the_rest_as_still_time():

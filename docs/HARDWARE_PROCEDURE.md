@@ -522,8 +522,10 @@ rotation lead stays near 0].
   disarm, keep the report (`link keep-out shaping the command` and `target lead (rotation)` show
   it), and go back to 3b';
 - it keeps moving more than about 2 cm after you release;
-- the wrist oscillates (the solver's limit cycle near the wrist singularity: release, then
-  disarm, and plan the arm away from the singular posture through MoveIt);
+- `wrist oscillation` fails (more than 4 reversals in a second on joint 4 or 6, counted past a
+  dead band of ±0.1 rad/s): release, then disarm, and plan the arm away from the posture
+  through MoveIt; keep the report, whose INFO lines give the count without the dead band, the
+  command and Servo-output reversals and the reported-velocity noise with the arm still;
 - `commanded joint acceleration (teleop joint command)`, `commanded joint acceleration (MoveIt
   Servo output)` or `stop time after a release` fails: keep the report and stop the stage;
 - the arm reports a collision error: payload, mounting or sensitivity may be set wrong, but
