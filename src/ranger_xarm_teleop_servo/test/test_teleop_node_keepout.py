@@ -652,3 +652,25 @@ def test_a_first_start_builds_the_tables_in_a_process_holding_and_refusing_to_ar
     m._resolver = lambda: ko.make_resolver(lambda package: '')
     m._on_robot_description(String(data=urdf))
     assert m.keepout is not None and m._builder is None
+
+
+def test_hardware_refuses_a_self_margin_that_holds_the_arm_and_names_the_parameter(node):
+    # At 40 mm the l4 - l2 table holds the arm over much of its range (INV-3 for self pairs).
+    with pytest.raises(StartupRefused) as refused:
+        node(robot_urdf(tool_lift=0.07), arm_self_margin_m=0.04, **HARDWARE)
+    text = str(refused.value)
+    assert text.startswith('link keep-out: arm_self_margin_m 0.04 m holds the arm over much of '
+                           'its range: l4 - l2 is inside the margin of 40.0 mm')
+
+
+@pytest.mark.real_table_build
+def test_a_failed_table_build_refuses_to_run(node, tmp_path, monkeypatch):
+    # The builder process finds package:// meshes through the ament index, where the made-up
+    # robot's are not: it fails, and the node must not run without its tables.
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'cache'))
+    n = node(robot_urdf())
+    assert n.keepout is None and n.keepout_building
+    deadline = time.monotonic() + 120.0
+    with pytest.raises(StartupRefused, match='the clearance table build failed'):
+        while time.monotonic() < deadline:
+            rclpy.spin_once(n, timeout_sec=0.2)

@@ -92,3 +92,16 @@ def test_the_feedforward_rotation_is_smoothed_and_its_translation_untouched():
     # The step at engagement is followed with a lag, then the same rate.
     assert abs(smooth[1][5]) < abs(raw[1][5])
     assert smooth[-1][5] == pytest.approx(raw[-1][5], rel=0.05)
+
+
+def test_the_rotation_low_pass_starts_from_rest_at_every_engagement():
+    from ranger_xarm_teleop_servo.gate import on_frame
+    gate_params = replace(params(filter_cutoff_hz=0.0), feedforward_rotation_cutoff_hz=2.0)
+    stale = replace(ready_state(), ff_rotation=(5.0, -5.0, 5.0))    # left from an earlier one
+    state = on_frame(stale, frame(0, controller=_turning(0.0)), gate_params)
+    state, out = tick(state, _env(0.0), gate_params)
+    assert state.engaged and state.ff_rotation == (0.0, 0.0, 0.0)
+    state = on_frame(state, frame(2, controller=_turning(0.02)), gate_params)
+    state, out = tick(state, _env(0.02), gate_params)
+    alpha = 1.0 - math.exp(-2.0 * math.pi * 2.0 * gate_params.target_period)
+    assert abs(out.feedforward[5]) <= alpha * 0.3 + 1e-6      # from rest, not from 5 rad/s

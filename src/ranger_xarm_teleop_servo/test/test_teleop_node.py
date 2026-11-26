@@ -343,6 +343,9 @@ def test_tool_frame_offset_from_the_tip_rotates_about_the_tool_point(harness):
     point, so the measured tool point stays put while the tip circles it.
     """
     h = harness(tool_frame='custom_tool', filter_cutoff_hz=0.0)
+    # Geometry only: the feedforward's rotation low-pass is off too (its overshoot after the
+    # hand stops is tested in test_gate_wrist_keepout.py and stated in the README).
+    h.node.params = replace(h.node.params, feedforward_rotation_cutoff_hz=0.0)
     start = compose(TCP_START, inverse(TIP_IN_TOOL))
     assert v_norm(v_sub(h.tool.p, start.p)) < 1e-9
     h.play('clutch_rotation')

@@ -74,7 +74,7 @@ suggestions, not defaults, and appear nowhere the hardware path reads them.
 | `step_rotation_limit_deg` | the same in rotation | a third of the simulation value: 3 |
 | `view_cone_half_angle_deg` | controller angle off the headset's forward axis | 50 (simulation 65; narrower is stricter) |
 | `link_keepout_margin_m` | arm links from the robot's fixed structure | 0.025 (simulation 0.025); see below |
-| `arm_self_margin_m` | two of the arm's own links (and what is fixed to the wrist) with at least two arm joints between them | from 3b'' (simulation 0.025); below about 0.036 on this arm (above it the wrist link against link 4 holds the arm, and the start is refused); see below |
+| `arm_self_margin_m` | two of the arm's own links (and what is fixed to the wrist) with at least two arm joints between them | from 3b'': at or above the smallest arm-to-arm clearance the firmware accepted there (simulation 0.025); at most about 0.036 on this arm (above it link 6 against link 4 holds the arm, and the start is refused) |
 | `tool_pose_timeout_s` | age of the measured tool pose | from stage 2's `joint_states largest gap`: at least 3 x that gap and at most 0.1 s. If the gap needs more than 0.1 s, stop |
 
 The speed cap and the lead limit bound each other: the arm cannot go faster than lead / lag.
@@ -391,12 +391,14 @@ more than the geometry has.
 - You should see: the value falls as the arm folds and rises as it unfolds; the arm firmware
   does not stop the arm.
 - Note the smallest value at which the firmware was still content, and the pair. Choose
-  `arm_self_margin_m` above MoveIt Servo's 10 mm threshold and your controller's overshoot, and
-  below that value; at most about 0.036 on this arm.
+  `arm_self_margin_m` at or above that value (teleop then never folds the arm further than this
+  step did), and above MoveIt Servo's 10 mm threshold plus your controller's overshoot; at most
+  about 0.036 on this arm (above it link 6 against link 4 holds the arm over much of its range
+  and the start is refused).
 - **Stop if:** the firmware stops the arm (self-collision) before the value has fallen to the
   margin you meant to use: that margin is too small for this arm's firmware envelope. Recover
-  as in the arm's own instructions and choose a larger margin, below the 0.036 above; if no
-  margin fits, do not arm and report it.
+  as in the arm's own instructions and choose a larger margin, at most the 0.036 above; if no
+  margin fits (the firmware stops the arm above 0.036), do not arm and report it.
 
 Then stop terminal 2 and start it again with `motion_enabled:=true`, as at the start of this
 stage, before 3c.
