@@ -1119,6 +1119,216 @@ def rules_cameras(cm: dict, streams: List[dict]) -> List[Result]:
     return out
 
 
+# ---- teleop: where velocity reversals arise, the reported velocity's own noise, step times ----
+
+REVERSALS_INFO = 'velocity reversals: teleop command, Servo output, joint states (INFO)'
+STILL_NOISE_INFO = 'reported joint velocity with the arm still (INFO)'
+KEEPOUT_STEP_INFO = 'teleop step times, link keep-out by self pair (INFO)'
+# The teleop node logs its summary this often while commanding (CYCLE_REPORT_S in teleop_node).
+TELEOP_SUMMARY_PERIOD_S = 60
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return f'{n} {one if n == 1 else many}'
+
+
+def _joint_label(j: int) -> str:
+    return f'joint {j + 1}'
+
+
+def reversal_measures(data: dict, mm: dict) -> dict:
+    """
+    Return the reversal counts of the command, MoveIt Servo's output and the joint states.
+
+    The counting is the wrist oscillation rule's (``stats.sign_changes_per_window``, |v| above
+    OSCILLATION_SPEED, most in any OSCILLATION_WINDOW s) on joints 4 and 6, applied to the
+    teleop node's joint-jog velocities (at their arrival) and to Servo's output (the velocity
+    of its point, or the central difference of its positions); ``mm`` is ``motion_measures``,
+    whose joint-state counts are shown for comparison.
+    """
+    jog_t, jog_v = stats.jog_series(data.get('jog', []), data.get('jog_arrival', []))
+    series = stats.command_velocity_series(data.get('command', []),
+                                           data.get('command_velocities', []))
+
+    def counts(t, v):
+        return {j: stats.sign_changes_per_window(t, v[:, j], OSCILLATION_SPEED,
+                                                 OSCILLATION_WINDOW) for j in WRIST_JOINTS}
+
+    osc = mm.get('wrist_sign_changes_per_s') or {}
+    return {'jog_messages': len(data.get('jog', [])), 'jog_usable': int(len(jog_t)),
+            'command_messages': len(data.get('command', [])),
+            'command_source': series['source'],
+            'command': counts(jog_t, jog_v) if len(jog_t) else {},
+            'servo': counts(series['t'], series['v']) if series['source'] else {},
+            'joint_states': {j: osc.get(stats.ARM_JOINTS[j]) for j in WRIST_JOINTS}
+            if osc else {},
+            'joint_states_source': mm.get('velocity_source')}
+
+
+def info_reversals_command_servo(rm: dict, opts: Options) -> Result:
+    """INFO: velocity reversals per second window on joints 4 and 6, in three places."""
+    threshold = (f'informational: sign flips of the velocity above {OSCILLATION_SPEED:g} rad/s, '
+                 f'most in any {OSCILLATION_WINDOW:g} s window, counted as the wrist '
+                 f'oscillation rule counts them (limit {OSCILLATION_LIMIT} there, on '
+                 '/joint_states only); shows where reversals arise')
+
+    def count(source, j):
+        value = rm[source].get(j)
+        return 'n/a' if value is None else str(value)
+
+    shown = '; '.join(
+        f'{_joint_label(j)}: command {count("command", j)}, Servo output {count("servo", j)}, '
+        f'joint states {count("joint_states", j)}' for j in WRIST_JOINTS)
+    notes = []
+    if not rm['jog_messages']:
+        notes.append(f'command: no message on {opts.jog_topic}')
+    elif not rm['jog_usable']:
+        notes.append(f"command: {rm['jog_messages']} messages on {opts.jog_topic}, none with "
+                     'all six arm joints and a time')
+    else:
+        notes.append(f"command: joint-jog velocities of {rm['jog_usable']} messages on "
+                     f'{opts.jog_topic}, at arrival')
+    if not rm['command_messages']:
+        notes.append(f'Servo output: no message on {opts.command_topic}')
+    elif rm['command_source'] == 'velocities':
+        notes.append(f"Servo output: velocities of the point of {rm['command_messages']} "
+                     f'messages on {opts.command_topic}')
+    elif rm['command_source'] == 'positions':
+        notes.append(f'Servo output: no velocities in the points, central difference of the '
+                     f"positions of {rm['command_messages']} messages on {opts.command_topic} "
+                     'over their stamps')
+    else:
+        notes.append(f"Servo output: {rm['command_messages']} messages on "
+                     f'{opts.command_topic}, none with all six arm joints')
+    if not rm['joint_states']:
+        notes.append('joint states: no six-joint message')
+    else:
+        notes.append(f"joint states: velocity from {rm['joint_states_source']}")
+    return Result(REVERSALS_INFO, INFO, f'{shown} (most sign changes in any '
+                  f"{OSCILLATION_WINDOW:g} s window; {'; '.join(notes)})", threshold)
+
+
+def still_noise_measures(data: dict) -> dict:
+    """
+    Return the joint-state velocity noise of joints 4 and 6 while the arm is still.
+
+    Still is ``stats.still_windows``: no nonzero joint-jog command (any joint of any message
+    on the jog topic) for ``STILL_SPAN_S`` before and during, and the joint moving less than
+    ``STILL_MOVE_RAD`` over each such span. Velocity is as the driver reports it; with it
+    missing from any message nothing further is measured. Times are arrival times, the clock
+    the jog messages are timed on too.
+    """
+    arm = data.get('arm', [])
+    out = {'messages': len(arm), 'reported': bool(arm) and all(s[4] is not None for s in arm),
+           'jog_messages': len(data.get('jog', [])), 'joints': {}}
+    if not out['reported']:
+        return out
+    t = np.asarray([s[0] for s in arm], dtype=float)
+    pos = np.asarray([s[3] for s in arm], dtype=float)
+    vel = np.asarray([s[4] for s in arm], dtype=float)
+    jog = data.get('jog', [])
+    arrivals = data.get('jog_arrival', [])
+    commanded = ([a for (_names, v), a in zip(jog, arrivals) if any(x != 0.0 for x in v)]
+                 if len(arrivals) == len(jog) else [])
+    for j in WRIST_JOINTS:
+        windows = stats.still_windows(t, pos[:, j], commanded)
+        out['joints'][j] = stats.still_noise(t, vel[:, j], windows, OSCILLATION_SPEED,
+                                             OSCILLATION_WINDOW)
+    return out
+
+
+def info_still_velocity_noise(sm: dict) -> Result:
+    """INFO: RMS, peak and sign changes of the reported velocity over the arm's still time."""
+    threshold = (f'informational: still = no nonzero joint-jog command for {stats.STILL_SPAN_S:g} '
+                 f's before and during, and the joint position within {stats.STILL_MOVE_RAD:g} '
+                 f'rad over each {stats.STILL_SPAN_S:g} s span, in stretches of at least '
+                 f'{stats.STILL_MIN_S:g} s; shows how much of a reversal count the reported '
+                 'velocity alone can make')
+    if not sm['messages']:
+        return Result(STILL_NOISE_INFO, INFO, 'no six-joint message', threshold)
+    if not sm['reported']:
+        return Result(STILL_NOISE_INFO, INFO,
+                      'the driver reports no velocity in /joint_states (or not in every '
+                      'message): nothing measured', threshold)
+    parts = []
+    for j, s in sm['joints'].items():
+        if not s['windows']:
+            parts.append(f'{_joint_label(j)}: no still window of at least '
+                         f'{stats.STILL_MIN_S:g} s')
+            continue
+        parts.append(f"{_joint_label(j)}: still {s['seconds']:.1f} s in "
+                     f"{_count(s['windows'], 'window', 'windows')}, RMS {s['rms']:.4f} rad/s, "
+                     f"peak {s['peak']:.4f} rad/s, most "
+                     f'sign changes above {OSCILLATION_SPEED:g} rad/s in any '
+                     f"{OSCILLATION_WINDOW:g} s window {s['sign_changes']}")
+    jog = (f"{sm['jog_messages']} joint-jog messages" if sm['jog_messages']
+           else 'no joint-jog message')
+    return Result(STILL_NOISE_INFO, INFO, '; '.join(parts) + f' ({jog} in the run)', threshold)
+
+
+def keepout_step_measures(data: dict) -> dict:
+    """Return the teleop node's logged step-time summaries, parsed (stats.parse_teleop_summary)."""
+    parsed = [stats.parse_teleop_summary(text)
+              for text in (data.get('rosout') or {}).get('teleop_summaries', [])]
+    halves = {}
+    for key in ('active', 'inactive'):
+        rows = [p['pair'][key] for p in parsed if p['pair']]
+        medians = [r['median_ms'] for r in rows if r['median_ms'] is not None]
+        p99s = [r['p99_ms'] for r in rows if r['p99_ms'] is not None]
+        longest = [r['longest_ms'] for r in rows if r['longest_ms'] is not None]
+        halves[key] = {'summaries': len(rows), 'steps': sum(r['steps'] for r in rows),
+                       'median_of_medians_ms': stats.median(medians),
+                       'max_p99_ms': max(p99s) if p99s else None,
+                       'longest_ms': max(longest) if longest else None}
+    cycles = [p['cycles'] for p in parsed if p['cycles']]
+    p99s = [c['p99_ms'] for c in cycles if c['p99_ms'] is not None]
+    longest = [c['longest_ms'] for c in cycles if c['longest_ms'] is not None]
+    medians = [c['median_ms'] for c in cycles if c['median_ms'] is not None]
+    return {'summaries': len(parsed), 'pair': halves,
+            'cycles': {'summaries': len(cycles), 'cycles': sum(c['cycles'] for c in cycles),
+                       'median_of_medians_ms': stats.median(medians),
+                       'max_p99_ms': max(p99s) if p99s else None,
+                       'longest_ms': max(longest) if longest else None,
+                       'over': sum(c['over'] or 0 for c in cycles)}}
+
+
+def info_keepout_step_time(km: dict) -> Result:
+    """INFO: step times of the link keep-out split by self pair active, and the cycle times."""
+    threshold = ('informational: totals over every summary of the run; the median is the '
+                 'median of the per-summary medians, p99 and longest the largest seen')
+    pair, cycles = km['pair'], km['cycles']
+    if not pair['active']['summaries'] and not cycles['summaries']:
+        return Result(KEEPOUT_STEP_INFO, INFO,
+                      'no keep-out summary from the teleop node in this run (it logs one '
+                      f'every {TELEOP_SUMMARY_PERIOD_S} s while commanding)', threshold)
+
+    def half(label, h):
+        if not h['steps']:
+            return f'{label} 0 steps'
+        return (f"{label} {h['steps']} steps, median {_fmt(h['median_of_medians_ms'], '.2f')} "
+                f"ms, largest p99 {_fmt(h['max_p99_ms'], '.2f')} ms, longest "
+                f"{_fmt(h['longest_ms'], '.2f')} ms")
+
+    parts = []
+    if pair['active']['summaries']:
+        parts.append('link keep-out by self pair '
+                     f"({_count(pair['active']['summaries'], 'summary', 'summaries')}): "
+                     + half('active', pair['active']) + '; '
+                     + half('not active', pair['inactive']))
+    else:
+        parts.append('no self-pair summary')
+    if cycles['summaries']:
+        parts.append('teleop cycle computation '
+                     f"({_count(cycles['summaries'], 'summary', 'summaries')}): "
+                     f"{cycles['cycles']} cycles, median "
+                     f"{_fmt(cycles['median_of_medians_ms'], '.2f')} ms, largest p99 "
+                     f"{_fmt(cycles['max_p99_ms'], '.2f')} ms, longest "
+                     f"{_fmt(cycles['longest_ms'], '.2f')} ms, {cycles['over']} over the period")
+    else:
+        parts.append('no cycle-computation summary')
+    return Result(KEEPOUT_STEP_INFO, INFO, '; '.join(parts), threshold)
+
+
 # ---- the stages -------------------------------------------------------------------------
 
 def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]:
@@ -1139,7 +1349,10 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
     messages of (arrival s, err, warn, state, mode, mt_brake, mt_able), searched_s}), ``cameras``
     ({stream: {mono, stamps, first}}), ``tracking`` ((clutch_engaged, active_limit,
     keepout_bound, keepout_clearance_commanded, keepout_margin, keepout_link,
-    keepout_obstacle, lead_translation, lead_rotation) of /teleop/state).
+    keepout_obstacle, lead_translation, lead_rotation) of /teleop/state); teleop only, beside
+    ``command`` and ``jog``: ``command_velocities`` (per command message, the velocities of
+    each point), ``jog_arrival`` (arrival monotonic s of each ``jog`` message), and in
+    ``rosout`` ``teleop_summaries`` (the teleop node's step-time log messages).
     """
     measures: Dict[str, Any] = {}
     results: List[Result] = []
@@ -1193,4 +1406,12 @@ def evaluate(stage: str, data: dict, opts: Options) -> Tuple[dict, List[Result]]
         km = tracking_measures(data)
         measures['tracking'] = km
         results += [info_keepout_hold(km), info_rotation_lead(km)]
+        rm = reversal_measures(data, mm)
+        measures['reversals'] = rm
+        sm = still_noise_measures(data)
+        measures['still_velocity_noise'] = sm
+        ks = keepout_step_measures(data)
+        measures['keepout_step_time'] = ks
+        results += [info_reversals_command_servo(rm, opts), info_still_velocity_noise(sm),
+                    info_keepout_step_time(ks)]
     return measures, results
