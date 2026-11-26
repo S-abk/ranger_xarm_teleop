@@ -596,6 +596,7 @@ class TeleopNode(Node):
         self.keepout_fault = ''
         self._keepout_tried = False
         self.keepout_building = False       # the table builder runs (HOLD_KEEPOUT_BUILDING)
+        self._later_description = None      # a different description received during the build
         self._table_config = TABLE_CONFIG
         self._builder = None
         self.keepout_floor = math.inf       # clearance the next cycle may not fall below
@@ -1142,6 +1143,10 @@ class TeleopNode(Node):
             log.warning('link keep-out: the description has no pair of arm and fixed '
                         'collision geometry; nothing is kept out')
         self.keepout = model
+        later, self._later_description = self._later_description, None
+        if later is not None:
+            self._compare_description(later, 'a /robot_description that arrived during the '
+                                             'build')
         if self.gripper_params.enabled:
             joint = self.gripper_params.joint
             indices = model.pairs_moved_by(joint)
@@ -1285,6 +1290,9 @@ class TeleopNode(Node):
             self._build_arm()
         elif msg.data != self.urdf and self.keepout is not None:
             self._compare_description(msg.data, 'a later /robot_description')
+        elif msg.data != self.urdf:
+            # The model is still being built: compared once it is (``_make_keepout``).
+            self._later_description = msg.data
 
     def _on_owner(self, msg: ArmOwner) -> None:
         self.owner = msg.owner
@@ -1787,6 +1795,7 @@ class TeleopNode(Node):
         model = self._self_model[1]
         if model is None:
             return
+        self._self_logged_at = now          # looked up at most once a second
         try:
             clearance, pair = model.clearance(joints, self.keepout_extra(),
                                               within=PREVIEW_SELF_WITHIN)
@@ -1795,7 +1804,7 @@ class TeleopNode(Node):
         last = self._self_logged
         if last is not None and pair == last[1] and abs(clearance - last[0]) < 0.001:
             return
-        self._self_logged, self._self_logged_at = (clearance, pair), now
+        self._self_logged = (clearance, pair)
         if pair == ('', ''):
             words = f'more than {PREVIEW_SELF_WITHIN * 1000.0:.0f} mm'
         else:
@@ -2171,7 +2180,7 @@ class TeleopNode(Node):
             msg.measured_tool_pose_stamp.nanosec = int(tool_stamp_ns % 1_000_000_000)
         msg.preview_reason = self.preview_reason if self.preview_pub is not None else ''
         clearance, pair = self.idle_clearance()
-        msg.keepout_margin = float(getattr(self, '_idle_margin', self.keepout_margin))
+        msg.keepout_margin = self.keepout_margin      # the fixed structure's, as before
         msg.keepout_clearance = float(clearance)
         msg.keepout_link, msg.keepout_obstacle = pair
         msg.keepout_clearance_commanded = math.nan
@@ -2225,7 +2234,6 @@ class TeleopNode(Node):
         if self._idle_count and self._idle_clearance is not None:
             return self._idle_clearance
         self._idle_clearance = (math.nan, ('', ''))
-        self._idle_margin = self.keepout_margin
         if self.keepout is None or self.arm is None or self.joint_state is None:
             return self._idle_clearance
         positions = self.joint_state[2]
@@ -2237,7 +2245,6 @@ class TeleopNode(Node):
         except (KeyError, ko.ModelError, ValueError):
             return self._idle_clearance
         self._idle_clearance = (rows.clearance, rows.nearest)
-        self._idle_margin = rows.nearest_margin
         if not self._room_logged and not self.state.engaged and not self.state.want_armed:
             # Once per model, before any arming: the lookup takes up to a few hundred ms.
             self._room_logged = True

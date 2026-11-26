@@ -570,8 +570,8 @@ class Rows:
     grad: np.ndarray                 # k x n (per rad/s of each arm joint)
     distance: np.ndarray             # k, m
     pair: np.ndarray                 # k, index into ``Model.pairs``
-    clearance: float                 # smallest clearance over all pairs (m)
-    nearest: Tuple[str, str]         # the pair with that clearance, ('', '') if not exact
+    clearance: float                 # clearance of the pair nearest to its own margin (m)
+    nearest: Tuple[str, str]         # that pair, ('', '') if not exact
     exact: bool = True               # False: nothing within ``report``; clearance is a bound
     margin: Optional[np.ndarray] = None   # k, each row's margin (its pair's)
     self_active: bool = False        # a self pair on the sphere covers gave a row (the
@@ -953,6 +953,9 @@ class Model:
         if self._tables is None:
             return np.zeros(0, dtype=int), np.zeros(0), np.zeros((0, n)), math.inf
         value, ga, gb = self._tables.read(q)
+        if not (np.all(np.isfinite(value)) and np.all(np.isfinite(ga))
+                and np.all(np.isfinite(gb))):
+            raise ValueError('a clearance table read is not finite (joint state not finite?)')
         valid = (value <= limit) & (value < self._tables.cap - self._tables.slack)
         lower = float(value[~valid].min()) if (~valid).any() else math.inf
         idx = np.nonzero(valid)[0]
@@ -988,11 +991,19 @@ class Model:
         lower = min(lower, t_lower)
         every = np.concatenate([d, t_d])
         if len(every) and every.min() <= reach:
-            k = int(np.argmin(every))
+            # The pair nearest to its own margin (with one margin for all: the smallest
+            # clearance); its clearance is the one reported.
+            owner = np.concatenate([pair, t_pair]).astype(int)
+            k = int(np.argmin(every - self._pair_margin[owner]))
             best = float(every[k])
-            index = int(pair[k]) if k < len(d) else int(t_pair[k - len(d)])
+            index = int(owner[k])
             nearest, exact, nearest_margin = self.pairs[index], True, float(
                 self._pair_margin[index])
+            if t_lower - self.self_margin < best - nearest_margin:
+                # A table read beyond what the table holds (only a bound) could be nearer:
+                # the clearance is then a bound, not exact.
+                best = float(min(every.min(), lower))
+                nearest, exact, nearest_margin = ('', ''), False, self.margin
         else:
             best = float(min(lower, every.min() if len(every) else math.inf))
             nearest, exact, nearest_margin = ('', ''), False, self.margin

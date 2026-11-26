@@ -756,7 +756,7 @@ def _code_hash() -> str:
     for item in (keepout.sample_triangles, keepout._unique_rows, keepout.sphere_cover,
                  keepout._groups, _rot_batch, _motion, tail_pose, Field, _finish_cover, cover,
                  drive_rate, swept_cover, node_values, _node_values, lever_arms, _axes, _nodes,
-                 _relative, _evaluate, build_table, one_joint_check):
+                 _relative, _evaluate, Table, build_table, one_joint_check):
         h.update(inspect.getsource(item).encode())
     return h.hexdigest()
 
