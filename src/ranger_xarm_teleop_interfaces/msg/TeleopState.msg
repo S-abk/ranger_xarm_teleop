@@ -42,6 +42,7 @@ uint8 HOLD_BASE_DRIVE = 22         # the left grip (hold to drive the base) is h
 uint8 HOLD_BASE_MOVING = 23        # odometry says the base is still moving; engagement follows at rest
 uint8 HOLD_BASE_ODOM = 24          # no fresh odometry: whether the base is at rest is unknown
 uint8 HOLD_BASE_TURNED = 25        # the base turned past the set angle since the calibration: calibrate again (A)
+uint8 HOLD_KEEPOUT_BUILDING = 26   # G-15: the link keep-out's clearance tables are being built (a first start); arming is refused until they are
 uint8 hold_reason
 
 # Bound that shaped the target or the joint command of this cycle (G-6, G-8, G-14).

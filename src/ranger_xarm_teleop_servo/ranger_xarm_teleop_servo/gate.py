@@ -105,6 +105,7 @@ class Hold(IntEnum):
     BASE_MOVING = 23        # the base still moves by odometry; engage at rest (wait, bounded)
     BASE_ODOM = 24          # no fresh odometry: whether the base is at rest is unknown
     BASE_TURNED = 25        # the base turned past the set angle since the calibration
+    KEEPOUT_BUILDING = 26   # G-15: the link keep-out's clearance tables are being built
 
 
 class Limit(IntEnum):
@@ -166,6 +167,9 @@ class Env:
     # The solver can run: kinematic chain and joint state known, and the commanded state
     # agrees with the measured one.
     solver_ready: bool = True
+    # G-15: the link keep-out's clearance tables are still being built (first start); no
+    # target and no arming until they are.
+    keepout_building: bool = False
     # Orientation conditioning of the solver at the measured joints (NaN: unknown). Read
     # only when an arm request waits for it; the default leaves arming unchecked.
     arming_conditioning: float = math.inf
@@ -401,6 +405,8 @@ def _condition(state: GateState, env: Env, params: GateParams, age: float) -> Ho
     frame = state.frame
     if not params.motion_enabled:
         return Hold.MOTION_DISABLED
+    if env.keepout_building:
+        return Hold.KEEPOUT_BUILDING
     if not state.want_armed:
         return Hold.NOT_ARMED
     if not env.owner_is_teleop:
