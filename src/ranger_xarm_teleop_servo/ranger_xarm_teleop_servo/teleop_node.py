@@ -1914,7 +1914,8 @@ class TeleopNode(Node):
         if self.keepout is None:
             return
         took = solution.keepout_seconds
-        self._cycles.keepout_step(took, solution.keepout_cpu_seconds, solution.keepout_self_active)
+        self._cycles.keepout_step(took, solution.keepout_cpu_seconds,
+                                  getattr(solution, 'keepout_self_active', False))
         self._command_steps.append(('link keep-out', took))
         if took > KEEPOUT_SLOW_S:
             self.get_logger().warning(f'link keep-out step took {took * 1000.0:.1f} ms',
@@ -1929,8 +1930,10 @@ class TeleopNode(Node):
                 f'({solution.keepout_pair[0]} - {solution.keepout_pair[1]}) is below the '
                 f'floor of the cycle before, {self.keepout_floor * 1000.0:.2f} mm',
                 throttle_duration_sec=1.0)
-        self.keepout_floor = (min(clearance, solution.keepout_margin)
-                              if math.isfinite(clearance) else math.inf)
+        margin = getattr(solution, 'keepout_margin', math.nan)
+        if not math.isfinite(margin):
+            margin = self.keepout.margin
+        self.keepout_floor = min(clearance, margin) if math.isfinite(clearance) else math.inf
 
     def _on_joint_path(self, request, response):
         times, postures = self.path.path()

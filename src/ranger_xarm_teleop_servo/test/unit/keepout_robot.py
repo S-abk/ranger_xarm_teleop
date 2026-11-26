@@ -92,13 +92,15 @@ def resolve(name: str) -> bytes:
 
 
 def robot_urdf(screen_x=-0.30, screen_height=0.27, extra_tool=False, drop_screen=False,
-               gripper=True, base_mesh_top=None) -> str:
+               gripper=True, base_mesh_top=None, tool_lift=0.0) -> str:
     """
     Return the URDF text of the test robot (keyword arguments vary its geometry).
 
     ``base_mesh_top``: the arm base as a mesh (a box, 0.14 m square) reaching this height (m)
     instead of its cylinder; at about 0.17 m it sits close under the upper arm at every
-    posture.
+    posture. ``tool_lift``: the camera and the gripper fixed this much further out along l6's
+    axis (m); at 0 both reach l5 as joint 6 turns (one joint apart, the hardware path refuses
+    such a robot), at 0.07 neither comes within 25 mm.
     """
     parts = ['<robot name="test_robot">', '<link name="base_footprint"/>',
              '<link name="base_link"><collision><origin xyz="0 0 -0.18"/><geometry>'
@@ -156,12 +158,12 @@ def robot_urdf(screen_x=-0.30, screen_height=0.27, extra_tool=False, drop_screen
     parts.append('<link name="camera"><collision><origin xyz="0 0.06 0.01"/><geometry>'
                  '<box size="0.09 0.03 0.03"/></geometry></collision></link>')
     parts.append('<joint name="l6_to_camera" type="fixed"><parent link="l6"/>'
-                 '<child link="camera"/></joint>')
+                 f'<child link="camera"/><origin xyz="0 0 {tool_lift}"/></joint>')
     if gripper:
         parts.append('<link name="gripper_base"><collision><origin xyz="0 0 0.05"/>'
                      '<geometry><box size="0.06 0.12 0.08"/></geometry></collision></link>')
         parts.append('<joint name="l6_to_gripper" type="fixed"><parent link="l6"/>'
-                     '<child link="gripper_base"/></joint>')
+                     f'<child link="gripper_base"/><origin xyz="0 0 {tool_lift}"/></joint>')
         for side, sign in (('left', 1), ('right', -1)):
             mimic = '' if side == 'left' else \
                 '<mimic joint="finger_left_joint" multiplier="1" offset="0"/>'

@@ -105,12 +105,12 @@ class TableConfig:
 
 
 # Coarse enough for unit tests of made-up robots (seconds, not minutes); never for an arm.
-TEST_CONFIG = TableConfig(slack_coarse=0.01, slack_fine=0.006, band=0.06, table_cap=0.12,
-                          coarse_g=0.006, coarse_s=0.002, coarse_cap=0.17, fine_g=0.004,
-                          fine_s=0.001, fine_cap=0.1, coarse_cell=0.008, coarse_spacing=0.003,
-                          fine_cell=0.005, fine_spacing=0.002, coarse_group=0.03,
-                          fine_group=0.02, pad_coarse=0.002, pad_fine=0.001,
-                          one_joint_step=math.radians(3.0))
+TEST_CONFIG = TableConfig(slack_coarse=0.006, slack_fine=0.003, band=0.06, table_cap=0.12,
+                          coarse_g=0.004, coarse_s=0.0015, coarse_cap=0.17, fine_g=0.002,
+                          fine_s=0.0006, fine_cap=0.1, coarse_cell=0.006, coarse_spacing=0.002,
+                          fine_cell=0.003, fine_spacing=0.001, coarse_group=0.03,
+                          fine_group=0.015, pad_coarse=0.0015, pad_fine=0.0006,
+                          one_joint_step=math.radians(2.0))
 
 
 # --- geometry helpers ---------------------------------------------------------------------

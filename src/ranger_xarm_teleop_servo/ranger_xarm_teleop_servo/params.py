@@ -59,7 +59,7 @@ MOTION_REQUIRED = joint_accel.NAMES
 INPUT_TIMEOUT_S = 0.1
 # The feedforward's rotation low-pass (GateParams.feedforward_rotation_cutoff_hz); chosen by
 # measurement (docs: README, "Wrist reversals").
-FEEDFORWARD_ROTATION_CUTOFF_HZ = 0.0
+FEEDFORWARD_ROTATION_CUTOFF_HZ = 2.0
 TARGET_RATE_HZ = 50.0
 
 # Not safety limits: defaults that a deployment may tune.

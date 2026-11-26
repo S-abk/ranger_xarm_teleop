@@ -126,14 +126,14 @@ def test_simulation_warns_and_keeps_the_rest(node):
 
 
 def test_hardware_builds_the_model_when_no_pair_is_dropped(node):
-    n = node(robot_urdf(), **HARDWARE)
+    n = node(robot_urdf(tool_lift=0.07), **HARDWARE)
     assert n.keepout is not None and ('l2', 'screen') in n.keepout.pairs
 
 
 def test_hardware_refuses_a_margin_that_holds_the_arm_over_much_of_its_range(node):
     # The arm base as a mesh close under l2: the finer cover still holds that pair inside a
     # 40 mm margin at about half of the solver's range; at 25 mm it does not.
-    urdf = robot_urdf(base_mesh_top=0.16)
+    urdf = robot_urdf(base_mesh_top=0.16, tool_lift=0.07)
     with pytest.raises(StartupRefused) as refused:
         node(urdf, link_keepout_margin_m=0.04, **HARDWARE)
     text = str(refused.value)
@@ -616,9 +616,24 @@ def _file_meshes(urdf, folder):
     return urdf
 
 
+def test_hardware_refuses_a_body_one_joint_apart_that_the_joint_brings_into_contact(node):
+    # The camera and the gripper fixed to l6 reach l5 as joint 6 turns (one joint apart:
+    # no command of the others changes it, and the joint's limits are all that holds it).
+    with pytest.raises(StartupRefused) as refused:
+        node(robot_urdf(), **HARDWARE)
+    text = str(refused.value)
+    assert text.startswith('link keep-out: pairs one joint apart below arm_self_margin_m 0.025 m')
+    assert 'camera - l5 left out: one joint apart (xarm_joint6' in text
+    assert 'gripper_base - l5' in text and 'the two can touch' in text
+    n = node(robot_urdf())                       # simulation: warned, and running
+    assert n.keepout is not None
+
+
 @pytest.mark.real_table_build
-def test_a_first_start_builds_the_tables_in_a_process_holding_and_refusing_to_arm(node, tmp_path):
+def test_a_first_start_builds_the_tables_in_a_process_holding_and_refusing_to_arm(
+        node, tmp_path, monkeypatch):
     from ranger_xarm_teleop_servo import keepout as ko
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'cache'))      # nothing built yet
     urdf = _file_meshes(robot_urdf(), tmp_path)
     n = node()
     n._resolver = lambda: ko.make_resolver(lambda package: '')
