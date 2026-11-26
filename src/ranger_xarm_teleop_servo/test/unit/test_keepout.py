@@ -97,20 +97,33 @@ def test_fixed_and_moving_bodies_come_from_the_tree(model):
                                   'finger_right_joint': ('finger_left_joint', 1.0, 0.0)}
 
 
-def test_pairs_every_moving_body_with_every_fixed_one_and_the_tool_with_the_upper_arm(model):
+def test_pairs_every_moving_body_with_every_fixed_one_and_self_pairs_by_joints_between(model):
     pairs = set(model.pairs)
     for body in ('l2', 'l3', 'l4', 'l5', 'l6', 'camera', 'gripper_base', 'finger_left'):
         for fixed in ('base_link', 'pedestal', 'screen', 'mast', 'sensor', 'xarm_link_base'):
             assert (body, fixed) in pairs
+    # Three or more arm joints apart: on the spheres. Built without tables, the pairs two
+    # joints apart are left out and listed (the node always gives the tables), one joint
+    # apart likewise (unchecked), and direct neighbours are listed as adjacent.
     tool = {'l6', 'camera', 'gripper_base', 'finger_left', 'finger_right'}
     for body in tool:
         for arm in ('l1', 'l2', 'l3'):
             assert (body, arm) in pairs
         for arm in ('l4', 'l5'):
             assert (body, arm) not in pairs
+    assert {('l4', 'l1'), ('l5', 'l1'), ('l5', 'l2')} <= pairs
     assert ('l1', 'xarm_link_base') not in pairs
-    assert [(e.moving, e.other, e.reason) for e in model.excluded] == [
-        ('l1', 'xarm_link_base', 'adjacent')]
+    excluded = {(e.moving, e.other): e.reason for e in model.excluded}
+    assert excluded[('l1', 'xarm_link_base')] == 'adjacent'
+    assert {k for k, v in excluded.items() if v == ko.NO_TABLE} == {
+        ('l3', 'l1'), ('l4', 'l2'), ('l5', 'l3'), ('l6', 'l4'), ('camera', 'l4'),
+        ('gripper_base', 'l4'), ('finger_left', 'l4'), ('finger_right', 'l4')}
+    assert {k for k, v in excluded.items() if v == ko.ONE_JOINT} == {
+        ('camera', 'l5'), ('gripper_base', 'l5'), ('finger_left', 'l5'), ('finger_right', 'l5')}
+    assert {k for k, v in excluded.items() if v == 'adjacent'} == {
+        ('l1', 'xarm_link_base'), ('l2', 'l1'), ('l3', 'l2'), ('l4', 'l3'), ('l5', 'l4'),
+        ('l6', 'l5')}
+    assert ko.NEAR not in excluded.values()
 
 
 def test_a_pair_always_inside_the_margin_is_excluded_and_reported():

@@ -17,6 +17,7 @@ import dataclasses
 import math
 import os
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -46,6 +47,7 @@ LIMITS = {
     'max_lead_rotation_deg': 12.0,
     'max_translation_scale': 2.0,
     'link_keepout_margin_m': 0.025,
+    'arm_self_margin_m': 0.025,
     'joint_acceleration_limit_rad_s2': 10.0,    # G-18, the simulation values
     'joint_speed_cap_rad_s': 1.9,
     'motion_enabled': True,
@@ -580,3 +582,58 @@ def test_a_failing_preview_solve_reports_nothing_and_says_so(node, monkeypatch):
     assert n.preview_limit(q, target) == teleop_node.Limit.NONE
     assert any(w.startswith('preview: the solver check failed: ') for w in warnings)
     assert n.solution is None and n.sent is None
+
+
+def test_self_margin_has_no_default(ros):
+    values = {k: v for k, v in LIMITS.items() if k != 'arm_self_margin_m'}
+    with pytest.raises(StartupRefused, match='arm_self_margin_m'):
+        TeleopNode(node_name='teleop_keepout_noself',
+                   parameter_overrides=[Parameter(k, value=v) for k, v in values.items()])
+    with pytest.raises(StartupRefused, match='arm_self_margin_m'):
+        TeleopNode(node_name='teleop_keepout_badself',
+                   parameter_overrides=[Parameter(k, value=v) for k, v in
+                                        {**LIMITS, 'arm_self_margin_m': 0.0}.items()])
+
+
+def test_self_pairs_get_tables_and_their_own_margin(node):
+    n = node(robot_urdf(), arm_self_margin_m=0.03)
+    kinds = [kind for kind, _, _ in n.keepout.pair_list]
+    assert kinds.count('table') == 8 and 'tool' in kinds
+    assert n.keepout.self_margin == 0.03 and n.keepout.margin == 0.025
+    info = n._on_keepout_info(Trigger.Request(), Trigger.Response()).message
+    assert '30.0 mm between the arm\'s own links' in info and '8 from clearance tables' in info
+    assert 'one joint apart (xarm_joint6' in info
+
+
+def _file_meshes(urdf, folder):
+    """The made-up robot with its meshes as files (the builder process reads them itself)."""
+    from keepout_robot import MESHES
+    for name, data in MESHES.items():
+        path = os.path.join(str(folder), name.rsplit('/', 1)[-1])
+        with open(path, 'wb') as handle:
+            handle.write(data)
+        urdf = urdf.replace(name, 'file://' + path)
+    return urdf
+
+
+@pytest.mark.real_table_build
+def test_a_first_start_builds_the_tables_in_a_process_holding_and_refusing_to_arm(node, tmp_path):
+    from ranger_xarm_teleop_servo import keepout as ko
+    urdf = _file_meshes(robot_urdf(), tmp_path)
+    n = node()
+    n._resolver = lambda: ko.make_resolver(lambda package: '')
+    n._on_robot_description(String(data=urdf))
+    assert n.keepout is None and n.keepout_building
+    assert n._builder.poll() is None or n._builder.returncode == 0
+    _joints(n, READY)
+    assert math.isnan(n.arming_conditioning(np.array(READY)))      # arming refused
+    deadline = time.monotonic() + 120.0
+    while n.keepout is None and time.monotonic() < deadline:
+        rclpy.spin_once(n, timeout_sec=0.2)
+    assert n.keepout is not None and not n.keepout_building
+    assert [kind for kind, _, _ in n.keepout.pair_list].count('table') == 8
+    # The next start finds every entry in the cache: no process.
+    m = node()
+    m._resolver = lambda: ko.make_resolver(lambda package: '')
+    m._on_robot_description(String(data=urdf))
+    assert m.keepout is not None and m._builder is None

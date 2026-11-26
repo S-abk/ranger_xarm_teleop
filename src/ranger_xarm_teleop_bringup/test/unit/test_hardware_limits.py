@@ -56,13 +56,14 @@ def lines_of(err):
     return str(err.value).splitlines()
 
 
-def test_the_required_names_are_the_gates_pending_values_and_four_more():
+def test_the_required_names_are_the_gates_pending_values_and_five_more():
     gate = tuple(name for name in HARDWARE_REQUIRED if name not in (
         'joint_speed_cap_rad_s', 'joint_acceleration_limit_rad_s2', 'link_keepout_margin_m',
-        'tool_pose_timeout_s'))
+        'arm_self_margin_m', 'tool_pose_timeout_s'))
     assert gate == params.REQUIRED
-    assert HARDWARE_REQUIRED[-2:] == ('link_keepout_margin_m', 'tool_pose_timeout_s')
-    assert len(HARDWARE_REQUIRED) == 14
+    assert HARDWARE_REQUIRED[-3:] == ('link_keepout_margin_m', 'arm_self_margin_m',
+                                      'tool_pose_timeout_s')
+    assert len(HARDWARE_REQUIRED) == 15
 
 
 def test_the_joint_speed_cap_comes_right_after_the_angular_speed_cap_then_the_acceleration():

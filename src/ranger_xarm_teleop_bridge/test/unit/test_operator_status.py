@@ -159,10 +159,10 @@ def test_with_motion_disabled_the_limit_is_shown_as_the_previews():
     t = StatusTracker()
     t.on_teleop(teleop(motion_enabled=False, armed=False, hold_reason=1, active_limit=9), 0.0)
     s = t.snapshot(0.1, 0.0)
-    assert s.limit == 9 and s.limit_text == 'near robot body (preview)'
+    assert s.limit == 9 and s.limit_text == 'near robot body: move away (preview)'
     t = StatusTracker()
     t.on_teleop(teleop(active_limit=9), 0.0)
-    assert t.snapshot(0.1, 0.0).limit_text == 'near robot body'
+    assert t.snapshot(0.1, 0.0).limit_text == 'near robot body: move away'
 
 
 def test_stale_sources_report_no_old_values():
