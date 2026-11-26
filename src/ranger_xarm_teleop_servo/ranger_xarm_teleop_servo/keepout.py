@@ -480,6 +480,7 @@ class Excluded:
 
 NEAR = 'structurally near'
 ONE_JOINT = 'one joint apart'
+NO_TABLE = 'two joints apart, no clearance table given'
 
 
 def kept_by_smaller_margin(item: Excluded) -> bool:
@@ -892,9 +893,9 @@ class Model:
                    - self._group_radius[tool_groups][:, None]
                    - self._group_radius[arm_groups][None])
             allowed = allowed_b[gb[tool_groups]][:, gb[arm_groups]]
-            gap = np.where(allowed, gap, np.inf)
-            ti, ai = np.nonzero(gap <= limit)
-            far = gap[gap > limit]
+            # Only allowed pairs: with an unbounded limit, inf <= inf would list the others.
+            ti, ai = np.nonzero(allowed & (gap <= limit))
+            far = gap[allowed & (gap > limit)]
             if len(far):
                 lower = min(lower, float(far.min()))
             if len(ti):
@@ -1242,8 +1243,8 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
     looked for), within the joint limits less ``joint_margin`` for the pairs held at work.
     ``self_margin`` (default: ``margin``) is the margin of the self pairs. ``tables``
     (``keepout_tables.Loaded``) holds the tables of the pairs two joints apart and the check of
-    the pairs one joint apart; without it those pairs are on the sphere covers and the one-joint
-    pairs are listed unchecked (offline use and tests; the node always gives it).
+    the pairs one joint apart; without it those pairs are left out and listed (``NO_TABLE``,
+    and one joint apart unchecked): offline use and tests only, the node always gives it.
     With ``_fingerprint_only`` it returns the fingerprint string alone (no covers are made);
     with ``_parts_only`` the bodies, their triangles and the chain (for ``keepout_tables``).
     """
@@ -1447,7 +1448,9 @@ def build(urdf: str, resolve: Callable[[str], bytes], base: str, tip: str, margi
                 else:
                     excluded.append(Excluded(*names, ONE_JOINT, entry.low, entry.high, True,
                                              entry.error, arm_joint))
-            elif gap == SELF_TABLE_GAP and tables is not None and names not in left_on_spheres:
+            elif gap == SELF_TABLE_GAP and tables is None:
+                excluded.append(Excluded(*names, NO_TABLE, self_pair=True))
+            elif gap == SELF_TABLE_GAP and names not in left_on_spheres:
                 entry = tables.tables.get(names)
                 if entry is None:
                     raise ModelError(f'{names[0]} - {names[1]}: no clearance table')

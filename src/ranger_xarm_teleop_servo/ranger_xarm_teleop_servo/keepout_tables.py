@@ -54,7 +54,6 @@ check's own error, and that error.
 """
 
 from dataclasses import asdict, dataclass, field
-import errno
 import fcntl
 import hashlib
 import inspect
@@ -62,6 +61,7 @@ import io
 import json
 import math
 import os
+import zipfile
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -885,9 +885,8 @@ def _read(cache: str, key: str):
             if str(z['key']) != key:
                 return None
             return {name: z[name] for name in z.files}
-    except (OSError, ValueError, KeyError, EOFError) as err:
-        if isinstance(err, OSError) and err.errno == errno.ENOENT:
-            return None
+    except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile):
+        # Absent, unreadable or damaged: the entry is built again, never used.
         return None
 
 
