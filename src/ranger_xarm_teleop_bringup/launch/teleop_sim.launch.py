@@ -30,10 +30,13 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
+from launch.actions import (DeclareLaunchArgument, GroupAction, IncludeLaunchDescription,
+                            OpaqueFunction)
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
+from ranger_xarm_teleop_bringup.drive_base import (moveit_arguments, NOT_OFFERED,
+                                                   refused_arguments, TRUE_WORDS)
 
 SIM_DESCRIPTION_ARGS = (
     'add_gripper:=true xarm_load_gazebo_plugin:=false '
@@ -42,11 +45,49 @@ SIM_DESCRIPTION_ARGS = (
 # MoveIt Servo's description must then be that robot too, or the teleop node refuses to arm
 # (its link keep-out model is built from the running robot's description).
 DRIVABLE_BASE_ARGS = ' use_wheels:=true fix_base_to_world:=false'
+# ... and move_group plans for that robot (moveit.launch.py drive_base:=true: the planning frame
+# odom, the base on a planar virtual joint), and Servo loads move_group's semantic description
+# (teleop_core.launch.py drive_base:=true). With base:=false both includes are exactly as
+# without base driving: move_group gets no argument and teleop_core no drive_base.
+
+
+def _refuse_not_offered(context):
+    # moveit.launch.py's own arguments: drive_base is set from base, and planning_frame and
+    # obstacle_map are not offered. An included launch file is not scoped, so one given on
+    # this command line would reach move_group unseen (and could part it from Servo).
+    text = refused_arguments(context.launch_configurations, NOT_OFFERED)
+    if text:
+        raise ValueError('teleop_sim.launch.py ' + text)
+    return []
 
 
 def generate_launch_description():
     share = get_package_share_directory('ranger_xarm_teleop_bringup')
     isaac_share = get_package_share_directory('ranger_xarm_isaac')
+    core_arguments = {
+        'limits_file': os.path.join(share, 'config', 'SIMULATION_ONLY_limits.yaml'),
+        'simulation': 'true',
+        'motion_enabled': LaunchConfiguration('motion_enabled'),
+        'use_sim_time': 'true',
+        'description_args': PythonExpression([
+            repr(SIM_DESCRIPTION_ARGS), ' + (', repr(DRIVABLE_BASE_ARGS), " if '",
+            LaunchConfiguration('base'), "'.lower() in ('true', '1', 'yes') else '')"]),
+        'moveit_controller': 'xarm_xarm6_traj_controller',
+        'tool_frame': LaunchConfiguration('tool_frame'),
+        'teleop_params_file': LaunchConfiguration('teleop_params_file'),
+        'gripper_enabled': LaunchConfiguration('gripper_enabled'),
+        'reset': LaunchConfiguration('reset'),
+        'base': LaunchConfiguration('base'),
+        'stability': LaunchConfiguration('stability'),
+        'stability_params_file': LaunchConfiguration('stability_params_file'),
+        'stability_mass_file': LaunchConfiguration('stability_mass_file'),
+        'feedback': LaunchConfiguration('feedback'),
+        'moveit_gripper_controller': 'xarm_xarm_gripper_traj_controller',
+    }
+    # The same truth rule as description_args above.
+    base = PythonExpression(["'", LaunchConfiguration('base'), f"'.lower() in {TRUE_WORDS!r}"])
+    moveit = os.path.join(isaac_share, 'launch', 'moveit.launch.py')
+    core = os.path.join(share, 'launch', 'teleop_core.launch.py')
     return LaunchDescription([
         DeclareLaunchArgument('motion_enabled', default_value='true'),
         DeclareLaunchArgument('start_moveit', default_value='true'),
@@ -79,33 +120,22 @@ def generate_launch_description():
         DeclareLaunchArgument('record_data_dir', default_value=''),
         DeclareLaunchArgument('record_session', default_value=''),
         DeclareLaunchArgument('record_extra', default_value=''),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(isaac_share, 'launch', 'moveit.launch.py')),
-            condition=IfCondition(LaunchConfiguration('start_moveit'))),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(share, 'launch', 'teleop_core.launch.py')),
-            launch_arguments={
-                'limits_file': os.path.join(share, 'config', 'SIMULATION_ONLY_limits.yaml'),
-                'simulation': 'true',
-                'motion_enabled': LaunchConfiguration('motion_enabled'),
-                'use_sim_time': 'true',
-                'description_args': PythonExpression([
-                    repr(SIM_DESCRIPTION_ARGS), ' + (', repr(DRIVABLE_BASE_ARGS), " if '",
-                    LaunchConfiguration('base'), "'.lower() in ('true', '1', 'yes') else '')"]),
-                'moveit_controller': 'xarm_xarm6_traj_controller',
-                'tool_frame': LaunchConfiguration('tool_frame'),
-                'teleop_params_file': LaunchConfiguration('teleop_params_file'),
-                'gripper_enabled': LaunchConfiguration('gripper_enabled'),
-                'reset': LaunchConfiguration('reset'),
-                'base': LaunchConfiguration('base'),
-                'stability': LaunchConfiguration('stability'),
-                'stability_params_file': LaunchConfiguration('stability_params_file'),
-                'stability_mass_file': LaunchConfiguration('stability_mass_file'),
-                'feedback': LaunchConfiguration('feedback'),
-                'moveit_gripper_controller': 'xarm_xarm_gripper_traj_controller',
-            }.items()),
+        OpaqueFunction(function=_refuse_not_offered),
+        GroupAction(
+            scoped=False, condition=IfCondition(LaunchConfiguration('start_moveit')),
+            actions=[
+                IncludeLaunchDescription(PythonLaunchDescriptionSource(moveit),
+                                         condition=UnlessCondition(base)),
+                IncludeLaunchDescription(PythonLaunchDescriptionSource(moveit),
+                                         launch_arguments=moveit_arguments(True).items(),
+                                         condition=IfCondition(base))]),
+        IncludeLaunchDescription(PythonLaunchDescriptionSource(core),
+                                 launch_arguments=core_arguments.items(),
+                                 condition=UnlessCondition(base)),
+        IncludeLaunchDescription(PythonLaunchDescriptionSource(core),
+                                 launch_arguments={**core_arguments,
+                                                   'drive_base': 'true'}.items(),
+                                 condition=IfCondition(base)),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 get_package_share_directory('ranger_xarm_teleop_record'), 'launch',

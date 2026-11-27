@@ -54,6 +54,13 @@ calibration have no default and come from the limits file (``base_*``). The comm
 ``base_cmd_topic`` (default /cmd_vel, what the simulated base takes) and to
 /teleop/base/cmd_vel. Simulation only: refused outside simulation, and the base node commands
 nothing unless the robot description shows simulator hardware only.
+
+Driven-base MoveIt (``drive_base``, default false): MoveIt Servo loads the driven base's
+semantic description (``ranger_xarm_mobile_base_wheels.srdf``: the shipped one plus a planar
+virtual joint ``odom -> base_footprint`` and the wheel/body pairs disabled), the one move_group
+loads with ``drive_base:=true``, so Servo reads move_group's planning scene with the base where
+the robot is. Refused unless ``simulation`` and ``base`` are true; ``teleop_sim.launch.py`` sets
+it from ``base``.
 """
 
 import os
@@ -65,6 +72,7 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from ranger_xarm_teleop_bringup.drive_base import check_drive_base, semantic_file
 from ranger_xarm_teleop_bringup.limits import (check_base_limits, check_extra_params_file,
                                                check_gripper_limits, check_hardware_limits_file,
                                                check_limits_file, load_limits)
@@ -111,6 +119,8 @@ def launch_setup(context, *args, **kwargs):
                              'monitor is simulation only until reviewed for hardware')
     base = _true(arg('base'))
     base_values = check_base_limits(limits_file, limits) if base else {}
+    drive_base = _true(arg('drive_base'))
+    check_drive_base(drive_base, base, simulation)      # raises: the launch stops here
     if gripper:
         check_gripper_limits(limits_file, limits)
         if not arg('moveit_gripper_controller'):
@@ -130,7 +140,10 @@ def launch_setup(context, *args, **kwargs):
     robot_description = {'robot_description': ParameterValue(Command([
         'xacro ', os.path.join(description_share, 'urdf', 'ranger_xarm.urdf.xacro'),
         ' ', arg('description_args')]), value_type=str)}
-    with open(os.path.join(moveit_share, 'config', 'ranger_xarm.srdf'), encoding='utf-8') as f:
+    # The semantic description move_group loads (drive_base: the driven base's, with its planar
+    # virtual joint odom -> base_footprint), so that Servo reads move_group's planning scene.
+    with open(os.path.join(moveit_share, 'config', semantic_file(drive_base)),
+              encoding='utf-8') as f:
         semantic = {'robot_description_semantic': f.read()}
     kinematics = {'robot_description_kinematics':
                   _load(os.path.join(moveit_share, 'config', 'kinematics.yaml'))}
@@ -352,6 +365,11 @@ def generate_launch_description():
             description='Start the base node: hold the left grip to drive the base from the '
                         'left thumbstick, turn in place from the right thumbstick (G-19; '
                         'simulation only; the simulated base must be drivable).'),
+        DeclareLaunchArgument(
+            'drive_base', default_value='false',
+            description="MoveIt Servo loads the driven base's semantic description, as "
+                        'move_group does with drive_base:=true (simulation with base:=true '
+                        'only; teleop_sim.launch.py sets it from base).'),
         DeclareLaunchArgument(
             'stability', default_value='false',
             description='Start the stability monitor: how far the robot is from starting to '

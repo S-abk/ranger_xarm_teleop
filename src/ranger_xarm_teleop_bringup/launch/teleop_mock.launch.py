@@ -29,11 +29,12 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from ranger_xarm_teleop_bringup.drive_base import MOCK_NOT_OFFERED, refused_arguments
 
 MOCK_MOVEIT_GRIPPER_CONTROLLER = 'xarm_gripper_traj_controller'
 
@@ -42,6 +43,15 @@ MOCK_DESCRIPTION_ARGS = (
     'use_xarm:=true use_static_geometry:=true use_static_collision:=true add_gripper:=true '
     'xarm_ros2_control_plugin:=mock_components/GenericSystem xarm_mount_yaw:=0.0 '
     'use_laptop_collision:=true laptop_open_angle_deg:=90.0')
+
+
+def _refuse_not_offered(context):
+    # teleop_core's drive_base is for the simulated driven base; the mock never sets it, and an
+    # included launch file is not scoped, so one given here would reach teleop_core unseen.
+    text = refused_arguments(context.launch_configurations, MOCK_NOT_OFFERED)
+    if text:
+        raise ValueError('teleop_mock.launch.py ' + text)
+    return []
 
 
 def generate_launch_description():
@@ -80,6 +90,7 @@ def generate_launch_description():
         DeclareLaunchArgument('record_extra', default_value=''),
         DeclareLaunchArgument('rviz', default_value='true',
                               description='Start RViz with the planning view.'),
+        OpaqueFunction(function=_refuse_not_offered),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(moveit_share, 'launch', 'fake_execution.launch.py')),
