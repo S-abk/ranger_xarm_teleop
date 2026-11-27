@@ -221,9 +221,11 @@ def test_after_a_drive_every_frame_has_one_parent_and_move_group_plans_in_odom(s
     heading = yaw(base.rotation)
     heading = math.atan2(math.sin(heading), math.cos(heading))
     assert abs(math.degrees(heading)) > 20.0, 'the base did not turn'
+    stack['results']['moved'] = True                        # the later tests need the drive
     scene = planning_scene(probe)
-    frames = {t.header.frame_id for t in scene.fixed_frame_transforms}
-    assert frames == {'odom'}, frames                       # the planning frame
+    # Each fixed-frame transform of the scene is given to the planning frame (on main: world).
+    frames = {t.child_frame_id for t in scene.fixed_frame_transforms}
+    assert frames == {'odom'}, frames
     joints = scene.robot_state.multi_dof_joint_state
     assert list(joints.joint_names) == ['virtual_joint'] and joints.header.frame_id == 'odom'
     planar = joints.transforms[0]
@@ -231,7 +233,6 @@ def test_after_a_drive_every_frame_has_one_parent_and_move_group_plans_in_odom(s
                       planar.translation.y - base.translation.y) < 0.005
     turn = yaw(planar.rotation) - yaw(base.rotation)
     assert abs(math.atan2(math.sin(turn), math.cos(turn))) < math.radians(0.5)
-    stack['results']['moved'] = True
 
 
 def test_move_group_servo_and_the_sidecar_hold_one_semantic_description(stack):
