@@ -55,9 +55,9 @@ _COMMON_TAIL = (
     'laptop_open_angle_deg:=90.0',
 )
 _ADD_GRIPPER = {'check': 'add_gripper:=false', 'execution': 'add_gripper:=true'}
-# real_execution.launch.py passes the weld explicitly (its default: the base welded to world);
-# the description is the same as without it.
-_FIX_BASE = {'check': (), 'execution': ('fix_base_to_world:=true',)}
+# Both real launch files pass the weld explicitly (its default: the base welded to world); the
+# description is the same as without it.
+_FIX_BASE = 'fix_base_to_world:=true'
 
 
 def check_stage(stage):
@@ -72,7 +72,7 @@ def description_args(stage):
     """Return the xacro arguments (list of key:=value) of the stage's robot description."""
     check_stage(stage)
     return [*_COMMON_HEAD, _ADD_GRIPPER[stage], 'xarm_ros2_control_plugin:=' + MOCK_PLUGIN,
-            *_COMMON_TAIL, *_FIX_BASE[stage]]
+            *_COMMON_TAIL, _FIX_BASE]
 
 
 def planning_description_args(stage):
