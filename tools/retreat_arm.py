@@ -243,9 +243,12 @@ def main() -> int:  # noqa: C901 - one sequence of checks, kept in the order it 
         def valid(q) -> bool:
             # Without an answer the state does not count as valid: the retreat stays short
             # of it, or is refused.
-            state = RobotState()
-            state.joint_state.name = list(arm.joint_names) + list(extra)
-            state.joint_state.position = [float(x) for x in q] + list(extra.values())
+            # A diff (retreat.validity_state): the base's pose and attached bodies stay
+            # move_group's own.
+            asked = retreat.validity_state(arm.joint_names, q, extra)
+            state = RobotState(is_diff=asked.is_diff)
+            state.joint_state.name = asked.names
+            state.joint_state.position = asked.positions
             answer = calls.read(validity, GetStateValidity.Request(robot_state=state,
                                                                    group_name=args.group))
             return bool(answer is not None and answer.valid)

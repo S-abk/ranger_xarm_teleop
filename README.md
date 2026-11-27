@@ -753,7 +753,26 @@ the safety gate: driving the base is hold-to-drive.
   press A again; a turn commanded while odometry was missing does the same. Driving straight
   or sideways keeps the calibration.
 - **The reset and the base:** the return to the ready posture is refused while the left grip
-  is held, and a pull back on the right stick never turns the base.
+  is held, and a pull back on the right stick never turns the base. It does not wait for the
+  base to have been at rest for 2 s, which the robot workspace asks of every MoveIt motion with
+  the base running. In simulation the base stops before the reset's 0.5 s dwell ends.
+- **MoveIt with the base driven:** `teleop_sim.launch.py base:=true` starts move_group for a
+  driven base (`ranger_xarm_isaac` `moveit.launch.py drive_base:=true`, and no other argument).
+  move_group then loads `ranger_xarm_mobile_base_wheels.srdf`: the shipped SRDF, plus a planar
+  virtual joint `odom -> base_footprint` and the wheel/body pairs that touch at rest disabled.
+  It plans in `odom` with the base where the robot is, and the base pose comes from the
+  transform tree. MoveIt Servo loads the same file (`teleop_core.launch.py drive_base:=true`,
+  set from `base` only, refused without `simulation` and `base`), so it follows move_group's
+  planning scene, and the session sidecar records it. With `base:=false` nothing of this is
+  passed: move_group and Servo keep the shipped `ranger_xarm.srdf` and the planning frame
+  `world`. `teleop_sim.launch.py` refuses `drive_base`, `planning_frame` and `obstacle_map`
+  when they are set for it, on its command line or by a launch file that includes it: they would
+  reach move_group's launch file unseen. Start the simulator as its own launch. This
+  stack follows the workspace's default (`odom`) and does not offer the choice. With
+  `start_moveit:=false base:=true`, Servo still loads the driven base's file, so a move_group
+  started elsewhere must be started with `drive_base:=true`. Plan and execute arm motion only
+  with the base at rest. `tools/compare_keepout_moveit.py` and `tools/servo_rigid_pairs.py` take
+  the driven base's file with `--srdf`.
 - **State:** `/teleop/base/state` (`BaseState`, 10 Hz and on change): state, mode, the reason,
   the command, whether odometry says the base is at rest, the caps and the limit acting. The
   commands are `/cmd_vel` (`base_cmd_topic`, what the simulated base takes) and
