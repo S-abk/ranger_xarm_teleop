@@ -88,16 +88,29 @@ def _real_xacro_args(stage):
     for element in command:
         if isinstance(element, ast.Constant):
             text = element.value.strip()
+            assert not pending, f'{stage}: {pending!r} is followed by the text {text!r}'
             if text.endswith(':='):
                 pending = text
             elif text.startswith('xacro'):
                 continue
             else:
                 words.append(text)
-        elif isinstance(element, ast.Name) and pending:
-            default = defaults[configs[element.id]]
+        elif pending:
+            # The value of "key:=": a launch argument, through a variable or inline. Any
+            # other form fails here rather than drop the argument unseen.
+            if isinstance(element, ast.Name) and element.id in configs:
+                name = configs[element.id]
+            elif (isinstance(element, ast.Call) and _call_name(element) == 'LaunchConfiguration'
+                  and len(element.args) == 1 and isinstance(element.args[0], ast.Constant)):
+                name = element.args[0].value
+            else:
+                raise AssertionError(f'{stage}: cannot resolve the value of {pending!r}: '
+                                     f'{ast.dump(element)[:120]}')
+            assert name in defaults, f'{stage}: launch argument {name!r} is not declared'
+            default = defaults[name]
             words.append(pending + ('<no default>' if default is None else default))
             pending = ''
+    assert not pending, f'{stage}: {pending!r} ends the xacro command without a value'
     return words
 
 
