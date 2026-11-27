@@ -199,3 +199,16 @@ def test_the_walk_back_never_crosses_a_gap_in_the_recorded_path(robot):
     gapped[:-3] += np.array([0.0, 0.0, 0.0, 0.3, 0.0, 0.0])   # a jump 3 points back
     plan = _plan(robot, times, gapped, halted)
     assert not plan.ok and plan.postures is None
+
+
+def test_the_validity_state_is_a_diff_of_the_arm_and_the_extra_joints():
+    state = retreat.validity_state(['j1', 'j2'], np.array([0.1, -0.2]), {'g': 0.5})
+    assert state.is_diff
+    assert state.names == ['j1', 'j2', 'g']
+    assert state.positions == [0.1, -0.2, 0.5]
+    assert all(type(v) is float for v in state.positions)
+
+
+def test_the_validity_state_refuses_a_posture_of_another_length():
+    with pytest.raises(ValueError):
+        retreat.validity_state(['j1', 'j2'], [0.1], {})

@@ -36,7 +36,7 @@ goes deeper into contact on the way, or no point within those bounds qualifies.
 from collections import deque
 from dataclasses import dataclass
 import math
-from typing import Callable, List, Sequence, Tuple
+from typing import Callable, Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -252,3 +252,29 @@ def distance_from_path(path: np.ndarray, q: Sequence[float]) -> float:
 def as_lists(plan_: Plan) -> List[List[float]]:
     """Return the plan's postures as plain lists (for a trajectory message)."""
     return [[float(v) for v in q] for q in plan_.postures]
+
+
+@dataclass(frozen=True)
+class ValidityState:
+    """The robot state a posture is checked with (fills a moveit_msgs/RobotState)."""
+
+    names: List[str]
+    positions: List[float]
+    is_diff: bool
+
+
+def validity_state(arm_joints: Sequence[str], q: Sequence[float],
+                   extra: Dict[str, float]) -> ValidityState:
+    """
+    Return the state to ask MoveIt's validity check about posture ``q``: a diff.
+
+    Only the arm's joints and the extra joints the keep-out model reads (the gripper) are
+    given; everything else, the base's pose on a driven base among it, is move_group's current
+    state. As a diff, the attached bodies stay attached (a complete state clears them), as the
+    reset node's requests do.
+    """
+    if len(arm_joints) != len(q):
+        raise ValueError(f'{len(arm_joints)} arm joints but {len(q)} values')
+    return ValidityState(names=list(arm_joints) + list(extra),
+                         positions=[float(x) for x in q] + [float(v) for v in extra.values()],
+                         is_diff=True)
