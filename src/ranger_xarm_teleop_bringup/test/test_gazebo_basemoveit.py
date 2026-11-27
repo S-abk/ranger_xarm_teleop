@@ -218,7 +218,9 @@ def test_after_a_drive_every_frame_has_one_parent_and_move_group_plans_in_odom(s
     assert roots(parents) == ['odom'], roots(parents)
     base = transform(probe, 'odom', 'base_footprint')
     assert math.hypot(base.translation.x, base.translation.y) > 0.5, 'the base did not drive'
-    assert abs(math.degrees(yaw(base.rotation))) > 20.0, 'the base did not turn'
+    heading = yaw(base.rotation)
+    heading = math.atan2(math.sin(heading), math.cos(heading))
+    assert abs(math.degrees(heading)) > 20.0, 'the base did not turn'
     scene = planning_scene(probe)
     frames = {t.header.frame_id for t in scene.fixed_frame_transforms}
     assert frames == {'odom'}, frames                       # the planning frame

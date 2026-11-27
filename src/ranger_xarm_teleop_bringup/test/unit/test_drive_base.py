@@ -53,8 +53,10 @@ def test_no_refusal_without_those_arguments():
     assert db.refused_arguments([], db.NOT_OFFERED) is None
 
 
-def test_the_mock_refuses_drive_base_only():
-    assert db.refused_arguments(['drive_base'], db.MOCK_NOT_OFFERED).startswith('refused: drive')
+def test_the_mock_refuses_drive_base_only_with_its_own_reason():
+    text = db.refused_arguments(['drive_base'], db.MOCK_NOT_OFFERED)
+    assert text.startswith('refused: drive_base:=') and 'never drives one' in text
+    assert 'set from base' not in text
     assert db.refused_arguments(['planning_frame'], db.MOCK_NOT_OFFERED) is None
 
 

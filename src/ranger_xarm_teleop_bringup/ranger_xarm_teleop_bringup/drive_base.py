@@ -43,15 +43,19 @@ NOT_OFFERED = {
                       'driven base (odom) and does not offer the choice',
     'obstacle_map': "this stack does not start MoveIt's obstacle map",
 }
-MOCK_NOT_OFFERED = ('drive_base',)
+MOCK_NOT_OFFERED = {
+    'drive_base': "the driven base's semantic description is for the simulated base; the mock "
+                  'never drives one',
+}
 
 
-def refused_arguments(given: Iterable[str], names: Iterable[str]) -> Optional[str]:
-    """Return the refusal for the ``names`` among the ``given`` launch arguments (None: none)."""
-    found = [name for name in names if name in set(given)]
+def refused_arguments(given: Iterable[str], reasons: Dict[str, str]) -> Optional[str]:
+    """Return the refusal for the ``reasons``' names among the ``given`` arguments (None: none)."""
+    present = set(given)
+    found = [name for name in reasons if name in present]
     if not found:
         return None
-    return ('refused: ' + '; '.join(f'{name}:= is not an argument here ({NOT_OFFERED[name]})'
+    return ('refused: ' + '; '.join(f'{name}:= is not an argument here ({reasons[name]})'
                                     for name in found))
 
 

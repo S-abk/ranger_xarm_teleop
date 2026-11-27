@@ -765,8 +765,9 @@ the safety gate: driving the base is hold-to-drive.
   set from `base` only, refused without `simulation` and `base`), so it follows move_group's
   planning scene, and the session sidecar records it. With `base:=false` nothing of this is
   passed: move_group and Servo keep the shipped `ranger_xarm.srdf` and the planning frame
-  `world`. `teleop_sim.launch.py` refuses `drive_base:=`, `planning_frame:=` and
-  `obstacle_map:=` on its command line: they would reach move_group's launch file unseen. This
+  `world`. `teleop_sim.launch.py` refuses `drive_base`, `planning_frame` and `obstacle_map`
+  when they are set for it, on its command line or by a launch file that includes it: they would
+  reach move_group's launch file unseen. Start the simulator as its own launch. This
   stack follows the workspace's default (`odom`) and does not offer the choice. With
   `start_moveit:=false base:=true`, Servo still loads the driven base's file, so a move_group
   started elsewhere must be started with `drive_base:=true`. Plan and execute arm motion only
