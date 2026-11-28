@@ -5,7 +5,8 @@
 # figure takes the worst of those bounds. Copy it OUTSIDE any checkout, give every value,
 # delete the `template: true` line, and pass your copy as stability_mass_file.
 #
-# Units: kg, m (com in the link's own frame), N/m, N s/m. `plus` and `minus` are absolute.
+# Units: kg, m (com in the link's own frame), N/m, N s/m. `plus` and `minus` are absolute;
+# a mass may give `fraction: 0.2` instead (plus and minus 20 % of the mass in force).
 # In `bodies`, `value` is optional (absent: the description's value); the bounds are not.
 # Anything unknown or missing is refused with its key named. The model in force is
 # fingerprinted and recorded with every episode.

@@ -155,12 +155,36 @@ def test_a_body_is_corrected_and_one_is_added_to_a_link():
         'plus': 0, 'minus': 0}, 'com': {'value': [0, 0, 0], 'bound': 0}}}}), 'missing'),
     (lambda d: d['suspension']['stiffness'].update({'minus': 20000.0}), 'exceeds|above 0'),
     (lambda d: d['suspension'].update({'travel': 1}), 'unknown key'),
+    (lambda d: d['bodies']['chassis']['mass'].update({'fraction': 0.2}), 'not both'),
+    (lambda d: d['bodies']['chassis'].update({'mass': {'fraction': 1.0}}), 'below 1'),
+    (lambda d: d['bodies']['chassis'].update({'mass': {'fraction': -0.1}}), 'below 0'),
+    (lambda d: d['suspension'].update({'stiffness': {'fraction': 0.1}}), 'unknown key'),
+    (lambda d: d.update({'added': {'thing': {'parent': 'arm_link2', 'mass': {
+        'fraction': 0.1}, 'com': {'value': [0, 0, 0], 'bound': 0}}}}), 'missing'),
 ])
 def test_a_wrong_mass_file_is_refused_naming_the_key(change, match):
     data = copy.deepcopy(MASS_FILE)
     change(data)
     with pytest.raises(sm.MassFileError, match=match):
         parse(data)
+
+
+def test_a_mass_bound_given_as_a_fraction_is_the_absolute_bound_it_stands_for():
+    absolute = parse(MASS_FILE)
+    data = copy.deepcopy(MASS_FILE)
+    share = MASS_FILE['bodies']['chassis']['mass']['plus'] / CHASSIS_KG
+    data['bodies']['chassis']['mass'] = {'fraction': share}
+    by_fraction = parse(data)
+    assert by_fraction.fingerprint == absolute.fingerprint
+    assert [b.mass for b in by_fraction.bodies] == [b.mass for b in absolute.bodies]
+    # Of the mass in force: the file's own value when it gives one.
+    data['bodies']['chassis']['mass'] = {'value': 45.0, 'fraction': 0.1}
+    chassis = next(b for b in parse(data).bodies if b.body.link == 'chassis')
+    assert chassis.mass == sm.Bound(45.0, 4.5, 4.5)
+    data['added'] = {'thing': {'parent': 'arm_link2', 'mass': {'value': 2.0, 'fraction': 0.25},
+                               'com': {'value': [0, 0, 0], 'bound': 0}}}
+    thing = next(b for b in parse(data).bodies if b.body.name == 'thing')
+    assert thing.mass == sm.Bound(2.0, 0.5, 0.5)
 
 
 def test_an_empty_file_and_a_simulation_only_file_outside_simulation_are_refused():
