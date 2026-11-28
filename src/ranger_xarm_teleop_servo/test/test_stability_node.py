@@ -24,11 +24,13 @@ import math
 import os
 import subprocess
 import time
+import xml.etree.ElementTree as ElementTree
 
 from ament_index_python.packages import get_package_share_directory
 from control_msgs.msg import DynamicJointState, InterfaceValue
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
+import numpy as np
 import pytest
 from ranger_xarm_teleop_interfaces.msg import StabilityState
 from ranger_xarm_teleop_servo import stability_node
@@ -54,6 +56,74 @@ PARAMS = {'cutoff_hz': 15.0, 'tilt_tau_s': 3.0, 'joint_timeout_s': 0.5,
           'stop_turn_decel_rad_s2': 3.5, 'wheel_links': WHEELS, 'tilt_topic': '/imu',
           'imu_frame': 'imu'}
 G = 9.80665
+
+
+def _transform(element):
+    """Return the 4 x 4 transform of an element's ``<origin>`` (identity when absent)."""
+    t = np.eye(4)
+    o = element.find('origin')
+    if o is None:
+        return t
+    x, y, z = (float(v) for v in o.get('xyz', '0 0 0').split())
+    r, p, w = (float(v) for v in o.get('rpy', '0 0 0').split())
+    rx = np.array([[1, 0, 0], [0, math.cos(r), -math.sin(r)], [0, math.sin(r), math.cos(r)]])
+    ry = np.array([[math.cos(p), 0, math.sin(p)], [0, 1, 0], [-math.sin(p), 0, math.cos(p)]])
+    rz = np.array([[math.cos(w), -math.sin(w), 0], [math.sin(w), math.cos(w), 0], [0, 0, 1]])
+    t[:3, :3], t[:3, 3] = rz @ ry @ rx, (x, y, z)
+    return t
+
+
+def static_figure(urdf, q):
+    """
+    Return the static figure at rest on a level floor, and its edge's name.
+
+    The figure: the distance (m) from the point under the centre of mass to the nearest edge of
+    the wheel contacts. A short forward kinematics of the description written here, so that the
+    expectation does not come from the monitor's own model: every link's inertial at the joint
+    values ``q`` (others 0, a mimic joint following its source), the contacts under the wheel
+    centres.
+    """
+    root = ElementTree.fromstring(urdf)
+    links = {link.get('name'): link for link in root.findall('link')}
+    joints = {j.find('child').get('link'): j for j in root.findall('joint')}
+    poses = {}
+
+    def pose(link):
+        if link not in poses:
+            j = joints.get(link)
+            if j is None:
+                poses[link] = np.eye(4)
+                return poses[link]
+            m = j.find('mimic')
+            v = (float(m.get('multiplier', 1)) * q.get(m.get('joint'), 0.0)
+                 + float(m.get('offset', 0))) if m is not None else q.get(j.get('name'), 0.0)
+            a = j.find('axis')
+            k = np.array([float(x) for x in (a.get('xyz') if a is not None else '1 0 0').split()])
+            motion = np.eye(4)
+            if j.get('type') in ('revolute', 'continuous'):
+                kx = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+                motion[:3, :3] = np.eye(3) + math.sin(v) * kx + (1 - math.cos(v)) * kx @ kx
+            elif j.get('type') == 'prismatic':
+                motion[:3, 3] = k * v
+            poses[link] = pose(j.find('parent').get('link')) @ _transform(j) @ motion
+        return poses[link]
+
+    base = np.linalg.inv(pose('base_link'))
+    weighted = [(float(link.find('inertial/mass').get('value')),
+                 (base @ pose(name) @ _transform(link.find('inertial')))[:2, 3])
+                for name, link in links.items() if link.find('inertial/mass') is not None]
+    com = sum(m * p for m, p in weighted) / sum(m for m, _ in weighted)
+    contacts = [(base @ pose(w))[:2, 3] for w in WHEELS]
+    centre = np.mean(contacts, axis=0)
+    contacts.sort(key=lambda c: math.atan2(c[1] - centre[1], c[0] - centre[0]))
+    figures = []
+    for a, b in zip(contacts, contacts[1:] + contacts[:1]):
+        inward = np.array([a[1] - b[1], b[0] - a[0]]) / np.linalg.norm(b - a)
+        angle = math.degrees(math.atan2(-inward[1], -inward[0])) % 360.0
+        name = ('FRONT', 'FRONT_LEFT', 'LEFT', 'REAR_LEFT', 'REAR', 'REAR_RIGHT', 'RIGHT',
+                'FRONT_RIGHT')[int((angle + 22.5) % 360.0 // 45.0)]
+        figures.append((float(np.dot(com - a, inward)), name))
+    return min(figures)
 
 
 @pytest.fixture(scope='module')
@@ -203,13 +273,14 @@ def test_the_node_publishes_its_state_only_and_asks_nothing(rig):
                     '/imu', '/tf', '/tf_static', '/parameter_events'}
 
 
-def test_a_figure_at_rest_from_the_wheeled_description(rig):
+def test_a_figure_at_rest_from_the_wheeled_description(rig, wheeled_description):
     r = rig()
     s = r.run(9.5)
     assert s.available and s.reason == StabilityState.REASON_OK, s.reason_text
     assert s.tilt_source == StabilityState.TILT_MEASURED
-    assert s.margin_m == pytest.approx(0.1835, abs=0.003)          # stage 1: 0.1837 static
-    assert s.edge == StabilityState.EDGE_LEFT
+    margin, edge = static_figure(wheeled_description, dict(zip(ARM, READY)))
+    assert s.margin_m == pytest.approx(margin, abs=0.003)
+    assert s.edge == getattr(StabilityState, f'EDGE_{edge}')
     assert s.margin_pessimistic_m < s.margin_m
     assert s.stop_decel_m_s2 == 1.0 and s.stop_turn_decel_rad_s2 == 3.5
     assert len(s.model_sha256) == 64 and 'force on the tool' in s.note
