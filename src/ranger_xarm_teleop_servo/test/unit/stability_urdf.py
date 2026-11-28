@@ -15,10 +15,10 @@
 A small wheeled robot description for the stability monitor's unit tests (generic names).
 
 ``base_footprint`` (root, on the floor) -> ``base_link`` 0.3 m up -> a 40 kg chassis; four
-corners at (+-0.25, +-0.2) with a sprung vertical joint (20 kN/m, reference -0.01 m, damping
-500 N s/m), a steering joint and a 3 kg sphere wheel of radius 0.1 whose contact is on the
-floor (base_link z = -0.3); a two-joint arm on a mount at (0, 0, 0.4) with a mimic finger; an
-IMU link at (-0.3, 0, 1.1).
+corners at (+-0.25, +-0.2) with a sprung vertical joint (20 kN/m, reference -0.01 m unless
+given per axle, damping 500 N s/m), a steering joint and a 3 kg sphere wheel of radius 0.1
+whose contact is on the floor (base_link z = -0.3); a two-joint arm on a mount at (0, 0, 0.4)
+with a mimic finger; an IMU link at (-0.3, 0, 1.1).
 """
 
 WHEELS = ('front_left_wheel', 'front_right_wheel', 'rear_left_wheel', 'rear_right_wheel')
@@ -33,8 +33,13 @@ def _inertial(mass, xyz='0 0 0', i=0.01):
             f'<inertia ixx="{i}" ixy="0" ixz="0" iyy="{i}" iyz="0" izz="{i}"/></inertial>')
 
 
-def make_urdf(steer_offset=0.0, springs=True, wheel_collision='sphere'):
-    """Return the description text; ``steer_offset`` puts each wheel ahead of its steer axis."""
+def make_urdf(steer_offset=0.0, springs=True, wheel_collision='sphere', references=(-0.01, -0.01)):
+    """
+    Return the description text.
+
+    ``steer_offset`` puts each wheel ahead of its steer axis; ``references`` are the springs'
+    references at the front and the rear corners.
+    """
     parts = ['<robot name="test_robot">',
              '<link name="base_footprint"/>',
              '<link name="base_link"/>',
@@ -51,8 +56,9 @@ def make_urdf(steer_offset=0.0, springs=True, wheel_collision='sphere'):
                      '<limit lower="-0.015" upper="0.025" effort="5000" velocity="2"/>'
                      '<dynamics damping="500" friction="0"/></joint>')
         if springs:
+            reference = references[0] if name.startswith('front') else references[1]
             parts.append(f'<gazebo reference="{name}_suspension_joint">'
-                         '<springReference>-0.01</springReference>'
+                         f'<springReference>{reference}</springReference>'
                          '<springStiffness>20000.0</springStiffness></gazebo>')
         parts.append(f'<link name="{name}_steer">{_inertial(STEER_KG)}</link>')
         parts.append(f'<joint name="{name}_steer_joint" type="revolute">'
