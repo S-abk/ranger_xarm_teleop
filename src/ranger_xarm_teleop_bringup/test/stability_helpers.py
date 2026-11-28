@@ -18,9 +18,10 @@ The stability monitor's reference in Gazebo: the wheels' loads, and the rule INV
   sprung joint carries a gz spring and damper, so its load is A k (x - x_ref) + c xdot + B, with
   k, x_ref and c read from the description. A and B are fitted on the run's own rest windows
   (the four loads sum to the weight and their centre of pressure sits under the description's
-  centre of mass); measured before this module: the simulated springs read as about 0.88 k,
-  with the running model's masses equal to the description's. The figure from the loads is
-  the signed distance of their centre of pressure to the nearest edge of the contacts' hull.
+  centre of mass); measured: the simulated springs read as about 0.88-0.91 k (0.888 k with the
+  description's present masses), with the running model's masses equal to the description's.
+  The figure from the loads is the signed distance of their centre of pressure to the nearest
+  edge of the contacts' hull.
   Once a wheel pair has lifted it reads about 0 and cannot go lower.
 * **The rule (frozen before this module ran):** per manoeuvre, the monitor's smallest nominal
   figure within +-0.1 s of the loads' smallest lies in [loads - 0.12, loads + 0.01] m; the
