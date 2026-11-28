@@ -366,8 +366,9 @@ def test_the_figure_agrees_with_the_wheels_loads(stack):
     drive(stack, -0.5, 0, 0, 3.5, 'bar back 0.5 ready', step=True)
     drive(stack, 0.5, 0, 0, 3.0, 'bar 0.5 ready', step=True)
     # A 10 degree side ramp, the arm downhill. Down it at 0.4 m/s the simulated robot (estimated
-    # masses) tips over in its stop: that is a tip case, not a judged manoeuvre; 0.3 m/s is the
-    # highest of 0.3, 0.2 and 0.1 whose wheel loads stay at or above -0.02 m.
+    # masses) tips over after its stop: that is a tip case, not a judged manoeuvre; 0.3 m/s is the
+    # highest of 0.3, 0.2 and 0.1 whose wheel loads stay at or above -0.02 m, a criterion that
+    # could not see a lifted pair (the loads' floor lies above zero then: stability_helpers).
     x, y = rec.position()
     spawn('ramp10', side_ramp('ramp10', 10.0, y + 0.8, x))
     rec.sleep(1.0)

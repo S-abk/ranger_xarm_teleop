@@ -808,9 +808,12 @@ the description's earlier masses; with the present ones, in one run, 0.001-0.007
 there and up to 0.07 m safer at other instants), the cause not shown: the monitor was not shown
 to follow a step under a wheel. There only the pessimistic figure is held to the loads (it read
 at least 0.023 m below them in the earlier runs, 0.077 m in the run with the present masses).
-Every figure in this section comes from the simulated robot, whose masses are the
-description's estimates; none describes a real robot, whose suspension is stiffer than the
-description's and whose lean at rest (5 mm to one side, measured on one robot) is not
+On the 10 degree side ramp with the arm downhill, the wheels' loads reached minima equal, to
+within a few millimetres, to the value the load reference gives with the uphill pair hanging at
+its droop stop, while the monitor read below zero; the reference cannot show whether rightly,
+so those windows are not evidence of agreement. Every figure in this section comes from the
+simulated robot, whose masses are the description's estimates; none describes a real robot,
+whose suspension can be stiffer than the description's and whose own lean at rest is not
 modelled.
 
 - **The figure:** the signed distance (m) from the point where the floor's reaction acts (the

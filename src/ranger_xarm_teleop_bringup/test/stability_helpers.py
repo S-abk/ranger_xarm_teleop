@@ -21,8 +21,11 @@ The stability monitor's reference in Gazebo: the wheels' loads, and the rule INV
   centre of mass); measured: the simulated springs read as about 0.88-0.91 k (0.888 k with the
   description's present masses), with the running model's masses equal to the description's.
   The figure from the loads is the signed distance of their centre of pressure to the nearest
-  edge of the contacts' hull.
-  Once a wheel pair has lifted it reads about 0 and cannot go lower.
+  edge of the contacts' hull. The fit knows nothing of the droop stop: a corner hanging at its
+  stop carries nothing, yet reads A k (x_stop - x_ref) + B, which is not zero (B alone when its
+  reference sits at the stop; more, a positive load, when its reference lies past the stop).
+  So once a wheel pair has lifted the figure has a floor and cannot go lower; the floor is
+  above zero when a reference lies past the droop stop, and a lifted pair does not show.
 * **The rule (frozen before this module ran):** per manoeuvre, the monitor's smallest nominal
   figure within +-0.1 s of the loads' smallest lies in [loads - 0.12, loads + 0.01] m; the
   pessimistic figure never above the nominal; the stop figure judged only for stops from at
