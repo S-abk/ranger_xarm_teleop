@@ -13,10 +13,12 @@
 #   tilt_tau_s             the tilt filter's accelerometer time constant
 #   stop_decel_m_s2        the stop the figure "if the base stopped now" assumes: the simulated
 #   stop_turn_decel_rad_s2 base's controller brakes at about 1.0 m/s2 and ends a turn in
-#                          0.11-0.14 s from 0.4 rad/s. Its parking-brake halt after 0.3 s and the
-#                          steering swinging back in a sideways stop are not modelled: above
-#                          0.25 m/s the stop figure reads safer than the wheel loads (up to
-#                          0.16 m in the simulated runs). The real base's stop is unmeasured.
+#                          0.11-0.14 s from 0.4 rad/s (measured with the description's earlier
+#                          masses). Its parking-brake halt after 0.3 s and the steering swinging
+#                          back in a sideways stop are not modelled: above 0.25 m/s the stop
+#                          figure reads safer than the wheel loads (up to 0.16 m in the simulated
+#                          runs with the earlier masses, 0.06 m in one with the present ones).
+#                          The real base's stop is unmeasured.
 /**:
   ros__parameters:
     base_frame: base_link

@@ -253,8 +253,21 @@ class Monitor:
         coords = np.array([tf[model.joints[sp.joint].child][:3, 3]
                            for sp in springs]).reshape(-1, 3)
         damping = np.array([sp.damping for sp in springs])
+        # Each corner's own reference: at the design position (joint value 0) its spring pushes
+        # the body up by stiffness x (0 - reference) along the joint's axis. Different references
+        # carry different forces, a moment the static lean balances (at the description's
+        # stiffness; it scales with the stiffness, like the springs' moments).
+        preload = []
+        for sp in springs:
+            joint = model.joints[sp.joint]
+            axis = tf[joint.parent][:3, :3] @ joint.origin[:3, :3] @ joint.axis
+            preload.append(-sp.stiffness * sp.reference * axis[2])
+        preload = np.array(preload)
+        moment = np.zeros(2)
+        if springs:
+            moment = (preload[:, None] * (coords[:, :2] - coords[:, :2].mean(axis=0))).sum(axis=0)
         return {'sprung': sprung, 'k_roll': k_roll, 'k_pitch': k_pitch, 'corners': corners,
-                'spring_xyz': coords, 'spring_damping': damping}
+                'spring_xyz': coords, 'spring_damping': damping, 'preload_moment': moment}
 
     def on_joint_states(self, arrival: float, stamp: float, names: Sequence[str],
                         positions: Sequence[float], source_is_arm: bool = True) -> None:
@@ -588,9 +601,11 @@ class Monitor:
         """
         Return the body's static lean on its springs (rad, toward +x and +y) on a level floor.
 
-        The sprung centre of mass off the springs' centre leans the body toward it until the
-        springs' moment balances: angle = m g offset / (K - m g h). Rigid: none. ``shift``
-        moves the sprung centre of mass (x, y) first (a bound).
+        The sprung centre of mass off the springs' centre leans the body toward it, less the
+        moment of the springs' forces at the design position (each corner's own reference),
+        until the springs' moment balances: angle = (m g offset - M_ref) / (K - m g h). Equal
+        references carry no moment. Rigid: none. ``shift`` moves the sprung centre of mass
+        (x, y) first (a bound).
         """
         d = self._derived
         if not self.model.springs or math.isinf(d['k_roll']):
@@ -606,7 +621,8 @@ class Monitor:
             k_eff = k_axis * kf - ms * st.G * hs
             if k_eff <= 0.0:
                 raise ValueError('the springs cannot hold the body up (no stiffness left)')
-            out.append(ms * st.G * (c[axis] - coords[:, axis].mean()) / k_eff)
+            out.append((ms * st.G * (c[axis] - coords[:, axis].mean())
+                        - d['preload_moment'][axis] * kf) / k_eff)
         return out[0], out[1]
 
     def _level_pessimistic(self, posed, arrays, edges, a_arm, worst_sprung):

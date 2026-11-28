@@ -418,6 +418,53 @@ def test_without_a_tilt_source_the_static_lean_toward_the_centre_of_mass_counts(
     assert r.available and r.margin < 0.2 - c[1] - 1e-4      # leaning toward the arm's side
 
 
+def test_each_corners_spring_reference_sets_the_rest_pitch_without_a_tilt_source():
+    """
+    Swapping the front and rear references reverses the predicted rest pitch.
+
+    The arm points sideways (``feed``), so the centre of mass lies over the springs' centre fore
+    and aft and only the references pitch the body. With the IMU the measured tilt is used and
+    the references change nothing.
+    """
+    def result(references, tilt):
+        mon = sm.Monitor(config(tilt), simulation=True)
+        mon.set_description(make_urdf(references=references))
+        mon.set_mass_data(copy.deepcopy(MASS_FILE))
+        if tilt:
+            mon.set_imu_frame(np.eye(3), IMU_POS)
+        r = mon.cycle(feed(mon, 0.0, WARM if tilt else 1.0, imu=tilt))
+        assert r.available, r.reason_text
+        return r
+
+    rear_low = result((-0.01, -0.02), tilt=False)        # more force at the rear: nose down
+    front_low = result((-0.02, -0.01), tilt=False)
+    equal = result((-0.015, -0.015), tilt=False)
+    assert rear_low.tilt_source == sm.TILT_LEVEL_ASSUMED
+    assert rear_low.pitch_deg > 0.1
+    assert front_low.pitch_deg == pytest.approx(-rear_low.pitch_deg, abs=1e-9)
+    assert equal.pitch_deg == pytest.approx(0.0, abs=1e-9)
+    assert front_low.roll_deg == pytest.approx(rear_low.roll_deg, abs=1e-9)
+    # The references' moment scales with the stiffness, as the springs' own moment does: a file
+    # giving 8 kN/m leans the body as a description whose springs are 8 kN/m.
+    data = copy.deepcopy(MASS_FILE)
+    data['suspension']['stiffness'] = {'value': 8000.0, 'plus': 0.0, 'minus': 0.0}
+    plain = copy.deepcopy(MASS_FILE)
+    plain.pop('suspension')
+    pitches = []
+    for description, mass in ((make_urdf(references=(-0.01, -0.02)), data),
+                              (make_urdf(references=(-0.01, -0.02)).replace('20000.0', '8000.0'),
+                               plain)):
+        mon = sm.Monitor(config(False), simulation=True)
+        mon.set_description(description)
+        mon.set_mass_data(copy.deepcopy(mass))
+        pitches.append(mon.cycle(feed(mon, 0.0, 1.0, imu=False)).pitch_deg)
+    assert pitches[0] == pytest.approx(pitches[1], abs=1e-9)
+    measured = [result(refs, tilt=True) for refs in ((-0.01, -0.02), (-0.02, -0.01))]
+    assert measured[0].margin == measured[1].margin
+    assert measured[0].margin_pessimistic == measured[1].margin_pessimistic
+    assert measured[0].pitch_deg == measured[1].pitch_deg
+
+
 def test_after_an_imu_outage_the_filters_start_again_and_settle_before_a_figure():
     mon = ready()
     t = feed(mon, 0.0, WARM)

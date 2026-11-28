@@ -25,6 +25,7 @@ uncertainty, its own or the file's default. Format::
     default_uncertainty: {mass_fraction: 0.1, com_m: 0.02}
     bodies:                           # by link name of the description
       <link>: {mass: {value: 47.0, plus: 5.0, minus: 5.0}, com: {value: [x, y, z], bound: 0.05}}
+      <link>: {mass: {fraction: 0.2}, com: {bound: 0.05}}     # a mass bound as a fraction
     added:                            # fixed to an existing link
       <name>: {parent: <link>, mass: {value: 1.2, plus: 0.1, minus: 0.1},
                com: {value: [x, y, z], bound: 0.01}, inertia: [ixx, iyy, izz]}
@@ -33,9 +34,12 @@ uncertainty, its own or the file's default. Format::
       damping: {value: 570.0, plus: 171.0, minus: 171.0}
 
 Masses in kg, lengths in m (``com`` in the link's own frame), stiffness in N/m, damping in
-N s/m; ``plus`` and ``minus`` are absolute amounts. In ``bodies`` the ``value`` keys are
-optional (absent: the description's value); the uncertainty keys are required. Anything else
-is refused with the key named. The model in force is fingerprinted (``fingerprint``).
+N s/m; ``plus`` and ``minus`` are absolute amounts. A mass (in ``bodies`` and ``added``) may
+give ``fraction`` instead: plus and minus are that fraction (below 1) of the mass in force
+(the file's value, else the description's), and the fingerprint is that of the absolute form.
+In ``bodies`` the ``value`` keys are optional (absent: the description's value); the
+uncertainty keys are required. Anything else is refused with the key named. The model in force
+is fingerprinted (``fingerprint``).
 """
 
 from dataclasses import dataclass
@@ -121,14 +125,24 @@ def _keys(section, allowed, where: str, required=()) -> dict:
 
 
 def _bound(section, where: str, default_value: Optional[float], value_required: bool,
-           positive: bool = False) -> Bound:
-    _keys(section, ('value', 'plus', 'minus'), where,
-          required=('plus', 'minus') + (('value',) if value_required else ()))
+           positive: bool = False, fraction: bool = False) -> Bound:
+    by_fraction = fraction and isinstance(section, dict) and 'fraction' in section
+    _keys(section, ('value', 'plus', 'minus') + (('fraction',) if fraction else ()), where,
+          required=(() if by_fraction else ('plus', 'minus'))
+          + (('value',) if value_required else ()))
     value = _number(section['value'], f'{where}.value') if 'value' in section else default_value
     if value is None:
         raise MassFileError(f'{where}.value: required (nothing to correct)')
-    plus = _number(section['plus'], f'{where}.plus')
-    minus = _number(section['minus'], f'{where}.minus')
+    if by_fraction:
+        if 'plus' in section or 'minus' in section:
+            raise MassFileError(f'{where}: give fraction, or plus and minus, not both')
+        share = _number(section['fraction'], f'{where}.fraction')
+        if share >= 1.0:
+            raise MassFileError(f'{where}.fraction: must be below 1')
+        plus = minus = share * value
+    else:
+        plus = _number(section['plus'], f'{where}.plus')
+        minus = _number(section['minus'], f'{where}.minus')
     if minus > value:
         raise MassFileError(f'{where}: minus {minus:g} exceeds the value {value:g}')
     if positive and not value - minus > 0.0:
@@ -185,7 +199,8 @@ def parse(data, model: RobotModel, simulation: bool) -> MassModel:
         if b.link in corrections:
             where = f'bodies.{b.link}'
             entry = _keys(corrections[b.link], ('mass', 'com'), where, required=('mass', 'com'))
-            mass = _bound(entry['mass'], f'{where}.mass', b.mass, False, positive=True)
+            mass = _bound(entry['mass'], f'{where}.mass', b.mass, False, positive=True,
+                          fraction=True)
             com, com_bound = _com(entry['com'], f'{where}.com', b.com, False)
             bodies.append(UncertainBody(Body(b.name, b.link, mass.value, com, b.inertia), mass,
                                         com_bound))
@@ -205,7 +220,8 @@ def parse(data, model: RobotModel, simulation: bool) -> MassModel:
         if entry['parent'] not in model.links:
             raise MassFileError(f'{where}.parent: {entry["parent"]!r} is not a link of the '
                                 'description')
-        mass = _bound(entry['mass'], f'{where}.mass', None, True, positive=True)
+        mass = _bound(entry['mass'], f'{where}.mass', None, True, positive=True,
+                      fraction=True)
         com, com_bound = _com(entry['com'], f'{where}.com', None, True)
         inertia = np.zeros((3, 3))
         if 'inertia' in entry:

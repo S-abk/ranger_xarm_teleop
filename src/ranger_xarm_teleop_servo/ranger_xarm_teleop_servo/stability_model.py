@@ -32,7 +32,9 @@ or adds bodies (``stability_mass.py``).
   wheel does not move its centre).
 * **Suspension.** A prismatic joint carrying a gz spring (``springStiffness`` and
   ``springReference`` in its ``<gazebo reference>``) is a spring; its ``<dynamics damping>`` is
-  the damper. Roll and pitch stiffness follow from the springs' positions.
+  the damper. Roll and pitch stiffness follow from the springs' positions. Each corner keeps
+  its own reference (the joint value where its force is zero): the force it carries at the
+  design position.
 """
 
 from dataclasses import dataclass

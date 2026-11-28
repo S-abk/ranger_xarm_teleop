@@ -755,7 +755,9 @@ the safety gate: driving the base is hold-to-drive.
 - **The reset and the base:** the return to the ready posture is refused while the left grip
   is held, and a pull back on the right stick never turns the base. It does not wait for the
   base to have been at rest for 2 s, which the robot workspace asks of every MoveIt motion with
-  the base running. In simulation the base stops before the reset's 0.5 s dwell ends.
+  the base running. In simulation (the description's estimated masses) the base came to rest
+  0.17-0.40 s after the zero command when stopped by a release or a stop trigger, before the
+  reset's 0.5 s dwell ends.
 - **MoveIt with the base driven:** `teleop_sim.launch.py base:=true` starts move_group for a
   driven base (`ranger_xarm_isaac` `moveit.launch.py drive_base:=true`, and no other argument).
   move_group then loads `ranger_xarm_mobile_base_wheels.srdf`: the shipped SRDF, plus a planar
@@ -801,9 +803,18 @@ the running graph stalled the teleop node's cycle for up to 414 ms in simulation
 **does not see a force on the tool** (the arm or the tool caught on something while the base
 drives): the arm reports no joint effort. Nor does it see the ground: it puts every wheel's
 contact under the wheel on a plane. Driving over a 2 cm bar in simulation, with the rear wheels
-crossing it, the figure read up to 0.04 m safer than the wheels' loads, the cause not shown:
-the monitor was not shown to follow a step under a wheel. There only the pessimistic figure was
-held to the loads (in the recorded runs it read at least 0.023 m below them).
+crossing it, the figure read up to 0.04 m safer than the wheels' loads at their lowest (with
+the description's earlier masses; with the present ones, in one run, 0.001-0.007 m below them
+there and up to 0.07 m safer at other instants), the cause not shown: the monitor was not shown
+to follow a step under a wheel. There only the pessimistic figure is held to the loads (it read
+at least 0.023 m below them in the earlier runs, 0.077 m in the run with the present masses).
+On the 10 degree side ramp with the arm downhill, the wheels' loads reached minima equal, to
+within a few millimetres, to the value the load reference gives with the uphill pair hanging at
+its droop stop, while the monitor read below zero; the reference cannot show whether rightly,
+so those windows are not evidence of agreement. Every figure in this section comes from the
+simulated robot, whose masses are the description's estimates; none describes a real robot,
+whose suspension can be stiffer than the description's and whose own lean at rest is not
+modelled.
 
 - **The figure:** the signed distance (m) from the point where the floor's reaction acts (the
   centre of pressure) to the nearest edge of the wheel contacts, with that edge named; negative
@@ -820,17 +831,20 @@ held to the loads (in the recorded runs it read at least 0.023 m below them).
   means a stop from this motion cannot roll it over (a sufficient condition only). The real
   base's stop is unmeasured; the simulated controller also halts after 0.3 s and swings its
   steering back in a sideways stop, which the stop figure does not model (above 0.25 m/s it
-  read up to 0.16 m safer than the wheel loads in simulation).
+  read up to 0.16 m safer than the wheel loads in simulation with the description's earlier
+  masses, up to 0.06 m in one run of the agreement test with the present ones).
 - **Settling:** after the monitor starts, or after a gap of more than 0.1 s in the IMU or the
   joints, its filters start again; the tilt filter needs three of its time constants (about 9 s
   with the simulation settings), and the state says "settling" until then.
 - **Tilt source:** an IMU on `tilt_topic`. Gazebo bridges its IMU only when started with
   `sensors:=true`; without it the state says "no tilt" and names that argument. With no tilt
   source configured, a figure only while the base is at rest ("level floor assumed", the
-  pessimistic figure on the assumed slope bound `assumed_slope_deg`).
+  pessimistic figure on the assumed slope bound `assumed_slope_deg`); the body's lean on its
+  springs then comes from the description, each corner with its own spring reference.
 - **The mass file** (`stability_mass_file`, outside any checkout): corrects a body of the
   description, adds one (a tool, a carried object, fixed to a link), and gives every value a
-  bound; anything unknown or missing is refused by name. Start from
+  bound (a mass's bound in kg, or as a fraction of the mass); anything unknown or missing is
+  refused by name. Start from
   `config/stability_mass_TEMPLATE.yaml`. The simulation wrappers pass
   `config/stability_mass_SIMULATION_ONLY.yaml`, which corrects no mass. The model in force is
   fingerprinted (`model_sha256` in the state); each episode records the state and the mass
